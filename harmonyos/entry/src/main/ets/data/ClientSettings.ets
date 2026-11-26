@@ -11,6 +11,14 @@ export class ClientSettings {
     const value = this.storage.getSync('client_id', '');
     return typeof value === 'string' ? value : '';
   }
+  loadMode(): string {
+    return this.storage.getSync('media_mode', 'show') === 'movie' ? 'movie' : 'show';
+  }
+  async saveMode(mode: string): Promise<void> {
+    if (mode !== 'movie' && mode !== 'show') { throw new Error('Invalid media mode'); }
+    await this.storage.put('media_mode', mode);
+    await this.storage.flush();
+  }
   async save(value: string): Promise<void> {
     await this.storage.put('client_id', value);
     await this.storage.flush();

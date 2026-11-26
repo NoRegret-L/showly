@@ -12,7 +12,7 @@ import { syncSelectedMedia, reconcilePendingMedia } from '../data/TraktMediaSync
 import { checkpointEpisodes, checkpointMedia, adoptEpisodeCloud, adoptMediaCloud } from '../data/ThreeWaySync';
 import { threeWayLabel } from '../model/ThreeWay';
 import { NextShow, sortNextShows } from '../data/NextShows';
-import { CalendarSnapshot, CalendarEntry, readCalendar, calendarWindow } from '../data/TraktCalendar';
+import { CalendarSnapshot, CalendarEntry, readCalendar, calendarWindow, localDay } from '../data/TraktCalendar';
 import { PersonalMovie, PersonalMovieSnapshot, readPersonalMovies, readPersonalMovieDate } from '../data/TraktLibrary';
 import { MovieCalendarItem, filterMovies, moviePage } from '../data/MovieCalendar';
 import { searchTrakt } from '../data/TraktSearch';
@@ -24,6 +24,7 @@ import { CloudLibrary, ShowProgress, readCloudLibrary, mergeNewTitles, readActiv
 import { projectLibrary, projectDetail } from '../data/LibraryProjection';
 import { allowLocalScope } from '../model/EffectiveState';
 import { hasTrackingEvidence } from '../model/PersonalLibrary';
+import { CollectionGroup, GroupEntry, MovieDate, normalizeMode, progressTabs, collectionRows, collectionGroups, groupEntries, pageGroups, releasedWatchlist } from '../model/NavigationModel';
 import { MediaDetail, canReadDetails, readDetails, cachePoster, clearDetailMemory } from '../data/TraktDetails';
 import { DiscoverItem, readDiscover } from '../data/TraktDiscover';
 import { EpisodeProgress, SeasonProgress, SeriesProgress, ChineseText, readSeriesProgress, readChinese } from '../data/TraktProgress';
@@ -51,6 +52,13 @@ struct Index {
   @State upstreamInfo?: UpstreamInfo = undefined;
   @State upstreamStatus: string = '';
   @State tab: string = 'progress';
+  @State mediaMode: string = 'show';
+  @State modeBusy: boolean = false;
+  @State modeStatus: string = '';
+  private returnTab: string = 'progress';
+  @State movieProgressQuery: string = '';
+  @State movieProgressPage: number = 1;
+  @State collectionQuery: string = '';
   private episodeStore?: EpisodeStore;
   @State @Watch('onRecoveryGateChanged') syncBusy: boolean = false;
   @State syncStatus: string = '';
@@ -104,7 +112,6 @@ struct Index {
   @State nextFilter: string = 'remaining';
   @State nextQuery: string = '';
   @State nextPage: number = 1;
-  @State calendarKind: string = 'show';
   @State calendarWeek: number = 0;
   @State calendarPage: number = 1;
   @State calendarBusy: boolean = false;
@@ -131,7 +138,7 @@ struct Index {
   @State trackingPage: number = 1;
   @State trackingQuery: string = '';
   private translationCache: Map<string, ChineseText> = new Map<string, ChineseText>();
-  @State collectionFilter: string = 'queue';
+  @State collectionFilter: string = 'mine';
   @State collectionPage: number = 1;
   @State collectionGrid: boolean = true;
   @State collectionCards: DiscoverItem[] = [];
@@ -147,7 +154,6 @@ struct Index {
   @State chineseOverview: string = '';
   @State translationBusy: boolean = false;
   @State translationStatus: string = '';
-  @State discoverKind: string = 'movie';
   @State discoverMode: string = 'trending';
   @State discoverItems: DiscoverItem[] = [];
   @State discoverPage: number = 1;
@@ -216,6 +222,7 @@ struct Index {
     try {
       this.settings = new ClientSettings(context);
       this.clientId = this.settings.load();
+      this.mediaMode = normalizeMode(this.settings.loadMode());
       this.draftId = this.clientId;
       this.configuring = !this.clientId;
       if (!this.clientId) { this.tab = 'account'; }
@@ -1986,6 +1993,7 @@ struct Index {
       this.cloudLocalAllowed = result.localAllowed;
       this.nextShows = result.next;
       this.nextPage = 1;
+      this.movieProgressPage = 1;
       this.nextStatus = result.missing ? '部分剧集资料尚未补齐。' : '';
       this.libraryEvidence = result.evidence;
       this.resetCollection();
@@ -1995,6 +2003,9 @@ struct Index {
       this.cloudStatus = (this.cloudFresh ? '云端版本已核对' : '使用上次缓存（非实时）') +
         ' · 缺少目录 ' + result.missing + ' 部 · 下载失败 ' + result.failed + ' 部；未写入 Trakt。' + (result.localAllowed ? '' : ' 当前账户只读；本机库未绑定或属于另一账户。');
       if (this.tab === 'library' && this.collectionGrid && !this.selectedMedia) { this.loadCollectionPosters(); }
+      if (this.tab === 'progress' && !this.selectedMedia && this.mediaMode === 'movie' && !this.movieCalendarCurrent()) {
+        await this.loadCalendar();
+      }
     } catch (error) {
       if (!this.cloud || !traktAuth.isCurrent(clientId, this.cloud.generation)) { this.clearCloud(); }
       this.libraryNotice = '更新未完成，请重试。';
@@ -2518,7 +2529,7 @@ struct Index {
     this.discoverBusy = true;
     this.discoverStatus = '正在读取影视榜单…';
     try {
-      const result = await readDiscover(clientId, this.discoverKind, this.discoverMode, page);
+      const result = await readDiscover(clientId, this.mediaMode, this.discoverMode, page);
       if (revision !== this.discoverRevision || clientId !== this.clientId) {
         return;
       }
@@ -2565,12 +2576,11 @@ struct Index {
     }
   }
 
-  private changeDiscover(kind: string, mode: string): void {
-    if (kind === this.discoverKind && mode === this.discoverMode) {
+  private changeDiscover(mode: string): void {
+    if (mode === this.discoverMode) {
       return;
     }
     this.resetDiscover();
-    this.discoverKind = kind;
     this.discoverMode = mode;
     this.loadDiscover();
   }
@@ -2599,25 +2609,15 @@ struct Index {
   @Builder
   discoverView() {
     Column({ space: 12 }) {
-      Text('发现').fontSize(25).fontWeight(FontWeight.Bold).width('100%')
+      Text(this.mediaMode === 'show' ? '发现剧集' : '发现电影').fontSize(25).fontWeight(FontWeight.Bold).width('100%')
       if (!this.clientId) {
         Text('请先在账户页配置自己的 Trakt Client ID。').fontSize(14)
         Button('前往账户').onClick(() => { this.tab = 'account'; })
       } else {
-        Row({ space: 8 }) {
-          Button('电影').layoutWeight(1)
-            .backgroundColor(this.discoverKind === 'movie' ? $r('app.color.showly_accent') : $r('app.color.showly_muted_surface'))
-            .fontColor(this.discoverKind === 'movie' ? $r('app.color.showly_on_accent') : $r('app.color.showly_text'))
-            .onClick(() => { this.changeDiscover('movie', this.discoverMode); })
-          Button('剧集').layoutWeight(1)
-            .backgroundColor(this.discoverKind === 'show' ? $r('app.color.showly_accent') : $r('app.color.showly_muted_surface'))
-            .fontColor(this.discoverKind === 'show' ? $r('app.color.showly_on_accent') : $r('app.color.showly_text'))
-            .onClick(() => { this.changeDiscover('show', this.discoverMode); })
-        }.width('100%')
         Row({ space: 6 }) {
           this.discoverModeButton('趋势', 'trending')
           this.discoverModeButton('热门', 'popular')
-          this.discoverModeButton('即将上映', 'anticipated')
+          this.discoverModeButton(this.mediaMode === 'movie' ? '即将上映' : '即将播出', 'anticipated')
         }.width('100%')
         Text(this.discoverStatus).fontSize(12).width('100%')
         Button(this.discoverBusy ? '加载中…' : '刷新本页')
@@ -2646,7 +2646,7 @@ struct Index {
     Button(label).layoutWeight(1).fontSize(13)
       .backgroundColor(this.discoverMode === mode ? $r('app.color.showly_accent') : $r('app.color.showly_muted_surface'))
       .fontColor(this.discoverMode === mode ? $r('app.color.showly_on_accent') : $r('app.color.showly_text'))
-      .onClick(() => { this.changeDiscover(this.discoverKind, mode); })
+      .onClick(() => { this.changeDiscover(mode); })
   }
 
   private async changeTheme(mode: string): Promise<void> {
@@ -2745,12 +2745,15 @@ struct Index {
   }
 
   private invalidateMovieCalendar(): void {
-    this.movieCalendarData = undefined;
-    if (this.calendarKind === 'movie') {
+    // Release dates are metadata; membership always comes from the current effective library.
+    // Session changes still invalidate the snapshot via resetCalendar/current generation.
+    if (!this.movieCalendarCurrent()) { this.movieCalendarData = undefined; }
+    if (this.mediaMode === 'movie') {
       ++this.calendarRevision;
       this.calendarBusy = false;
       this.calendarPage = 1;
-      this.calendarStatus = '个人电影库已变化，请刷新日历。';
+      this.movieProgressPage = 1;
+      this.calendarStatus = '收藏已更新；新电影的上映日期可通过刷新补齐。';
     }
   }
 
@@ -2768,7 +2771,7 @@ struct Index {
     const session = traktAuth.session(this.clientId);
     if (!session) { this.calendarStatus = '登录会话尚不可用，请恢复 Trakt 登录后重试。'; return; }
     const revision = ++this.calendarRevision;
-    const kind = this.calendarKind;
+    const kind = this.mediaMode;
     const week = this.calendarWeek;
     this.calendarBusy = true;
     this.calendarData = undefined;
@@ -2776,9 +2779,8 @@ struct Index {
     this.calendarStatus = '正在更新日历…';
     try {
       if (kind === 'movie') {
-        this.movieCalendarData = undefined;
         const personal = await readPersonalMovies(session);
-        if (revision !== this.calendarRevision || this.calendarKind !== kind ||
+        if (revision !== this.calendarRevision || this.mediaMode !== kind ||
             !this.signedIn || !traktAuth.isCurrent(this.clientId, session.generation)) { return; }
         const known: Set<string> = new Set<string>(personal.movies.map((row: PersonalMovie) => row.media.id));
         for (const row of this.personalLibrary()) {
@@ -2787,11 +2789,12 @@ struct Index {
           }
         }
         this.movieCalendarData = personal;
+        this.movieProgressPage = 1;
         this.calendarStatus = '已读取个人电影库，共 ' + this.movieCalendarData.movies.length + ' 部。';
         return;
       }
       const result = await readCalendar(session, kind, week);
-      if (revision !== this.calendarRevision || this.calendarKind !== kind || this.calendarWeek !== week ||
+      if (revision !== this.calendarRevision || this.mediaMode !== kind || this.calendarWeek !== week ||
           !this.signedIn || !traktAuth.isCurrent(this.clientId, session.generation)) { return; }
       this.calendarData = result;
       this.calendarStatus = (result.entries.length ? '日历读取完成，共 ' + result.entries.length + ' 条。' : '此日期范围暂无返回的日历记录。') +
@@ -2809,7 +2812,7 @@ struct Index {
   }
 
   private calendarCurrent(): boolean {
-    if (this.calendarKind === 'movie') { return this.movieCalendarCurrent(); }
+    if (this.mediaMode === 'movie') { return this.movieCalendarCurrent(); }
     return !!this.calendarData && this.signedIn &&
       traktAuth.isCurrent(this.clientId, this.calendarData.generation) &&
       this.calendarData.window.from === calendarWindow(new Date(), this.calendarWeek).from &&
@@ -2833,13 +2836,13 @@ struct Index {
     return Math.max(1, Math.ceil(this.personalCalendarEntries().length / this.collectionPageSize));
   }
 
-  private changeCalendar(kind: string, week: number): void {
+  private changeCalendar(week: number): void {
+    const kind = this.mediaMode;
     if (this.calendarBusy) { return; }
     ++this.calendarRevision;
     this.calendarData = undefined;
     this.calendarPage = 1;
     this.calendarStatus = '';
-    this.calendarKind = kind;
     this.calendarWeek = week;
     if (kind === 'movie' && this.movieCalendarCurrent()) {
       this.calendarStatus = '已读取个人电影库，共 ' + (this.movieCalendarData?.movies.length ?? 0) + ' 部。';
@@ -2847,8 +2850,12 @@ struct Index {
   }
 
   private chooseProgressMode(mode: string): void {
-    this.progressMode = mode === 'calendar' ? 'calendar' : 'next';
-    if (mode === 'next') { if (this.signedIn) { this.requestObservation(); } else { this.loadNextShows(); } }
+    if (!progressTabs(this.mediaMode).includes(mode)) { return; }
+    this.progressMode = mode;
+    if (mode === 'next') {
+      if (this.signedIn) { this.requestObservation(); } else { this.loadNextShows(); }
+      if (this.mediaMode === 'movie' && !this.movieCalendarCurrent()) { this.loadCalendar(); }
+    }
     if (mode === 'calendar' && !this.calendarCurrent()) { this.loadCalendar(); }
   }
 
@@ -3038,30 +3045,20 @@ struct Index {
   @Builder
   calendarView() {
     Column({ space: 10 }) {
-      Text('个人更新与上映日历').fontSize(21).fontWeight(FontWeight.Medium).width('100%')
-      Text('个人收藏中的剧集更新及电影上映日期。')
+      Text(this.mediaMode === 'movie' ? '电影上映日历' : '剧集播出日历').fontSize(21).fontWeight(FontWeight.Medium).width('100%')
+      Text(this.mediaMode === 'movie' ? '个人收藏中的电影上映安排。' : '个人收藏中的剧集播出安排。')
         .fontSize(12).width('100%')
-      Row({ space: 6 }) {
-        Button('剧集更新').layoutWeight(1).fontSize(13).enabled(!this.calendarBusy)
-          .backgroundColor(this.calendarKind === 'show' ? $r('app.color.showly_accent') : $r('app.color.showly_muted_surface'))
-          .fontColor(this.calendarKind === 'show' ? $r('app.color.showly_on_accent') : $r('app.color.showly_text'))
-          .onClick(() => { this.changeCalendar('show', this.calendarWeek); })
-        Button('电影上映').layoutWeight(1).fontSize(13).enabled(!this.calendarBusy)
-          .backgroundColor(this.calendarKind === 'movie' ? $r('app.color.showly_accent') : $r('app.color.showly_muted_surface'))
-          .fontColor(this.calendarKind === 'movie' ? $r('app.color.showly_on_accent') : $r('app.color.showly_text'))
-          .onClick(() => { this.changeCalendar('movie', this.calendarWeek); })
-      }.width('100%')
-      if (this.calendarKind === 'movie') {
+      if (this.mediaMode === 'movie') {
         this.personalMovieCalendarView()
       } else {
         Text(this.calendarRangeLabel()).fontSize(15).width('100%')
         Row({ space: 4 }) {
           Button('前七天').layoutWeight(1).fontSize(12).enabled(!this.calendarBusy && this.calendarWeek > -1)
-            .onClick(() => { this.changeCalendar(this.calendarKind, this.calendarWeek - 1); })
+            .onClick(() => { this.changeCalendar(this.calendarWeek - 1); })
           Button('今天起').layoutWeight(1).fontSize(12).enabled(!this.calendarBusy)
-            .onClick(() => { this.changeCalendar(this.calendarKind, 0); })
+            .onClick(() => { this.changeCalendar(0); })
           Button('后七天').layoutWeight(1).fontSize(12).enabled(!this.calendarBusy && this.calendarWeek < 1)
-            .onClick(() => { this.changeCalendar(this.calendarKind, this.calendarWeek + 1); })
+            .onClick(() => { this.changeCalendar(this.calendarWeek + 1); })
         }.width('100%')
         if (!this.signedIn) {
           Text('登录 Trakt 后读取个人日历。').fontSize(13).width('100%')
@@ -3097,16 +3094,72 @@ struct Index {
     }.width('100%')
   }
 
+  private movieProgressRows(): PersonalLibraryRow[] {
+    const dates: MovieDate[] = this.movieCalendarCurrent() ? (this.movieCalendarData?.movies ?? [])
+      .map((row: PersonalMovie): MovieDate => ({ id: row.media.id, released: row.released })) : [];
+    const query = this.movieProgressQuery.trim().toLowerCase();
+    return releasedWatchlist(this.personalLibrary(), dates, localDay(new Date()))
+      .filter((row: PersonalLibraryRow) => !query || row.media.title.toLowerCase().includes(query))
+      .sort((a: PersonalLibraryRow, b: PersonalLibraryRow) => a.media.title.localeCompare(b.media.title));
+  }
+
+  @Builder
+  movieProgressView() {
+    Column({ space: 10 }) {
+      this.librarySyncNotice()
+      Text('已上映、尚未观看的待看电影').fontSize(13).width('100%')
+      if (!this.signedIn) {
+        Text('连接 Trakt 后可获取电影上映日期。待看电影仍可在收藏中管理。').fontSize(13).width('100%')
+        Button('连接 Trakt').onClick(() => { this.navigate('account'); })
+      } else {
+        Button(this.calendarBusy || this.cloudBusy ? '更新中…' : '刷新电影进度')
+          .enabled(!this.calendarBusy && !this.cloudBusy && !this.syncBusy && !this.saving)
+          .onClick(() => { this.refreshPage(); })
+        if (this.calendarStatus) { Text(this.calendarStatus).fontSize(12).width('100%') }
+        TextInput({ placeholder: '筛选电影', text: this.movieProgressQuery })
+          .onChange((value: string) => { this.movieProgressQuery = value; this.movieProgressPage = 1; })
+        if (!this.movieCalendarCurrent()) {
+          Text('上映资料尚未就绪，请刷新。').fontSize(13).width('100%')
+        } else {
+          if (!this.movieProgressRows().length) {
+            Text('暂无已确认上映的待看电影。日期未知的电影仍保留在待看。').fontSize(13).width('100%')
+          }
+          ForEach(this.movieProgressRows().slice((this.movieProgressPage - 1) * this.collectionPageSize,
+            this.movieProgressPage * this.collectionPageSize), (row: PersonalLibraryRow) => {
+            Row({ space: 8 }) {
+              Text(row.media.title).layoutWeight(1).onClick(() => { this.openDetail(row.media); })
+              Button('标记已看').fontSize(12)
+                .enabled(this.canEditLibrary() && this.ready && !this.saving && !this.cloudBusy && !this.syncBusy)
+                .onClick(() => { this.changeMediaIntent(row.media, 'movie', 'yes'); })
+            }.width('100%').padding(10).borderRadius(10).backgroundColor($r('app.color.showly_surface'))
+          }, (row: PersonalLibraryRow) => row.media.id)
+          Row({ space: 8 }) {
+            Button('上一页').layoutWeight(1).enabled(this.movieProgressPage > 1).onClick(() => { this.movieProgressPage--; })
+            Text(this.movieProgressPage + ' / ' + Math.max(1, Math.ceil(this.movieProgressRows().length / this.collectionPageSize))).fontSize(13)
+            Button('下一页').layoutWeight(1).enabled(this.movieProgressPage * this.collectionPageSize < this.movieProgressRows().length)
+              .onClick(() => { this.movieProgressPage++; })
+          }.width('100%')
+        }
+      }
+    }.width('100%')
+  }
+
   @Builder
   progressView() {
     Column({ space: 12 }) {
-      Text('观看进度').fontSize(25).fontWeight(FontWeight.Bold).width('100%')
-      Row({ space: 6 }) {
-        this.progressModeButton('下一集', 'next')
-        this.progressModeButton('日历', 'calendar')
+      Row({ space: 8 }) {
+        Text(this.mediaMode === 'show' ? '剧集进度' : '电影进度').fontSize(25).fontWeight(FontWeight.Bold).layoutWeight(1)
+        Button('同步').fontSize(12).onClick(() => { this.navigate('account'); })
       }.width('100%')
-      if (this.progressMode === 'next') { this.nextShowsView() }
-      else if (this.progressMode === 'calendar') { this.calendarView() }
+      Row({ space: 6 }) {
+        this.progressModeButton(this.mediaMode === 'show' ? '下一集' : '待看进度', 'next')
+        this.progressModeButton(this.mediaMode === 'show' ? '日历' : '上映日历', 'calendar')
+        if (this.mediaMode === 'show') { this.progressModeButton('历史', 'history') }
+      }.width('100%')
+      if (this.progressMode === 'calendar') { this.calendarView() }
+      else if (this.progressMode === 'history' && this.mediaMode === 'show') {
+        Text('逐集观看历史尚未实现。现有观看记录不受影响。').fontSize(14).width('100%')
+      } else if (this.mediaMode === 'movie') { this.movieProgressView() }
       else { this.nextShowsView() }
     }.width('100%')
   }
@@ -3182,7 +3235,10 @@ struct Index {
         if (this.signedIn) { await this.loadCloud(); } else { await this.loadNextShows(); }
         if (this.collectionGrid) { await this.loadCollectionPosters(); }
       } else if (this.tab === 'progress') {
-        if (this.progressMode === 'next') { if (this.signedIn) { await this.loadCloud(); } else { await this.loadNextShows(); } }
+        if (this.progressMode === 'next') {
+          if (this.signedIn) { await this.loadCloud(); } else { await this.loadNextShows(); }
+          if (this.mediaMode === 'movie') { await this.loadCalendar(); }
+        }
         else if (this.progressMode === 'calendar') { if (this.signedIn) { await this.loadCloud(); } await this.loadCalendar(); }
         else if (this.signedIn) { await this.loadCloud(); }
       } else if (this.tab === 'cloud') {
@@ -3217,13 +3273,33 @@ struct Index {
       cloudShows, localShows);
   }
 
+  private collectionSource(): PersonalLibraryRow[] {
+    const query = this.collectionQuery.trim().toLowerCase();
+    return this.personalLibrary().filter((row: PersonalLibraryRow) =>
+      !query || row.media.title.toLowerCase().includes(query));
+  }
+
   private collectionItems(): PersonalLibraryRow[] {
-    return filterPersonalLibrary(this.personalLibrary(), this.collectionFilter);
+    return collectionRows(this.collectionSource(), this.mediaMode, this.collectionFilter);
+  }
+
+  private collectionEntries(): GroupEntry[] {
+    return groupEntries(collectionGroups(this.collectionSource(), this.mediaMode, this.collectionFilter));
+  }
+
+  private collectionPageGroups(): CollectionGroup[] {
+    return pageGroups(this.collectionEntries(), this.collectionPage, this.collectionPageSize);
   }
 
   private collectionSlice(): PersonalLibraryRow[] {
-    const start = (this.collectionPage - 1) * this.collectionPageSize;
-    return this.collectionItems().slice(start, start + this.collectionPageSize);
+    const result: PersonalLibraryRow[] = [];
+    const seen: Set<string> = new Set<string>();
+    for (const group of this.collectionPageGroups()) {
+      for (const row of group.rows) {
+        if (!seen.has(row.media.id)) { result.push(row); seen.add(row.media.id); }
+      }
+    }
+    return result;
   }
 
   private toggleCollectionLocal(id: string): void {
@@ -3235,13 +3311,14 @@ struct Index {
   }
 
   private collectionPages(): number {
-    return Math.max(1, Math.ceil(this.collectionItems().length / this.collectionPageSize));
+    return Math.max(1, Math.ceil(this.collectionEntries().length / this.collectionPageSize));
   }
 
   private chooseCollection(filter: string): void {
     if (this.collectionFilter !== filter) {
       this.resetCollection();
       this.collectionFilter = filter;
+      this.collectionQuery = '';
       if (this.collectionGrid && this.tab === 'library') { this.loadCollectionPosters(); }
     }
   }
@@ -3256,7 +3333,7 @@ struct Index {
   }
 
   private async loadCollectionPosters(): Promise<void> {
-    if (!this.clientId || this.collectionBusy || this.setupBusy) {
+    if (!this.clientId || this.collectionBusy || this.setupBusy || this.collectionFilter === 'hidden' || this.collectionFilter === 'lists') {
       return;
     }
     const revision = ++this.collectionRevision;
@@ -3313,23 +3390,31 @@ struct Index {
   @Builder
   collectionView() {
     Column({ space: 12 }) {
-      Text('我的收藏').fontSize(25).fontWeight(FontWeight.Bold).width('100%')
+      Row({ space: 8 }) {
+        Text('收藏').fontSize(25).fontWeight(FontWeight.Bold).layoutWeight(1)
+        Button('列表').fontSize(12).onClick(() => { this.chooseCollection('lists'); })
+      }.width('100%')
       this.librarySyncNotice()
       this.movieUndoView()
       if (this.cloudBusy || this.localBusy) { Text('正在更新收藏…').fontSize(12).width('100%') }
       else if (this.libraryNotice) { Text(this.libraryNotice).fontSize(12).width('100%') }
       Row({ space: 6 }) {
-        this.collectionFilterButton('全部', 'all')
+        this.collectionFilterButton(this.mediaMode === 'show' ? '我的剧集' : '我的电影', 'mine')
         this.collectionFilterButton('待看', 'queue')
-        this.collectionFilterButton('追剧记录', 'tracking')
-        this.collectionFilterButton('已看', 'watched')
+        this.collectionFilterButton('隐藏', 'hidden')
+        if (collectionRows(this.personalLibrary(), this.mediaMode, 'other').length > 0) {
+          this.collectionFilterButton('其他', 'other')
+        }
       }.width('100%')
-      Row({ space: 6 }) {
-        this.collectionFilterButton('正在追', 'watching')
-        this.collectionFilterButton('已完结', 'finished')
-        this.collectionFilterButton('等待更新', 'upcoming')
-        this.collectionFilterButton('待核实', 'unclassified')
-      }.width('100%')
+      if (this.collectionFilter === 'hidden' || this.collectionFilter === 'lists') {
+        Text(this.collectionFilter === 'hidden' ? '隐藏影视管理尚未实现。' : '自定义列表尚未实现。')
+          .fontSize(14).width('100%')
+      } else {
+      TextInput({ placeholder: this.mediaMode === 'show' ? '搜索收藏剧集' : '搜索收藏电影', text: this.collectionQuery })
+        .onChange((value: string) => {
+          this.collectionQuery = value;
+          this.resetCollection();
+        }).onSubmit(() => { if (this.collectionGrid) { this.loadCollectionPosters(); } })
       if (!this.collectionItems().length && !this.cloudBusy && !this.localBusy) {
         Text('此分类暂无影视。').fontSize(13).width('100%')
       }
@@ -3346,10 +3431,30 @@ struct Index {
             .onClick(() => { this.loadCollectionPosters(); })
         }
       }.width('100%')
+      if (this.collectionGrid && this.collectionStatus) { Text(this.collectionStatus).fontSize(12) }
+      ForEach(this.collectionPageGroups(), (group: CollectionGroup) => {
+        Column({ space: 8 }) {
+          Text(group.label).fontSize(19).fontWeight(FontWeight.Bold).width('100%')
+          this.collectionGroupView(group)
+        }.width('100%')
+      }, (group: CollectionGroup) => group.key + ':' + group.rows.map((row: PersonalLibraryRow) => row.media.id + ':' + businessLibraryLabel(row) + ':' + (this.collectionCards.find((card: DiscoverItem) => card.media.id === row.media.id)?.posterUri ?? '')).join(','))
+      Row({ space: 8 }) {
+        Button('上一页').layoutWeight(1).enabled(!this.collectionBusy && this.collectionPage > 1)
+          .onClick(() => { this.goCollectionPage(this.collectionPage - 1); })
+        Text(this.collectionPage + ' / ' + this.collectionPages()).fontSize(13)
+        Button('下一页').layoutWeight(1).enabled(!this.collectionBusy && this.collectionPage < this.collectionPages())
+          .onClick(() => { this.goCollectionPage(this.collectionPage + 1); })
+      }.width('100%')
+      }
+    }.width('100%')
+  }
+
+  @Builder
+  collectionGroupView(group: CollectionGroup) {
+    Column({ space: 8 }) {
       if (this.collectionGrid) {
-        Text(this.collectionStatus).fontSize(12)
         Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.SpaceBetween }) {
-          ForEach(this.collectionSlice(), (row: PersonalLibraryRow) => {
+          ForEach(group.rows, (row: PersonalLibraryRow) => {
             Column({ space: 6 }) {
               if (this.collectionCards.find((card: DiscoverItem) => card.media.id === row.media.id)?.posterUri) {
                 Image(this.collectionCards.find((card: DiscoverItem) => card.media.id === row.media.id)?.posterUri)
@@ -3374,7 +3479,7 @@ struct Index {
             (this.collectionCards.find((card: DiscoverItem) => card.media.id === row.media.id)?.posterUri ?? ''))
         }.width('100%')
       } else {
-        ForEach(this.collectionSlice(), (row: PersonalLibraryRow) => {
+        ForEach(group.rows, (row: PersonalLibraryRow) => {
           Row({ space: 8 }) {
             Column({ space: 4 }) {
               Text(mediaLabel(row.media)).width('100%')
@@ -3390,13 +3495,6 @@ struct Index {
         }, (row: PersonalLibraryRow) => row.media.id + ':' + businessLibraryLabel(row) + ':' +
           (row.watched ? 'yes' : 'no'))
       }
-      Row({ space: 8 }) {
-        Button('上一页').layoutWeight(1).enabled(!this.collectionBusy && this.collectionPage > 1)
-          .onClick(() => { this.goCollectionPage(this.collectionPage - 1); })
-        Text(this.collectionPage + ' / ' + this.collectionPages()).fontSize(13)
-        Button('下一页').layoutWeight(1).enabled(!this.collectionBusy && this.collectionPage < this.collectionPages())
-          .onClick(() => { this.goCollectionPage(this.collectionPage + 1); })
-      }.width('100%')
     }.width('100%')
   }
 
@@ -3523,7 +3621,7 @@ struct Index {
       return true;
     }
     if (this.tab === 'search' || this.tab === 'cloud' || this.tab === 'account') {
-      this.navigate('progress');
+      this.navigate(this.returnTab);
       return true;
     }
     return false;
@@ -3576,13 +3674,51 @@ struct Index {
     }
   }
 
+  private async changeMediaMode(mode: string): Promise<void> {
+    if (this.modeBusy || this.selectedMedia || (mode !== 'show' && mode !== 'movie') || mode === this.mediaMode) { return; }
+    this.modeBusy = true;
+    try {
+      this.mediaMode = normalizeMode(mode);
+      this.progressMode = 'next';
+      this.collectionFilter = 'mine';
+      this.collectionQuery = '';
+      this.nextPage = 1;
+      this.movieProgressPage = 1;
+      this.calendarWeek = 0;
+      this.resetDiscover();
+      this.resetCalendar();
+      this.resetCollection();
+      if (this.settings) { await this.settings.saveMode(this.mediaMode); }
+      this.modeStatus = '';
+    } catch (error) { this.modeStatus = '影视模式暂未保存，下次启动可能恢复原模式。'; }
+    finally { this.modeBusy = false; }
+    if (this.tab === 'discover') { this.loadDiscover(); }
+    if (this.tab === 'library' && this.collectionGrid) { this.loadCollectionPosters(); }
+    if (this.tab === 'progress') { this.chooseProgressMode('next'); }
+  }
+
+  @Builder
+  mediaModeTabs() {
+    Row({ space: 8 }) {
+      Button('剧集').layoutWeight(1).fontSize(14).enabled(!this.modeBusy)
+        .backgroundColor(this.mediaMode === 'show' ? $r('app.color.showly_accent') : $r('app.color.showly_muted_surface'))
+        .fontColor(this.mediaMode === 'show' ? $r('app.color.showly_on_accent') : $r('app.color.showly_text'))
+        .onClick(() => { this.changeMediaMode('show'); })
+      Button('电影').layoutWeight(1).fontSize(14).enabled(!this.modeBusy)
+        .backgroundColor(this.mediaMode === 'movie' ? $r('app.color.showly_accent') : $r('app.color.showly_muted_surface'))
+        .fontColor(this.mediaMode === 'movie' ? $r('app.color.showly_on_accent') : $r('app.color.showly_text'))
+        .onClick(() => { this.changeMediaMode('movie'); })
+    }.width('100%').padding({ left: 16, right: 16, top: 8, bottom: 4 })
+  }
+
   private navigate(value: string): void {
+    if (this.tab === 'progress' || this.tab === 'discover' || this.tab === 'library') { this.returnTab = this.tab; }
     this.closeDetail();
     if (this.tab === 'discover' && value !== 'discover' && this.discoverBusy) { this.resetDiscover(); }
     if (this.tab === 'library' && value !== 'library' && this.collectionBusy) { this.resetCollection(); }
     this.tab = value === 'cloud' ? 'account' : value;
     if (value === 'cloud') { this.advancedSync = true; }
-    if (value === 'progress' && this.progressMode === 'next' && !this.nextShows.length) { this.loadNextShows(); }
+    if (value === 'progress') { this.chooseProgressMode(this.progressMode); }
     if (value === 'discover' && this.discoverItems.length === 0 && !this.discoverBusy) {
       this.loadDiscover();
     }
@@ -3763,6 +3899,10 @@ struct Index {
         this.headerAction('设置', 'account')
       }.width('100%').padding(12).backgroundColor($r('app.color.showly_surface'))
       Divider().color($r('app.color.showly_line'))
+      if (!this.selectedMedia && (this.tab === 'progress' || this.tab === 'discover' || this.tab === 'library')) {
+        this.mediaModeTabs()
+        if (this.modeStatus) { Text(this.modeStatus).fontSize(12).width('100%') }
+      }
       Refresh({ refreshing: $$this.refreshing }) {
         Scroll() {
         Column({ space: 14 }) {

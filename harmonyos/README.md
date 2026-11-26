@@ -1,4 +1,4 @@
-# Showly HarmonyOS Preview v0.9.3e.1c
+# Showly HarmonyOS Preview v0.9.3e.1c.1
 
 Unofficial native ArkTS prototype, not a complete Showly port. Your app uses Trakt but is not endorsed or certified by Trakt.
 
@@ -167,3 +167,7 @@ One collection and episode display; next-episode candidates and counts derive fr
 ## v0.9.3e.1c — scoped title quick sync (0.9.3.9, build 33)
 
 Separate explicit consent for new movie watched and watchlist add/remove actions, with an epoch-bound durable intent saved atomically with the title snapshot. Reuses reviewed single-title writer and readback/receipt checks; no automatic history deletion or replay of uncertain requests. Verified common membership allows safe remote-only adoption; outstanding explicit intent stays protected. Marking movie watched moves it out of watchlist as in Android. See docs/TITLE_QUICK_SYNC.md.
+
+## v0.9.3e.1c.1 — global media mode and feature hierarchy (0.9.3.10, build 34)
+
+Global persisted shows/movies mode drives progress, discover, calendar and collection; search stays cross-type as on Android. Collection separates My Shows/My Movies, Watchlist, Hidden and Lists, with actual watching/finished/upcoming/all sections and collection search. Legacy/manual other records remain accessible. Basic movie progress uses known released watchlist movies and existing mark action. Hidden, lists and episode history explicitly not implemented; recent-added ordering and full date/next strategies deferred. No change to remote writer, consent, account scope, database schema or receipts. See docs/NAVIGATION.md.
