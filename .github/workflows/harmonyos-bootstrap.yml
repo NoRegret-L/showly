@@ -67,12 +67,6 @@ jobs:
             exit 1
           }
 
-      - name: Configure public Trakt application identity
-        if: ${{ hashFiles('harmonyos/build-profile.json5') != '' }}
-        env:
-          TRAKT_CLIENT_ID: ${{ vars.TRAKT_CLIENT_ID }}
-        run: python3 harmonyos/scripts/configure_trakt.py
-
       - name: Install project dependencies
         if: ${{ inputs.mode == 'build' || hashFiles('harmonyos/build-profile.json5') != '' }}
         working-directory: harmonyos

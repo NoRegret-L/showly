@@ -1,12 +1,14 @@
 import { common } from '@kit.AbilityKit';
 import { cryptoFramework } from '@kit.CryptoArchitectureKit';
-import { buffer, util } from '@kit.ArkTS';
+import { util } from '@kit.ArkTS';
 import { http } from '@kit.NetworkKit';
-import { TRAKT_CLIENT_ID, TRAKT_REDIRECT_URI } from '../config/TraktConfig';
+import { TRAKT_REDIRECT_URI } from '../config/TraktConfig';
+import { loadRefresh, saveRefresh, removeRefresh } from './TokenVault';
 
 interface PendingLogin {
   state: string;
   verifier: string;
+  clientId: string;
   generation: number;
 }
 
@@ -15,6 +17,10 @@ interface TokenResponse {
   refresh_token?: string;
   expires_in: number;
   token_type: string;
+}
+
+interface OAuthFailure {
+  error: string;
 }
 
 interface Account {
@@ -35,7 +41,7 @@ function randomValue(): string {
 
 async function challenge(verifier: string): Promise<string> {
   const md = cryptoFramework.createMd('SHA256');
-  await md.update({ data: new Uint8Array(buffer.from(verifier, 'utf-8').buffer) });
+  await md.update({ data: new util.TextEncoder().encodeInto(verifier) });
   return base64url((await md.digest()).data);
 }
 
@@ -66,6 +72,8 @@ class TraktAuth {
   private accessToken: string = '';
   private expiresAt: number = 0;
   private busy: boolean = false;
+  private clientId: string = '';
+  private attemptedRestore: boolean = false;
 
   private status(message: string): void {
     AppStorage.setOrCreate<string>('traktAuthStatus', message);
@@ -73,11 +81,12 @@ class TraktAuth {
     AppStorage.setOrCreate<boolean>('traktSignedIn', this.accessToken.length > 0 && Date.now() < this.expiresAt);
   }
 
-  async begin(context: common.UIAbilityContext): Promise<void> {
-    if (this.busy || TRAKT_CLIENT_ID.length === 0) {
+  async begin(context: common.UIAbilityContext, clientId: string): Promise<void> {
+    if (this.busy || clientId.length === 0) {
       return;
     }
     const generation: number = ++this.generation;
+    this.clientId = clientId;
     this.busy = true;
     this.status('正在打开 Trakt 官方授权页面…');
     try {
@@ -87,9 +96,9 @@ class TraktAuth {
       if (generation !== this.generation) {
         return;
       }
-      this.pending = { state: state, verifier: verifier, generation: generation };
+      this.pending = { state: state, verifier: verifier, clientId: clientId, generation: generation };
       const authorize = 'https://auth.trakt.tv/oauth/authorize?response_type=code' +
-        '&client_id=' + encodeURIComponent(TRAKT_CLIENT_ID) +
+        '&client_id=' + encodeURIComponent(clientId) +
         '&redirect_uri=' + encodeURIComponent(TRAKT_REDIRECT_URI) +
         '&state=' + encodeURIComponent(state) +
         '&code_challenge=' + encodeURIComponent(codeChallenge) + '&code_challenge_method=S256';
@@ -136,7 +145,7 @@ class TraktAuth {
       const response = await request.request('https://auth.trakt.tv/oauth/token', {
         method: http.RequestMethod.POST,
         header: { 'Content-Type': 'application/json' },
-        extraData: JSON.stringify({ code: code, client_id: TRAKT_CLIENT_ID,
+        extraData: JSON.stringify({ code: code, client_id: pending.clientId,
           redirect_uri: TRAKT_REDIRECT_URI, grant_type: 'authorization_code',
           code_verifier: pending.verifier }),
         expectDataType: http.HttpDataType.STRING
@@ -155,9 +164,10 @@ class TraktAuth {
       }
       this.accessToken = tokens.access_token;
       this.expiresAt = Date.now() + tokens.expires_in * 1000;
-      const username = await this.accountName();
+      const saved = this.persistRefresh(pending.clientId, tokens.refresh_token);
+      const username = await this.accountName(pending.clientId);
       if (pending.generation === this.generation) {
-        this.status(username.length > 0 ? '已登录 Trakt：' + username : '已授权 Trakt（账户名称暂不可用）');
+        this.status((username.length > 0 ? '已登录 Trakt：' + username : '已授权 Trakt（账户名称暂不可用）') + (saved ? '' : '；安全保存失败，重启后需重新登录。'));
       }
     } catch (error) {
       if (pending.generation === this.generation) {
@@ -174,13 +184,13 @@ class TraktAuth {
     }
   }
 
-  private async accountName(): Promise<string> {
+  private async accountName(clientId: string): Promise<string> {
     const request = http.createHttp();
     try {
       const response = await request.request('https://api.trakt.tv/users/settings', {
         method: http.RequestMethod.GET,
         header: { 'Content-Type': 'application/json', 'trakt-api-version': '2',
-          'trakt-api-key': TRAKT_CLIENT_ID, 'Authorization': 'Bearer ' + this.accessToken },
+          'trakt-api-key': clientId, 'Authorization': 'Bearer ' + this.accessToken },
         expectDataType: http.HttpDataType.STRING
       });
       if (response.responseCode === 200 && typeof response.result === 'string') {
@@ -195,13 +205,120 @@ class TraktAuth {
     }
   }
 
-  disconnect(): void {
+  private persistRefresh(clientId: string, token?: string): boolean {
+    try {
+      if (!token) {
+        removeRefresh();
+        return false;
+      }
+      saveRefresh(clientId, token);
+      return true;
+    } catch (error) {
+      return false;
+    }
+  }
+
+  async restore(clientId: string, manual: boolean = false): Promise<void> {
+    if (!clientId || this.busy || (!manual && this.attemptedRestore && Date.now() < this.expiresAt)) {
+      return;
+    }
+    if (this.accessToken && this.clientId === clientId && Date.now() < this.expiresAt) {
+      return;
+    }
+    if (this.attemptedRestore && !manual && this.expiresAt === 0) {
+      return;
+    }
+    this.attemptedRestore = true;
+    this.clientId = clientId;
+    const generation = ++this.generation;
+    this.busy = true;
+    this.status('正在恢复 Trakt 登录…');
+    let request: http.HttpRequest | undefined;
+    try {
+      const refreshToken = loadRefresh(clientId);
+      if (!refreshToken) {
+        this.status('尚未登录 Trakt');
+        return;
+      }
+      request = http.createHttp();
+      const response = await request.request('https://auth.trakt.tv/oauth/token', {
+        method: http.RequestMethod.POST,
+        header: { 'Content-Type': 'application/json' },
+        extraData: JSON.stringify({ refresh_token: refreshToken, client_id: clientId,
+          redirect_uri: TRAKT_REDIRECT_URI, grant_type: 'refresh_token' }),
+        expectDataType: http.HttpDataType.STRING
+      });
+      if (generation !== this.generation) {
+        return;
+      }
+      if (response.responseCode !== 200 || typeof response.result !== 'string') {
+        if (response.responseCode === 400 && typeof response.result === 'string') {
+          const failure = JSON.parse(response.result) as OAuthFailure;
+          if (failure.error === 'invalid_grant') {
+            removeRefresh();
+            this.accessToken = '';
+            this.expiresAt = 0;
+            this.status('授权已失效，请重新登录 Trakt。');
+            return;
+          }
+        }
+        throw new Error('Refresh failed');
+      }
+      const tokens = JSON.parse(response.result) as TokenResponse;
+      if (typeof tokens.access_token !== 'string' || !tokens.access_token ||
+          typeof tokens.expires_in !== 'number' || !Number.isFinite(tokens.expires_in) ||
+          tokens.expires_in <= 0 || typeof tokens.token_type !== 'string' ||
+          tokens.token_type.toLowerCase() !== 'bearer') {
+        throw new Error('Invalid refresh response');
+      }
+      this.accessToken = tokens.access_token;
+      this.expiresAt = Date.now() + tokens.expires_in * 1000;
+      const saved = this.persistRefresh(clientId, tokens.refresh_token);
+      const username = await this.accountName(clientId);
+      if (generation === this.generation) {
+        this.status((username ? '已登录 Trakt：' + username : '已恢复 Trakt 授权') +
+          (saved ? '' : '；安全保存失败，重启后需重新登录。'));
+      }
+    } catch (error) {
+      if (generation === this.generation) {
+        this.accessToken = '';
+        this.expiresAt = 0;
+        this.status('登录恢复失败，可重试恢复或重新授权。');
+      }
+    } finally {
+      if (request) {
+        request.destroy();
+      }
+      if (generation === this.generation) {
+        this.busy = false;
+        AppStorage.setOrCreate<boolean>('traktAuthBusy', false);
+      }
+    }
+  }
+
+  cancel(): void {
+    ++this.generation;
+    this.pending = undefined;
+    this.busy = false;
+    this.status('本次操作已取消。');
+  }
+
+  disconnect(): boolean {
+    try {
+      removeRefresh();
+    } catch (error) {
+      this.status('无法删除安全存储中的授权，请解锁设备后重试。');
+      return false;
+    }
     ++this.generation;
     this.pending = undefined;
     this.accessToken = '';
     this.expiresAt = 0;
     this.busy = false;
+    this.clientId = '';
+    this.attemptedRestore = true;
     this.status('本机已断开登录；未撤销 Trakt 网站上的授权。');
+    return true;
   }
 }
 

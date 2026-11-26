@@ -1,27 +1,26 @@
-# Showly HarmonyOS Preview v0.3.0
+# Showly HarmonyOS Preview v0.4.0
 
-Unofficial independent native ArkTS prototype, not a full port of Showly. Your app uses Trakt but is not endorsed or certified by Trakt.
+Unofficial native ArkTS prototype, not a complete Showly port. Your app uses Trakt but is not endorsed or certified by Trakt.
 
-- Local watch queue and watched state stored as a single versioned Preferences snapshot. Unknown/corrupt schema stops writes; never silently resets data. A Trakt item's identity includes its media type and Trakt ID.
-- Public Trakt title search uses the Standard host api.trakt.tv and the same show/movie search contract as upstream. CI injects the developer's authorized public Trakt Client ID from the repository Actions variable TRAKT_CLIENT_ID. The application never asks ordinary users to enter a Client ID. If unconfigured, online functionality is disabled. No Client Secret or paid Premium host.
-- Manual entries work offline. No cloud account sync, seasons/episode history, TMDB artwork, or production signing yet. No real-device runtime tests yet.
-- Privacy: local watch records remain on the device; search sends the query and Client ID to Trakt over HTTPS; login sends OAuth authorization parameters to Trakt, and reads account settings after consent. Tokens are not logged or persisted. No analytics added by this prototype.
-- Preferences snapshot is intended for small preview libraries; storage failures stop further writes rather than report success. A relational database and migration tests are required before scaling or sync.
+## Personal BYOK configuration
 
-CI: see .github/workflows/harmonyos-bootstrap.yml. Target API 24; minimum API 12. HAP artifacts remain unsigned.
+The HAP contains no developer Client ID or secret. No GitHub Actions credential is required.
+1. Open https://developer.trakt.tv/apps in the system browser and connect a verified GitHub account.
+2. Create a personal Development app (Standard). Use the actual project description and register exactly `showlyharmony://trakt` for development testing. Follow Trakt's terms and branding requirements. This is for personal use, not rate-limit evasion.
+3. Paste the Client ID into the app. The app validates it using one read-only Standard API request, persists it in Preferences, and optionally starts PKCE authorization. No Client Secret is requested.
+4. Sign in at Trakt. The app checks state and PKCE; it stores the refresh token using HarmonyOS Asset Store, with local-only synchronization and device-unlocked access. Access tokens are in memory. On restart or foreground after expiration the app attempts renewal; retry is available. Rotated refresh tokens replace the previous token. If secure storage fails or token exceeds its 1024-byte limit, login may need repeating; no plaintext fallback.
+5. Change or clear credentials via settings. Switching first clears the old local authorization; local watch records are preserved. Local logout does not revoke remote grants. Use Trakt website to revoke.
 
-## Device smoke checklist
+Production integration requires Trakt approval and HTTPS verified app links; this development custom scheme is not production-ready. App creation is manual on the official website: no scraping, cookie access or automated account registration.
+Privacy: credentials and watch records stay on device except the HTTPS requests to Trakt needed to validate, search and authorize. No analytics. No remote write or sync of watch history yet.
 
-1. Add a manual title, mark it watched, restart the app, verify it is still watched.
-2. Undo watched status, restart, verify the item is queued.
-3. Search with a build configured with a valid Standard Client ID, add a result twice, verify one item exists.
-4. Search offline, confirm the existing library remains unchanged.
-5. Upgrade from 0.1.0 with the same signing identity; verify startup. 0.1.0 stored no persistent data.
+## Test checklist
 
-## Development OAuth (not production-ready)
+- First launch without ID: local library works, login disabled, guide opens.
+- Invalid ID or offline validation does not replace existing configuration.
+- Valid ID saves across restart; search and PKCE login require live verification.
+- Successful login, restart, refresh, cancellation, logout, change ID, and expired grant must be tested on device.
+- Upgrade from v0.3.0 preserves the unchanged local library schema.
+- CI builds unsigned preview HAP only; no device runtime tests in CI.
 
-Set the repository Actions variable `TRAKT_CLIENT_ID` to a Client ID authorized for this integration. Register exactly `showlyharmony://trakt` on the Trakt Development app. Trakt allows custom schemes for development, but production requires HTTPS verified App Links on a domain you control. Do not reuse an unapproved third-party Client ID or secret.
-
-Login uses the system browser, random state, SHA-256 PKCE, exact callback matching, one-time pending state, and token exchange on auth.trakt.tv. Only an access token is retained in process memory; refresh and secure persistent tokens are deferred. Closing the process requires login again. Disconnect clears only local state; revoke authorization on Trakt if desired. No cloud sync or live device validation yet.
-
-References: https://developer.trakt.tv/docs/pkce and https://developer.trakt.tv/docs/create-an-app .
+References: https://developer.trakt.tv/docs/create-an-app ; https://developer.trakt.tv/docs/pkce ; https://developer.trakt.tv/docs/authentication-oauth ; https://developer.trakt.tv/docs/api-use-policy .
