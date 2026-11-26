@@ -1,4 +1,4 @@
-# Showly HarmonyOS Preview v0.9.3e.1
+# Showly HarmonyOS Preview v0.9.3e.1a
 
 Unofficial native ArkTS prototype, not a complete Showly port. Your app uses Trakt but is not endorsed or certified by Trakt.
 
@@ -151,3 +151,7 @@ Collection reads one deduplicated view of existing local media, positive local e
 ## v0.9.3e.1 — full ordinary episode metadata and followed state (package 0.9.3.5, build 29)
 
 Adds a public read-only episode_schedule table to the existing episode DB. Refresh stores season and episode air dates (unknown retained), all ordinary episodes including future ones, and show status if available; the existing aired-only write-eligible catalog commits atomically with it. Old catalogs remain usable and are not treated as full until refreshed. Specials remain excluded, no automatic prefetch. Details show noneligible episodes separately, with no mark buttons. Collection uses exact local watched IDs and upstream season predicates for local watching/finished/upcoming classification, with conservative unknown handling. Cloud counts are never used to assign episode IDs; more cloud than local evidence prevents classification. New explicit followed state in the existing media snapshot makes joining followed and moving back to watchlist mutually exclusive for new actions; legacy unknown evidence remains compatible. Joining followed is an explicit local watchlist removal intent, subject to existing reviewed sync; no automatic title POST or history change. Backup v1 optionally preserves followed display state on additive restore, never sync intent; full public schedule is refreshable and excluded. Up Next and calendar algorithms unchanged until e.2/e.3. See docs/SHOW_CATALOG.md.
+
+## v0.9.3e.1a — account-scoped read-only cloud observations (package 0.9.3.6, build 30)
+
+Cloud observation stores exact season/episode positions, play counts, latest watch timestamps, movie plays and activity revision per verified account UUID. A complete activity-checked snapshot is replaced atomically; unchanged revision reuses it. Library refresh fills missing/changed public schedules sequentially and stops network fill at the first failure, retaining prior data and resuming next refresh. Public schedules alone never grant edit eligibility. Classification maps positions to catalog IDs and applies local explicit decisions; unclassified tracking members remain visible. No new POST, auto-consent, sync intent, receipt, common baseline or history mutation. Cache requires online UUID verification after a cold start; offline cold-start account identification deferred. Only latest play time/count, not complete repeated history, is represented. See docs/REMOTE_OBSERVATION.md.

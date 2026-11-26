@@ -18,7 +18,8 @@ import { TRAKT_APPS_URL, TRAKT_REDIRECT_URI } from '../config/TraktConfig';
 import { ClientSettings, validateClientId } from '../data/ClientSettings';
 import { pasteboard } from '@kit.BasicServicesKit';
 import { traktAuth } from '../data/TraktAuth';
-import { CloudLibrary, ShowProgress, readCloudLibrary, mergeNewTitles } from '../data/TraktLibrary';
+import { CloudLibrary, ShowProgress, readCloudLibrary, mergeNewTitles, readActivity } from '../data/TraktLibrary';
+import { projectLibrary } from '../data/LibraryProjection';
 import { MediaDetail, canReadDetails, readDetails, cachePoster, clearDetailMemory } from '../data/TraktDetails';
 import { DiscoverItem, readDiscover } from '../data/TraktDiscover';
 import { EpisodeProgress, SeasonProgress, SeriesProgress, ChineseText, readSeriesProgress, readChinese } from '../data/TraktProgress';
@@ -157,6 +158,9 @@ struct Index {
   @State settingsReady: boolean = false;
   @State setupStatus: string = '';
   @State cloud?: CloudLibrary = undefined;
+  @State libraryEvidence: LibraryShowEvidence[] = [];
+  private cloudUuid: string = '';
+  private cloudFresh: boolean = false;
   @State @Watch('onRecoveryGateChanged') cloudBusy: boolean = false;
   @State cloudStatus: string = '';
   private settings?: ClientSettings;
@@ -1679,6 +1683,9 @@ struct Index {
     this.resetCalendar();
     this.invalidateSync();
     this.cloud = undefined;
+    this.cloudUuid = '';
+    this.cloudFresh = false;
+    this.libraryEvidence = [];
     this.cloudStatus = '';
     this.trackingPage = 1;
     this.trackingQuery = '';
@@ -1686,37 +1693,75 @@ struct Index {
   }
 
   private async loadCloud(): Promise<void> {
-    if (this.cloudBusy || this.syncBusy || this.setupBusy || this.authBusy || !this.clientId) {
-      return;
-    }
+    const store = this.episodeStore;
+    if (!store || !this.ready || !this.episodeReady || this.cloudBusy || this.localBusy || this.saving ||
+        this.backupBusy || this.syncBusy || this.setupBusy || this.authBusy || !this.clientId) { return; }
     this.cloudBusy = true;
-    this.clearCloud();
-    this.cloudStatus = '正在读取 Trakt 云端清单，请勿切换账户…';
+    this.cloudFresh = false;
+    this.cloudStatus = '正在验证账户并读取个人库…';
+    const clientId = this.clientId;
     try {
-      await traktAuth.restore(this.clientId, true);
-      const session = traktAuth.session(this.clientId);
-      if (!session) {
-        this.cloudStatus = '请先完成 Trakt 登录。';
-        return;
+      await traktAuth.restore(clientId, true);
+      const session = traktAuth.session(clientId);
+      if (!session) { throw new Error('请先完成 Trakt 登录'); }
+      const account = await readSyncAccount(session);
+      const current = (): boolean => this.clientId === clientId && traktAuth.isCurrent(clientId, session.generation);
+      if (!current()) { throw new Error('Session changed'); }
+      if (this.cloudUuid !== account.uuid || this.cloud?.generation !== session.generation) {
+        this.clearCloud();
       }
-      const snapshot = await readCloudLibrary(session);
-      if (traktAuth.isCurrent(this.clientId, snapshot.generation)) {
-        this.cloud = snapshot;
+      const cached = await store.readRemoteObservation(account.uuid);
+      if (!current()) { throw new Error('Session changed'); }
+      if (cached) {
+        const restored: CloudLibrary = { generation: session.generation, activity: cached.activity,
+          observedAt: cached.observedAt, watchlist: cached.watchlist, watchedMovies: cached.watchedMovies,
+          shows: cached.shows, moviePlays: cached.moviePlays };
+        this.cloud = restored;
+        this.cloudUuid = account.uuid;
         this.resetCollection();
-        if (this.tab === 'library' && this.collectionGrid && !this.selectedMedia) { this.loadCollectionPosters(); }
-        this.cloudStatus = '云端读取完成；尚未修改本机或云端记录。';
+        this.cloudStatus = '已读取本账户缓存，正在核对云端版本…';
       }
+      let snapshot = this.cloud;
+      try {
+        const revision = await readActivity(session);
+        if (!snapshot || snapshot.activity !== revision) {
+          snapshot = await readCloudLibrary(session);
+        }
+        const verified = await readSyncAccount(session);
+        if (!current() || verified.uuid !== account.uuid || await readActivity(session) !== snapshot.activity) {
+          throw new Error('Account or activity changed');
+        }
+        if (!current()) { throw new Error('Session changed'); }
+        await store.saveRemoteObservation(account.uuid, snapshot);
+        if (!current()) { throw new Error('Session changed'); }
+        this.cloud = snapshot;
+        this.cloudUuid = account.uuid;
+        this.libraryEvidence = [];
+        this.cloudFresh = true;
+      } catch (error) {
+        if (!current() || !this.cloud || this.cloudUuid !== account.uuid) { throw new Error('读取云端失败'); }
+        snapshot = this.cloud;
+      }
+      if (!snapshot || !current()) { throw new Error('Observation unavailable'); }
+      const result = await projectLibrary(store, this.mediaRecords, snapshot, account.uuid, clientId,
+        this.cloudFresh, current, (done: number, total: number): void => {
+          this.cloudStatus = '计算个人库及补齐目录 ' + done + '/' + total;
+        });
+      if (!current()) { throw new Error('Session changed'); }
+      this.libraryEvidence = result.evidence;
+      this.resetCollection();
+      this.cloudStatus = (this.cloudFresh ? '云端版本已核对' : '使用上次缓存（非实时）') +
+        ' · 缺少目录 ' + result.missing + ' 部 · 下载失败 ' + result.failed + ' 部；未写入 Trakt。';
+      if (this.tab === 'library' && this.collectionGrid && !this.selectedMedia) { this.loadCollectionPosters(); }
     } catch (error) {
-      this.clearCloud();
-      this.cloudStatus = '读取失败或数据在读取中变化。请检查网络、授权及 API 限额后重试；原记录未改动。';
-    } finally {
-      this.cloudBusy = false;
-    }
+      if (!this.cloud || !traktAuth.isCurrent(clientId, this.cloud.generation)) { this.clearCloud(); }
+      this.cloudStatus = '读取未完成：' + safeSyncError(error as Error) + '；保留原记录。';
+    } finally { this.cloudBusy = false; }
   }
 
   private async importCloud(): Promise<void> {
     const snapshot = this.cloud;
-    if (!snapshot || this.cloudBusy || this.saving || !this.ready || this.authBusy || this.setupBusy) {
+    if (!snapshot || !this.cloudFresh || this.cloudBusy || this.saving || !this.ready || this.authBusy || this.setupBusy) {
       return;
     }
     if (!traktAuth.isCurrent(this.clientId, snapshot.generation)) {
@@ -2313,6 +2358,7 @@ struct Index {
 
   private invalidateNextShows(): void {
     this.nextShows = [];
+    this.libraryEvidence = [];
     this.resetCollection();
     this.nextPage = 1;
     this.nextStatus = '本机记录已变化，请刷新追剧进度。';
@@ -2320,11 +2366,19 @@ struct Index {
 
   private async loadNextShows(): Promise<void> {
     const store = this.episodeStore;
-    if (!store || !this.episodeReady || this.localBusy || this.syncBusy || this.backupBusy) { return; }
+    if (!store || !this.episodeReady || this.localBusy || this.cloudBusy || this.syncBusy || this.backupBusy) { return; }
     this.localBusy = true;
     this.nextStatus = '正在计算本机已缓存剧集进度…';
     try {
       this.nextShows = await readNextShows(store);
+      const snapshot = this.cloud;
+      const uuid = this.cloudUuid;
+      const clientId = this.clientId;
+      const active = snapshot && this.signedIn && traktAuth.isCurrent(clientId, snapshot.generation) ? snapshot : undefined;
+      const result = await projectLibrary(store, this.mediaRecords, active, uuid, clientId, false,
+        (): boolean => !active || (this.cloudUuid === uuid && traktAuth.isCurrent(clientId, active.generation)),
+        (done: number, total: number): void => {});
+      this.libraryEvidence = result.evidence;
       this.resetCollection();
       if (this.tab === 'library' && this.collectionGrid && !this.selectedMedia) { this.loadCollectionPosters(); }
       this.nextPage = 1;
@@ -2797,8 +2851,13 @@ struct Index {
       const media: Media = { id: show.id, title: show.title, kind: 'show', year: show.year ?? 0, watched: false };
       return { media: media, watchedEpisodes: show.watchedEpisodes };
     });
-    const localShows = this.nextShows.map((show: NextShow): LibraryShowEvidence =>
-      ({ media: show.media, watchedEpisodes: show.completed, sections: show.sections }));
+    const localShows = this.libraryEvidence.filter((show: LibraryShowEvidence) => cloud ? show.merged === true : !show.merged);
+    const seen: Set<string> = new Set<string>(localShows.map((show: LibraryShowEvidence) => show.media.id));
+    for (const show of this.nextShows) {
+      if (!seen.has(show.media.id)) {
+        localShows.push({ media: show.media, watchedEpisodes: show.completed, sections: cloud ? undefined : show.sections });
+      }
+    }
     return buildPersonalLibrary(this.mediaRecords, cloud?.watchedMovies ?? [], cloud?.watchlist ?? [],
       cloudShows, localShows);
   }
@@ -2916,8 +2975,9 @@ struct Index {
         this.collectionFilterButton('正在追', 'watching')
         this.collectionFilterButton('已完结', 'finished')
         this.collectionFilterButton('等待更新', 'upcoming')
+        this.collectionFilterButton('待核实', 'unclassified')
       }.width('100%')
-      Text('分类依据完整目录与本机逐集记录；云端证据较多或资料缺失时保留待核实。').fontSize(12).width('100%')
+      Text('分类依据完整目录、云端逐集记录和本机明确操作；缺少资料时显示待核实。').fontSize(12).width('100%')
       if (this.collectionFilter === 'tracking') {
         Text('明确本机追剧或具有观看证据的旧剧集；仅下载目录不自动追剧。').fontSize(12)
         if (!this.signedIn) {
@@ -3175,7 +3235,10 @@ struct Index {
     if (value === 'discover' && this.discoverItems.length === 0 && !this.discoverBusy) {
       this.loadDiscover();
     }
-    if (value === 'library' && this.episodeReady && !this.nextShows.length) { this.loadNextShows(); }
+    if (value === 'library' && this.episodeReady && this.ready) {
+      if (this.signedIn && (!this.cloud || !traktAuth.isCurrent(this.clientId, this.cloud.generation))) { this.loadCloud(); }
+      else if (!this.libraryEvidence.length) { this.loadNextShows(); }
+    }
     if (value === 'library' && this.collectionGrid && this.collectionCards.length === 0 && !this.collectionBusy) {
       this.loadCollectionPosters();
     }

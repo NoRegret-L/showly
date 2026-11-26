@@ -4,6 +4,7 @@ import { http } from '@kit.NetworkKit';
 import { Media } from '../model/Media';
 import { CommonEntry, CommonUpdate, commonId } from '../model/ThreeWay';
 import { canReadDetails, readDetails } from './TraktDetails';
+import { RemoteLibraryObservation, validateObservation } from '../model/RemoteObservation';
 import { FullEpisodeCatalog, ScheduledSeason, ScheduledEpisode, airDate, aired, scheduleEpisodes, validateFullCatalog } from '../model/ShowCatalog';
 
 interface EpisodeIds { trakt: number; }
@@ -200,6 +201,7 @@ export class EpisodeStore {
     const db = await relationalStore.getRdbStore(context, config);
     await db.executeSql('CREATE TABLE IF NOT EXISTS episode_catalog (show_id TEXT PRIMARY KEY, catalog TEXT NOT NULL, updated_at INTEGER NOT NULL)');
     await db.executeSql('CREATE TABLE IF NOT EXISTS episode_schedule (show_id TEXT PRIMARY KEY, payload TEXT NOT NULL)');
+    await db.executeSql('CREATE TABLE IF NOT EXISTS remote_library_observation (account_uuid TEXT PRIMARY KEY, payload TEXT NOT NULL)');
     // A single row represents one user action, including a whole season. SQLite
     // commits that row atomically: no partially marked seasons or split state/log.
     await db.executeSql('CREATE TABLE IF NOT EXISTS episode_event (seq INTEGER PRIMARY KEY AUTOINCREMENT, show_id TEXT NOT NULL, episode_ids TEXT NOT NULL, watched INTEGER NOT NULL CHECK(watched IN (0,1)), changed_at INTEGER NOT NULL)');
@@ -305,6 +307,36 @@ export class EpisodeStore {
       validateFullCatalog(full, showId);
       return full;
     } finally { rows.close(); }
+  }
+
+  // Public schedule only: no eligible-catalog replacement, restore verification,
+  // journal event, account binding, receipt or upload consent.
+  async saveObservedSchedule(full: FullEpisodeCatalog): Promise<void> {
+    validateFullCatalog(full, full.media.id);
+    const old = await this.fullCatalog(full.media.id);
+    if (old && scheduleEpisodes(old).length > 0 && scheduleEpisodes(full).length === 0) {
+      throw new Error('Empty replacement schedule');
+    }
+    await this.db.executeSql('INSERT OR REPLACE INTO episode_schedule(show_id,payload) VALUES(?,?)',
+      [full.media.id, JSON.stringify(full)]);
+  }
+
+  async readRemoteObservation(uuid: string): Promise<RemoteLibraryObservation | undefined> {
+    if (!uuid || uuid.trim() !== uuid) { throw new Error('Invalid observation scope'); }
+    const rows = await this.db.querySql('SELECT payload FROM remote_library_observation WHERE account_uuid=?', [uuid]);
+    try {
+      if (!rows.goToFirstRow()) { return undefined; }
+      const snapshot = JSON.parse(rows.getString(0)) as RemoteLibraryObservation;
+      validateObservation(snapshot);
+      return snapshot;
+    } finally { rows.close(); }
+  }
+
+  async saveRemoteObservation(uuid: string, snapshot: RemoteLibraryObservation): Promise<void> {
+    if (!uuid || uuid.trim() !== uuid) { throw new Error('Invalid observation scope'); }
+    validateObservation(snapshot);
+    await this.db.executeSql('INSERT OR REPLACE INTO remote_library_observation(account_uuid,payload) VALUES(?,?)',
+      [uuid, JSON.stringify(snapshot)]);
   }
 
   async saveFullCatalog(full: FullEpisodeCatalog): Promise<void> {

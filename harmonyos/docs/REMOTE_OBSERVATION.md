@@ -1,0 +1,11 @@
+# v0.9.3e.1a — observation layer
+Baseline: Android e08cb90ba0205ed9401a11265b912b0302f253b5; Harmony 00f8218559042683bdf5d9ba73dce09c138c8026.
+Reference: TraktImportWatchedRunner and ShowsSyncRunner (domain activity, per-show changes, persistent catalog). Reuse SQLite and existing paginated API. No new external library, thresholds or sync write permissions.
+
+- Private snapshots keyed by verified stable account UUID; validate complete pagination and activity before replacement. Cache is never a write preview; manual import requires a freshly verified revision. Old per-account observations retained but not selected without online identity verification. Public schedules are independent of account and write eligibility. A different bound account's episode state and journal are excluded from merged classification.
+- Preserve ordinary and special watched positions, counts and last-watched timestamps. Classification ignores special positions, maps ordinary positions to catalog IDs and overlays explicit journal decisions; unmatched positions yield unknown. Latest count and timestamp are not a complete play history. With cloud present do not use stale imported episode baseline as authoritative positives.
+- Fill missing, changed or unmatched public schedules for personal followed/watchlist candidates. Stop further downloads on first network failure, retain existing cache and report missing/failed; retry by refresh. Catalog changes independent of watch activity may require detail refresh; no periodic refresh yet. No automatic update to eligible catalog, restored verification, sync queue, baselines or consent.
+- Device acceptance: upgrade; refresh personal cloud library; compare watched/finished/upcoming against Android; verify a cloud-only show classifies without manually importing; check pending/unclassified and partial download; repeat refresh and account switch; check all old sync guards and histories. After cold start online account verification required; offline prior authenticated in-memory session may still show stale cache.
+- Host tests: python3 harmonyos/tools/test_remote_observation.py; requires tsc and Node. HAP and real account acceptance separate.
+
+CI runs all three pure-model test scripts before HAP build using a pinned TypeScript 5.8.3 development-only compiler. No runtime dependency is added.

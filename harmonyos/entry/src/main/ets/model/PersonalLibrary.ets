@@ -6,6 +6,7 @@ export interface LibraryShowEvidence {
   media: Media;
   watchedEpisodes: number;
   sections?: string[];
+  merged?: boolean;
 }
 export interface PersonalLibraryRow {
   media: Media;
@@ -15,6 +16,7 @@ export interface PersonalLibraryRow {
   localEpisodes: number;
   cloudEpisodes: number;
   sections?: string[];
+  merged?: boolean;
 }
 
 function addRow(rows: Map<string, PersonalLibraryRow>, media: Media): PersonalLibraryRow {
@@ -56,6 +58,7 @@ export function buildPersonalLibrary(records: MediaRecord[], cloudMovies: Media[
       const row = addRow(rows, show.media);
       row.localEpisodes = show.watchedEpisodes;
       row.sections = show.sections;
+      row.merged = show.merged;
     }
   }
   return Array.from(rows.values());
@@ -71,7 +74,11 @@ export function filterPersonalLibrary(rows: PersonalLibraryRow[], filter: string
   if (filter === 'tracking') { return rows.filter((row: PersonalLibraryRow) => hasTrackingEvidence(row)); }
   if (filter === 'watching' || filter === 'finished' || filter === 'upcoming') {
     return rows.filter((row: PersonalLibraryRow) => hasTrackingEvidence(row) &&
-      (row.sections?.includes(filter) ?? false) && row.cloudEpisodes <= row.localEpisodes);
+      (row.sections?.includes(filter) ?? false) && (row.merged === true || row.cloudEpisodes <= row.localEpisodes));
+  }
+  if (filter === 'unclassified') {
+    return rows.filter((row: PersonalLibraryRow) => hasTrackingEvidence(row) &&
+      (!(row.sections?.length) || (!row.merged && row.cloudEpisodes > row.localEpisodes)));
   }
   if (filter === 'watched') { return rows.filter((row: PersonalLibraryRow) => row.watched); }
   return rows;
@@ -86,11 +93,11 @@ export function personalLibraryLabel(row: PersonalLibraryRow): string {
   if (hasTrackingEvidence(row)) {
     if (row.localRecord?.followState === 'yes') { labels.push('本机追剧'); }
     const sections = row.sections ?? [];
-    if (sections.length === 0 || row.cloudEpisodes > row.localEpisodes) { labels.push('追剧状态待核实'); }
+    if (sections.length === 0 || (!row.merged && row.cloudEpisodes > row.localEpisodes)) { labels.push('追剧状态待核实'); }
     else {
-      if (sections.includes('watching')) { labels.push('本机正在追'); }
-      if (sections.includes('finished')) { labels.push('本机已追完结剧'); }
-      if (sections.includes('upcoming')) { labels.push('本机等待更新'); }
+      if (sections.includes('watching')) { labels.push('正在追'); }
+      if (sections.includes('finished')) { labels.push('已追完结剧'); }
+      if (sections.includes('upcoming')) { labels.push('等待更新'); }
     }
   }
   if (!row.localRecord) { labels.push('仅浏览'); }

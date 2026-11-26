@@ -1,6 +1,7 @@
 import { http } from '@kit.NetworkKit';
 import { Media } from '../model/Media';
 import { TraktSession, traktAuth } from './TraktAuth';
+import { RemotePlayPosition, RemoteMovieObservation, RemoteLibraryObservation, RemoteShowObservation, validateObservation } from '../model/RemoteObservation';
 
 interface Ids {
   trakt: number;
@@ -14,6 +15,7 @@ interface Title {
 interface Episode {
   number: number;
   plays?: number;
+  last_watched_at?: string;
 }
 interface Season {
   number: number;
@@ -21,6 +23,8 @@ interface Season {
 }
 interface SyncItem {
   plays?: number;
+  last_watched_at?: string;
+  last_updated_at?: string;
   movie?: Title;
   show?: Title;
   seasons?: Season[];
@@ -34,18 +38,8 @@ interface Page {
   pages: number;
   total: number;
 }
-export interface ShowProgress {
-  id: string;
-  title: string;
-  watchedEpisodes: number;
-  year?: number;
-}
-export interface CloudLibrary {
-  generation: number;
-  watchlist: Media[];
-  watchedMovies: Media[];
-  shows: ShowProgress[];
-}
+export type ShowProgress = RemoteShowObservation;
+export type CloudLibrary = RemoteLibraryObservation;
 
 function ensureCurrent(session: TraktSession): void {
   if (!traktAuth.isCurrent(session.clientId, session.generation)) {
@@ -164,6 +158,7 @@ function showProgress(rows: SyncItem[]): ShowProgress[] {
     }
     seen.add(show.id);
     const episodes: Set<string> = new Set<string>();
+    const positions: RemotePlayPosition[] = [];
     for (const season of row.seasons) {
       if (!Number.isInteger(season.number) || !Array.isArray(season.episodes)) {
         throw new Error('Invalid season progress');
@@ -173,18 +168,28 @@ function showProgress(rows: SyncItem[]): ShowProgress[] {
           throw new Error('Invalid episode progress');
         }
         if (episode.plays > 0) {
-          episodes.add(season.number + ':' + episode.number);
+          const key = season.number + ':' + episode.number;
+          if (episodes.has(key)) { throw new Error('Duplicate observed episode'); }
+          episodes.add(key);
+          positions.push({ season: season.number, number: episode.number, plays: episode.plays,
+            lastWatchedAt: episode.last_watched_at ?? '' });
         }
       }
     }
-    result.push({ id: show.id, title: show.title, year: show.year, watchedEpisodes: episodes.size });
+    result.push({ id: show.id, title: show.title, year: show.year, watchedEpisodes: episodes.size,
+      positions: positions, updatedAt: row.last_updated_at ?? '' });
   }
   return result;
 }
 
 export async function readCloudLibrary(session: TraktSession): Promise<CloudLibrary> {
   const before = await readActivity(session);
-  const movies = uniqueTitles(await readAll(session, 'sync/watched/movies'), 'movie', true);
+  const movieRows = await readAll(session, 'sync/watched/movies');
+  const movies = uniqueTitles(movieRows, 'movie', true);
+  const moviePlays = movieRows.map((row: SyncItem): RemoteMovieObservation => {
+    return { id: titleToMedia(row, 'movie', true).id, plays: row.plays ?? 0,
+      lastWatchedAt: row.last_watched_at ?? '' };
+  });
   const shows = showProgress(await readAll(session, 'sync/watched/shows?extended=progress'));
   const queuedMovies = uniqueTitles(await readAll(session, 'sync/watchlist/movies'), 'movie', false);
   const queuedShows = uniqueTitles(await readAll(session, 'sync/watchlist/shows'), 'show', false);
@@ -193,8 +198,10 @@ export async function readCloudLibrary(session: TraktSession): Promise<CloudLibr
   if (before !== after) {
     throw new Error('Trakt activity changed during import; retry');
   }
-  return { generation: session.generation, watchlist: [...queuedMovies, ...queuedShows],
-    watchedMovies: movies, shows: shows };
+  const snapshot: CloudLibrary = { generation: session.generation, activity: after, observedAt: Date.now(),
+    watchlist: [...queuedMovies, ...queuedShows], watchedMovies: movies, shows: shows, moviePlays: moviePlays };
+  validateObservation(snapshot);
+  return snapshot;
 }
 
 // Import only new titles; explicit local decisions always win.
