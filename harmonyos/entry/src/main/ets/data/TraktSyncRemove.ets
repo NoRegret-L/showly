@@ -1,7 +1,7 @@
 import { http } from '@kit.NetworkKit';
 import { TraktSession, traktAuth } from './TraktAuth';
 import { EpisodeStore, JournalIntent } from './EpisodeStore';
-import { SyncPreview, SyncDifference, readSyncAccount } from './TraktSyncPreview';
+import { SyncPreview, SyncDifference, readSyncAccount, invalidateWatchedCache } from './TraktSyncPreview';
 import { readActivity } from './TraktLibrary';
 import { readEpisodeHistory, SinglePlay } from './TraktPlayHistory';
 
@@ -44,6 +44,7 @@ export async function removeSelectedPlay(store: EpisodeStore, session: TraktSess
     const body: RemoveBody = { ids: [receipt.historyId] };
     const request = http.createHttp();
     try {
+      invalidateWatchedCache();
       await request.request('https://api.trakt.tv/sync/history/remove', {
         method: http.RequestMethod.POST,
         header: { 'Content-Type': 'application/json', 'trakt-api-version': '2',

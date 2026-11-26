@@ -1,7 +1,7 @@
 import { http } from '@kit.NetworkKit';
 import { TraktSession, traktAuth } from './TraktAuth';
 import { EpisodeStore } from './EpisodeStore';
-import { SyncPreview, SyncDifference, buildSyncPreview, readSyncAccount } from './TraktSyncPreview';
+import { SyncPreview, SyncDifference, buildSyncPreview, readSyncAccount, invalidateWatchedCache } from './TraktSyncPreview';
 import { readActivity } from './TraktLibrary';
 import { readEpisodeHistory, sameMinute } from './TraktPlayHistory';
 
@@ -87,6 +87,7 @@ export async function uploadSelectedEpisode(store: EpisodeStore, session: TraktS
     const request = http.createHttp();
     try {
       const body: UploadBody = { episodes: [{ ids: { trakt: episodeId }, watched_at: watchedAt }] };
+      invalidateWatchedCache();
       const response = await request.request('https://api.trakt.tv/sync/history', {
         method: http.RequestMethod.POST,
         header: { 'Content-Type': 'application/json', 'trakt-api-version': '2',

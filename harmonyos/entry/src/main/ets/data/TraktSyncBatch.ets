@@ -1,7 +1,7 @@
 import { http } from '@kit.NetworkKit';
 import { TraktSession, traktAuth } from './TraktAuth';
-import { EpisodeStore } from './EpisodeStore';
-import { SyncPreview, SyncDifference, buildSyncPreview, readSyncAccount } from './TraktSyncPreview';
+import { EpisodeStore, QueueEntry } from './EpisodeStore';
+import { SyncPreview, SyncDifference, buildSyncPreview, readSyncAccount, invalidateWatchedCache } from './TraktSyncPreview';
 import { readEpisodeHistory, sameMinute } from './TraktPlayHistory';
 import { readActivity } from './TraktLibrary';
 
@@ -11,7 +11,7 @@ interface BatchBody { episodes: BatchEpisode[]; }
 interface AddedCounts { episodes: number; movies?: number; }
 interface MissingItems { episodes?: BatchEpisode[]; }
 interface BatchResponse { added: AddedCounts; not_found?: MissingItems; }
-export interface BatchResult { message: string; }
+export interface BatchResult { message: string; completedIds: number[]; }
 
 function current(session: TraktSession): void {
   if (!traktAuth.isCurrent(session.clientId, session.generation)) { throw new Error('Session changed'); }
@@ -21,17 +21,24 @@ function current(session: TraktSession): void {
 // Do not upload an implicit default or an imported baseline record.
 export async function uploadBatch(store: EpisodeStore, session: TraktSession,
   uuid: string, selectedIds: number[], watchedAt: string, mode: string,
-  preview?: SyncPreview): Promise<BatchResult> {
+  preview?: SyncPreview, queued: QueueEntry[] = []): Promise<BatchResult> {
   if (!selectedIds.length || new Set<number>(selectedIds).size !== selectedIds.length ||
       selectedIds.some((id: number) => !Number.isSafeInteger(id) || id <= 0) ||
       !Number.isFinite(Date.parse(watchedAt)) ||
-      (mode !== 'manual' && mode !== 'auto')) { throw new Error('Invalid batch'); }
+      (mode !== 'manual' && mode !== 'auto' && mode !== 'queue')) { throw new Error('Invalid batch'); }
   if (mode === 'manual' && (!preview || preview.account.uuid !== uuid ||
       preview.account.generation !== session.generation ||
       selectedIds.some((id: number) => !preview.rows.some((row: SyncDifference) =>
         row.episodeId === id && row.kind === 'addition' && !row.uploadBlocked)))) {
     throw new Error('Invalid reviewed selection');
   }
+  if (mode === 'queue') {
+    const currentQueue = await store.queueEntries(uuid);
+    if (selectedIds.some((id: number) => !queued.some((entry: QueueEntry) => entry.episodeId === id &&
+      currentQueue.some((current: QueueEntry) => current.episodeId === id && current.seq === entry.seq &&
+        current.watchedAt === entry.watchedAt)))) { throw new Error('Queue changed'); }
+  }
+  const completedIds: number[] = [];
   const account = await readSyncAccount(session);
   if (account.uuid !== uuid || await store.boundAccount() !== uuid) { throw new Error('Account mismatch'); }
   const fresh = await buildSyncPreview(store, session);
@@ -45,16 +52,16 @@ export async function uploadBatch(store: EpisodeStore, session: TraktSession,
       blocked++;
       continue;
     }
-    if (row.cloudWatched) { skipped++; continue; }
+    if (row.cloudWatched) { skipped++; completedIds.push(id); continue; }
     if (row.uploadBlocked || await store.hasUploadAttempt(uuid, id)) { blocked++; continue; }
     const history = await readEpisodeHistory(session, id);
-    if (history.count > 0) { skipped++; continue; }
+    if (history.count > 0) { skipped++; completedIds.push(id); continue; }
     send.push(id);
   }
   if (!send.length) {
     const message = '未发送；已存在 ' + skipped + ' 集，受保护或不符合条件 ' + blocked + ' 集。';
     await store.logSync(uuid, mode, selectedIds, message);
-    return { message: message };
+    return { message: message, completedIds: completedIds };
   }
   if (await readActivity(session) !== fresh.activity) { throw new Error('Cloud changed before batch'); }
   const reserved: number[] = [];
@@ -72,12 +79,13 @@ export async function uploadBatch(store: EpisodeStore, session: TraktSession,
     if (verified.uuid !== uuid || await store.boundAccount() !== uuid) { throw new Error('Account changed'); }
     current(session);
     const body: BatchBody = { episodes: send.map((id: number): BatchEpisode => {
-      return { ids: { trakt: id }, watched_at: watchedAt };
+      return { ids: { trakt: id }, watched_at: queued.find((entry: QueueEntry) => entry.episodeId === id)?.watchedAt ?? watchedAt };
     }) };
     const request = http.createHttp();
     let accepted = false;
     try {
       // Any failure after entering request() is ambiguous, even an HTTP error.
+      invalidateWatchedCache();
       sent = true;
       const response = await request.request('https://api.trakt.tv/sync/history', {
         method: http.RequestMethod.POST,
@@ -104,8 +112,9 @@ export async function uploadBatch(store: EpisodeStore, session: TraktSession,
         if (history.count > 0) {
           await store.confirmUpload(uuid, id);
           present++;
+          completedIds.push(id);
           if (accepted && history.count === 1 && history.plays[0].action === 'watch' &&
-              sameMinute(history.plays[0].watched_at, watchedAt)) {
+              sameMinute(history.plays[0].watched_at, queued.find((entry: QueueEntry) => entry.episodeId === id)?.watchedAt ?? watchedAt)) {
             await store.saveUndoReceipt(uuid, id, history.plays[0].id, history.plays[0].watched_at);
             receipts++;
           }
@@ -118,17 +127,17 @@ export async function uploadBatch(store: EpisodeStore, session: TraktSession,
       (send.length - present) + ' 集，撤销凭证 ' + receipts + ' 集，跳过 ' + skipped +
       ' 集，受保护 ' + blocked + ' 集。' + (accepted ? '' : ' 服务端新增数量未完整确认。');
     await store.logSync(uuid, mode, send, message);
-    return { message: message };
+    return { message: message, completedIds: completedIds };
   } catch (error) {
     if (!sent) {
       // Only this live invocation knows no POST was issued.
       for (const id of reserved) { await store.releaseUnsentUpload(uuid, id); }
       const message = '发送前校验失败，未上传；已释放本次未发送凭证，可手动重新预览。';
       await store.logSync(uuid, mode, selectedIds, message);
-      return { message: message };
+      return { message: message, completedIds: completedIds };
     }
     const message = '请求可能已发送，结果未确认；保留全部凭证，禁止盲目重试。';
     await store.logSync(uuid, mode, send, message);
-    return { message: message };
+    return { message: message, completedIds: completedIds };
   }
 }

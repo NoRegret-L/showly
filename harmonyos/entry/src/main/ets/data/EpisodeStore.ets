@@ -34,7 +34,21 @@ export interface UndoReceipt {
   watchedAt: string;
   removalState: number;
 }
+export interface AutoConsent {
+  uuid: string;
+  clientId: string;
+}
+export interface QueueEntry {
+  episodeId: number;
+  seq: number;
+  label: string;
+  watchedAt: string;
+  blocked: boolean;
+}
 export interface JournalIntent {
+  seq: number;
+  autoUuid: string;
+  changedAt: number;
   episodeId: number;
   showId: string;
   label: string;
@@ -172,6 +186,18 @@ export class EpisodeStore {
     await db.executeSql('CREATE TABLE IF NOT EXISTS sync_play_receipt (account_uuid TEXT NOT NULL, episode_id INTEGER NOT NULL, history_id INTEGER NOT NULL, watched_at TEXT NOT NULL, removal_state INTEGER NOT NULL DEFAULT 0 CHECK(removal_state IN (0,1,2)), PRIMARY KEY(account_uuid,episode_id), UNIQUE(account_uuid,history_id))');
     await db.executeSql('CREATE TABLE IF NOT EXISTS sync_cloud_baseline (account_uuid TEXT PRIMARY KEY, episode_ids TEXT NOT NULL, imported_at INTEGER NOT NULL)');
     await db.executeSql('CREATE TABLE IF NOT EXISTS sync_run_log (seq INTEGER PRIMARY KEY AUTOINCREMENT, account_uuid TEXT NOT NULL, mode TEXT NOT NULL, episode_ids TEXT NOT NULL, status TEXT NOT NULL, created_at INTEGER NOT NULL)');
+    // Additive, restart-safe migration. Legacy events default to no upload consent.
+    const columns = await db.querySql('PRAGMA table_info(episode_event)');
+    let hasAuto = false;
+    try {
+      while (columns.goToNextRow()) {
+        if (columns.getString(1) === 'auto_uuid') { hasAuto = true; }
+      }
+    } finally { columns.close(); }
+    if (!hasAuto) { await db.executeSql("ALTER TABLE episode_event ADD COLUMN auto_uuid TEXT NOT NULL DEFAULT ''"); }
+    await db.executeSql('CREATE TABLE IF NOT EXISTS sync_auto_consent (slot INTEGER PRIMARY KEY CHECK(slot=1), account_uuid TEXT NOT NULL, client_id TEXT NOT NULL)');
+    await db.executeSql('CREATE TABLE IF NOT EXISTS sync_queue_done (account_uuid TEXT NOT NULL, event_seq INTEGER NOT NULL, episode_id INTEGER NOT NULL, PRIMARY KEY(account_uuid,event_seq,episode_id))');
+    await db.executeSql('CREATE TABLE IF NOT EXISTS sync_play_archive (account_uuid TEXT NOT NULL, episode_id INTEGER NOT NULL, history_id INTEGER NOT NULL, watched_at TEXT NOT NULL, archived_at INTEGER NOT NULL, PRIMARY KEY(account_uuid,history_id))');
     return new EpisodeStore(db);
   }
 
@@ -219,14 +245,16 @@ export class EpisodeStore {
     return materialize(catalog, events, baseline);
   }
 
-  async mark(showId: string, ids: number[], watched: boolean): Promise<void> {
+  async mark(showId: string, ids: number[], watched: boolean, autoUuid: string = ''): Promise<void> {
     const catalog = await this.catalog(showId);
     if (!catalog || ids.length === 0) { throw new Error('Missing episode catalog'); }
     const allowed: Set<number> = new Set<number>(catalog.episodes.map((ep: LocalEpisode) => ep.id));
     const unique: Set<number> = new Set<number>(ids);
     if (ids.some((id: number) => !allowed.has(id))) { throw new Error('Episode no longer available'); }
-    await this.db.executeSql('INSERT INTO episode_event(show_id,episode_ids,watched,changed_at) VALUES(?,?,?,?)',
-      [showId, JSON.stringify(Array.from(unique)), watched ? 1 : 0, Date.now()]);
+    const consent = autoUuid ? await this.autoConsent() : undefined;
+    const authorized = watched && consent?.uuid === autoUuid && await this.boundAccount() === autoUuid ? autoUuid : '';
+    await this.db.executeSql('INSERT INTO episode_event(show_id,episode_ids,watched,changed_at,auto_uuid) VALUES(?,?,?,?,?)',
+      [showId, JSON.stringify(Array.from(unique)), watched ? 1 : 0, Date.now(), authorized]);
   }
 
   async boundAccount(): Promise<string> {
@@ -246,13 +274,79 @@ export class EpisodeStore {
     if (await this.boundAccount() !== uuid) { throw new Error('Account binding mismatch'); }
   }
 
+  async autoConsent(): Promise<AutoConsent | undefined> {
+    const rows = await this.db.querySql('SELECT account_uuid,client_id FROM sync_auto_consent WHERE slot=1');
+    try {
+      if (!rows.goToFirstRow()) { return undefined; }
+      const uuid = rows.getString(0);
+      const clientId = rows.getString(1);
+      if (!uuid || !clientId) { throw new Error('Invalid consent'); }
+      return { uuid: uuid, clientId: clientId };
+    } finally { rows.close(); }
+  }
+
+  async saveAutoConsent(uuid: string, clientId: string): Promise<void> {
+    if (!clientId || await this.boundAccount() !== uuid) { throw new Error('Account mismatch'); }
+    await this.db.executeSql('INSERT OR REPLACE INTO sync_auto_consent(slot,account_uuid,client_id) VALUES(1,?,?)', [uuid, clientId]);
+  }
+
+  async clearAutoConsent(): Promise<void> {
+    await this.db.executeSql('DELETE FROM sync_auto_consent WHERE slot=1');
+  }
+
+  async queueEntries(uuid: string): Promise<QueueEntry[]> {
+    if (await this.boundAccount() !== uuid) { throw new Error('Account mismatch'); }
+    const done = await this.db.querySql('SELECT event_seq,episode_id FROM sync_queue_done WHERE account_uuid=?', [uuid]);
+    const completed: Set<string> = new Set<string>();
+    try {
+      while (done.goToNextRow()) { completed.add(done.getLong(0) + ':' + done.getLong(1)); }
+    } finally { done.close(); }
+    const intents = await this.journalIntents();
+    const result: QueueEntry[] = [];
+    for (const intent of intents) {
+      if (!intent.watched || intent.autoUuid !== uuid || completed.has(intent.seq + ':' + intent.episodeId)) { continue; }
+      result.push({ episodeId: intent.episodeId, seq: intent.seq, label: intent.label,
+        watchedAt: new Date(intent.changedAt).toISOString(),
+        blocked: !intent.catalogKnown || await this.hasUploadAttempt(uuid, intent.episodeId) });
+    }
+    return result;
+  }
+
+  async finishQueue(uuid: string, entry: QueueEntry): Promise<void> {
+    if (await this.boundAccount() !== uuid) { throw new Error('Account mismatch'); }
+    await this.db.executeSql('INSERT OR IGNORE INTO sync_queue_done(account_uuid,event_seq,episode_id) VALUES(?,?,?)',
+      [uuid, entry.seq, entry.episodeId]);
+  }
+
   async hasUploadAttempt(uuid: string, episodeId: number): Promise<boolean> {
     const rows = await this.db.querySql('SELECT episode_id FROM sync_upload_guard WHERE account_uuid=? AND episode_id=?', [uuid, episodeId]);
-    try { return rows.goToFirstRow(); } finally { rows.close(); }
+    let exists = false;
+    try { exists = rows.goToFirstRow(); } finally { rows.close(); }
+    if (!exists) { return false; }
+    const receipt = await this.undoReceipt(uuid, episodeId);
+    return receipt?.removalState !== 2;
   }
 
   async reserveUpload(uuid: string, episodeId: number): Promise<void> {
     if (!validId(episodeId) || await this.boundAccount() !== uuid) { throw new Error('Invalid upload identity'); }
+    // Only a verified prior removal allows a fresh attempt. Archive the old
+    // receipt and rotate its guard atomically, so a crash cannot erase provenance.
+    const receipt = await this.undoReceipt(uuid, episodeId);
+    if (receipt?.removalState === 2) {
+      this.db.beginTransaction();
+      try {
+        await this.db.executeSql('INSERT INTO sync_play_archive(account_uuid,episode_id,history_id,watched_at,archived_at) SELECT account_uuid,episode_id,history_id,watched_at,? FROM sync_play_receipt WHERE account_uuid=? AND episode_id=? AND removal_state=2',
+          [Date.now(), uuid, episodeId]);
+        await this.db.executeSql('DELETE FROM sync_play_receipt WHERE account_uuid=? AND episode_id=? AND removal_state=2', [uuid, episodeId]);
+        await this.db.executeSql('DELETE FROM sync_upload_guard WHERE account_uuid=? AND episode_id=? AND confirmed=1', [uuid, episodeId]);
+        await this.db.executeSql('INSERT INTO sync_upload_guard(account_uuid,episode_id,attempted_at,confirmed) VALUES(?,?,?,0)', [uuid, episodeId, Date.now()]);
+        this.db.commit();
+      } catch (error) {
+        this.db.rollBack();
+        throw new Error('Rearm transaction failed');
+      }
+      return;
+    }
     await this.db.executeSql('INSERT INTO sync_upload_guard(account_uuid,episode_id,attempted_at,confirmed) VALUES(?,?,?,0)',
       [uuid, episodeId, Date.now()]);
   }
@@ -336,18 +430,21 @@ export class EpisodeStore {
   }
 
   async syncLogs(uuid: string): Promise<string[]> {
-    const rows = await this.db.querySql('SELECT mode,status,created_at FROM sync_run_log WHERE account_uuid=? ORDER BY seq DESC LIMIT 12', [uuid]);
+    const rows = await this.db.querySql('SELECT mode,status,created_at,episode_ids FROM sync_run_log WHERE account_uuid=? ORDER BY seq DESC LIMIT 12', [uuid]);
     const result: string[] = [];
     try {
       while (rows.goToNextRow()) {
-        result.push(new Date(rows.getLong(2)).toLocaleString() + ' · ' + rows.getString(0) + ' · ' + rows.getString(1));
+        const ids = JSON.parse(rows.getString(3)) as number[];
+        if (!Array.isArray(ids)) { throw new Error('Invalid log'); }
+        result.push(new Date(rows.getLong(2)).toLocaleString() + ' · ' + rows.getString(0) + ' · ' +
+          rows.getString(1) + (ids.length ? ' · 分集 ID: ' + ids.join(', ') : ''));
       }
     } finally { rows.close(); }
     return result;
   }
 
   async journalIntents(): Promise<JournalIntent[]> {
-    const rows = await this.db.querySql('SELECT e.show_id,e.episode_ids,e.watched,c.catalog FROM episode_event e LEFT JOIN episode_catalog c ON c.show_id=e.show_id ORDER BY e.seq');
+    const rows = await this.db.querySql('SELECT e.show_id,e.episode_ids,e.watched,c.catalog,e.seq,e.auto_uuid,e.changed_at FROM episode_event e LEFT JOIN episode_catalog c ON c.show_id=e.show_id ORDER BY e.seq');
     const latest: Map<number, JournalIntent> = new Map<number, JournalIntent>();
     const catalogs: Map<string, EpisodeCatalog> = new Map<string, EpisodeCatalog>();
     try {
@@ -364,11 +461,15 @@ export class EpisodeStore {
           validateCatalog(catalog, showId);
           catalogs.set(showId, catalog);
         }
+        const seq = rows.getLong(4);
+        const autoUuid = rows.getString(5);
+        const changedAt = rows.getLong(6);
+        if (!validId(seq) || !validId(changedAt)) { throw new Error('Invalid event sequence'); }
         for (const id of ids) {
           const prior = latest.get(id);
           if (prior && prior.showId !== showId) { throw new Error('Conflicting episode identity'); }
           const episode = catalog?.episodes.find((ep: LocalEpisode) => ep.id === id);
-          latest.set(id, { episodeId: id, showId: showId, watched: watched === 1,
+          latest.set(id, { seq: seq, autoUuid: autoUuid, changedAt: changedAt, episodeId: id, showId: showId, watched: watched === 1,
             catalogKnown: !!episode, label: episode ?
               (catalog?.title ?? showId) + ' · S' + episode.season + 'E' + episode.number :
               showId + ' · Trakt episode ' + id });

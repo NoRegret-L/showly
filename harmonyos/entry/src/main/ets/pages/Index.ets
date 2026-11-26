@@ -11,7 +11,7 @@ import { MediaDetail, canReadDetails, readDetails, cachePoster, clearDetailMemor
 import { DiscoverItem, readDiscover } from '../data/TraktDiscover';
 import { EpisodeProgress, SeasonProgress, SeriesProgress, ChineseText, readSeriesProgress, readChinese } from '../data/TraktProgress';
 import { AppearanceStore, applyAppearance } from '../data/AppearanceStore';
-import { EpisodeStore, LocalSeriesState, LocalSeasonState, LocalEpisodeState, fetchEpisodeCatalog } from '../data/EpisodeStore';
+import { EpisodeStore, LocalSeriesState, LocalSeasonState, LocalEpisodeState, AutoConsent, QueueEntry, fetchEpisodeCatalog } from '../data/EpisodeStore';
 import { SyncAccount, SyncPreview, SyncDifference, readSyncAccount, buildSyncPreview } from '../data/TraktSyncPreview';
 import { uploadSelectedEpisode } from '../data/TraktSyncUpload';
 import { removeSelectedPlay } from '../data/TraktSyncRemove';
@@ -35,7 +35,10 @@ struct Index {
   @State batchIds: number[] = [];
   @State batchConfirm: boolean = false;
   @State importConfirm: boolean = false;
-  @State autoAccount?: SyncAccount = undefined;
+  @State autoConsent?: AutoConsent = undefined;
+  @State queueRows: QueueEntry[] = [];
+  @State showSyncLogs: boolean = false;
+  @State queueConfirm: boolean = false;
   @State autoStatus: string = '';
   @State syncLogs: string[] = [];
   @State uploadStatus: string = '';
@@ -142,7 +145,8 @@ struct Index {
 
   onPageShow(): void {
     if (this.clientId && !this.setupBusy && !this.cloudBusy && !this.syncBusy) {
-      traktAuth.restore(this.clientId);
+      if (this.episodeReady && this.autoActive()) { this.resumeQueued(); }
+      else { traktAuth.restore(this.clientId); }
     }
   }
 
@@ -151,6 +155,10 @@ struct Index {
       this.episodeStore = await EpisodeStore.open(context);
       this.localRecent = await this.episodeStore.recent();
       this.episodeReady = true;
+      const consent = await this.episodeStore.autoConsent();
+      if (consent && consent.clientId === this.clientId) { this.autoConsent = consent; }
+      await this.reloadQueue();
+      this.resumeQueued();
     } catch (error) {
       this.episodeInitStatus = '分集数据库打开失败，已停止分集写入；旧收藏不受影响。';
     }
@@ -199,15 +207,15 @@ struct Index {
     const revision = this.detailRevision;
     this.localBusy = true;
     this.confirmSeason = -1;
-    const auto = this.autoAccount;
+    const auto = this.autoActive() ? this.autoConsent : undefined;
     let saved = false;
-    const watchedAt = new Date().toISOString();
     try {
       this.invalidateSync();
-      await store.mark(item.id, ids, watched);
+      await store.mark(item.id, ids, watched, watched && auto ? auto.uuid : '');
       saved = true;
       const state = await store.read(item.id);
       this.localRecent = await store.recent();
+      await this.reloadQueue();
       if (revision === this.detailRevision) {
         this.localSeries = state;
         this.localStatus = '已保存到本机 · 本地操作完成';
@@ -219,17 +227,14 @@ struct Index {
     } finally {
       this.localBusy = false;
     }
-    if (saved && watched && auto && this.autoAccount?.uuid === auto.uuid &&
-        this.autoAccount?.generation === auto.generation) {
-      await this.runAutoAction(auto, ids, watchedAt);
-    }
+    if (saved && watched && auto && this.autoActive()) { await this.resumeQueued(); }
   }
 
   @Builder
   localEpisodesView(item: Media) {
     Column({ space: 10 }) {
       Text('本机分集管理').fontSize(20).fontWeight(FontWeight.Medium).width('100%')
-      Text('本机明确操作优先于已导入的云端记录。仅统计已播普通集；自动新增仅在本次会话主动开启后生效。')
+      Text('本机明确操作优先于已导入的云端记录。仅统计已播普通集；持久自动新增须主动开启。')
         .fontSize(12).fontColor($r('app.color.showly_secondary')).width('100%')
       if (!this.episodeReady) {
         Text(this.episodeInitStatus || '正在打开分集数据库…').fontSize(13).width('100%')
@@ -335,6 +340,7 @@ struct Index {
         return;
       }
       if (next !== this.clientId) {
+        await this.revokeAuto();
         if (!traktAuth.disconnect()) {
           this.setupStatus = '无法清除旧授权，未切换 Client ID。';
           return;
@@ -352,6 +358,7 @@ struct Index {
       this.configuring = false;
       this.setupStatus = 'Client ID 已验证并保存到本机';
       if (login) {
+        await this.revokeAuto();
         await traktAuth.begin(this.context(), this.clientId);
       }
     } catch (error) {
@@ -367,6 +374,7 @@ struct Index {
     }
     this.setupBusy = true;
     try {
+      await this.revokeAuto();
       if (!traktAuth.disconnect()) {
         this.setupStatus = '无法清除旧授权，请重试。';
         return;
@@ -394,6 +402,7 @@ struct Index {
     this.batchIds = [];
     this.batchConfirm = false;
     this.importConfirm = false;
+    this.queueConfirm = false;
     this.syncLogs = [];
     this.uploadSelectedId = 0;
     this.removeSelectedId = 0;
@@ -424,7 +433,7 @@ struct Index {
       }
       this.syncAccount = account;
       this.syncBound = bound === account.uuid;
-      if (this.syncBound) { this.syncLogs = await store.syncLogs(account.uuid); }
+      if (this.syncBound) { this.syncLogs = await store.syncLogs(account.uuid); await this.reloadQueue(); }
       this.syncStatus = this.syncBound ? '账户已验证，可以生成差异预览。' :
         bound ? '本机已绑定另一 Trakt 账户，禁止生成预览或重新绑定。' : '请核对账户并确认绑定；不会上传记录。';
       if (bound && bound !== account.uuid) { this.syncAccount = undefined; }
@@ -449,6 +458,7 @@ struct Index {
       await store.bindAccount(verified.uuid);
       this.syncBound = true;
       this.syncLogs = await store.syncLogs(verified.uuid);
+      await this.reloadQueue();
       this.syncStatus = '账户绑定成功；尚未同步任何记录。';
     } catch (error) {
       this.invalidateSync();
@@ -486,38 +496,119 @@ struct Index {
   }
 
   private autoActive(): boolean {
-    const account = this.autoAccount;
-    return !!account && this.signedIn && traktAuth.isCurrent(this.clientId, account.generation);
+    return !!this.autoConsent && !!this.clientId && this.autoConsent.clientId === this.clientId;
   }
 
-  private enableAuto(): void {
-    if (this.syncBusy || this.localBusy || this.cloudBusy || this.setupBusy || !this.syncBound ||
-        !this.syncAccount || !traktAuth.isCurrent(this.clientId, this.syncAccount.generation)) { return; }
-    this.autoAccount = this.syncAccount;
-    this.autoStatus = '本次会话自动新增已开启；只处理接下来明确标记已看的分集，不追溯旧日志。';
+  private async reloadQueue(): Promise<void> {
+    const store = this.episodeStore;
+    if (!store) { return; }
+    const uuid = await store.boundAccount();
+    this.queueRows = uuid ? await store.queueEntries(uuid) : [];
   }
 
-  private async runAutoAction(account: SyncAccount, ids: number[], watchedAt: string): Promise<void> {
+  private async setAuto(enabled: boolean): Promise<void> {
+    const store = this.episodeStore;
+    const account = this.syncAccount;
+    if (!store || this.syncBusy || this.localBusy || this.cloudBusy || this.setupBusy) { return; }
+    this.syncBusy = true;
+    try {
+      if (!enabled) {
+        await store.clearAutoConsent();
+        this.autoConsent = undefined;
+        this.autoStatus = '自动新增已关闭；待同步记录保留，须手动确认处理。';
+      } else {
+        const session = traktAuth.session(this.clientId);
+        if (!account || !session || !this.syncBound || account.generation !== session.generation) {
+          throw new Error('Verify account first');
+        }
+        const verified = await readSyncAccount(session);
+        if (verified.uuid !== account.uuid || await store.boundAccount() !== account.uuid) {
+          throw new Error('Account mismatch');
+        }
+        await store.saveAutoConsent(account.uuid, this.clientId);
+        this.autoConsent = { uuid: account.uuid, clientId: this.clientId };
+        this.autoStatus = '持久自动新增已开启；仅新授权事件进入队列，联网且账户验证通过后前台同步。';
+      }
+      await this.reloadQueue();
+    } catch (error) {
+      this.autoStatus = '同步模式保存失败，请重试。';
+    } finally { this.syncBusy = false; }
+  }
+
+  // Before an explicit credential change, disable persisted authorization.
+  // Keep queued events; they remain bound to the original UUID.
+  private async revokeAuto(): Promise<void> {
+    this.autoConsent = undefined;
+    if (this.episodeStore) { await this.episodeStore.clearAutoConsent(); }
+    this.autoStatus = '自动新增已关闭；旧队列仍保留。';
+  }
+
+  private async resumeQueued(manual: boolean = false): Promise<void> {
     const store = this.episodeStore;
     const clientId = this.clientId;
-    if (!store || !this.autoActive() || this.syncBusy || this.cloudBusy || this.localBusy || this.setupBusy ||
-        this.autoAccount?.uuid !== account.uuid || this.autoAccount?.generation !== account.generation) {
-      this.autoStatus = '自动新增未执行；本机已保留，可手动预览。';
-      return;
-    }
-    const session = traktAuth.session(clientId);
-    if (!session || session.generation !== account.generation) { return; }
+    const consent = this.autoConsent;
+    if (!store || !this.episodeReady || !clientId || this.syncBusy || this.localBusy ||
+        this.cloudBusy || this.authBusy || this.setupBusy || (!manual && !this.autoActive())) { return; }
+    if (manual && (!this.syncAccount || !this.syncBound || !this.queueConfirm)) { return; }
+    const expected = manual ? this.syncAccount?.uuid : consent?.uuid;
+    if (!expected) { return; }
     this.syncBusy = true;
-    this.autoStatus = '正在自动校验并上传本次新增操作…';
+    this.queueConfirm = false;
+    this.autoStatus = '正在读取待同步队列…';
     try {
-      const result = await uploadBatch(store, session, account.uuid, ids, watchedAt, 'auto');
+      const pending = await store.queueEntries(expected);
+      if (!pending.length) {
+        this.queueRows = [];
+        this.autoStatus = '没有待同步新增。';
+        return;
+      }
+      await traktAuth.restore(clientId, true);
+      const session = traktAuth.session(clientId);
+      if (!session) { throw new Error('Offline or sign-in required'); }
+      const account = await readSyncAccount(session);
+      if (account.uuid !== expected || this.clientId !== clientId || await store.boundAccount() !== expected) {
+        if (!manual) { await this.revokeAuto(); }
+        throw new Error('Account mismatch');
+      }
+      if (!manual && (!this.autoActive() || this.autoConsent?.uuid !== expected)) {
+        throw new Error('Auto disabled');
+      }
+      const ids = pending.map((entry: QueueEntry) => entry.episodeId);
+      const result = await uploadBatch(store, session, expected, ids, new Date().toISOString(), 'queue', undefined, pending);
+      for (const entry of pending) {
+        if (result.completedIds.includes(entry.episodeId)) { await store.finishQueue(expected, entry); }
+      }
       this.autoStatus = result.message;
+      this.syncLogs = await store.syncLogs(expected);
     } catch (error) {
-      this.autoStatus = '自动新增未完成，请在云端手动预览核对；不会自动重试。';
+      this.autoStatus = '队列未完成，已保留本机操作；联网后可再次处理未发送项，受保护项不会盲目重试。';
     } finally {
+      try { await this.reloadQueue(); } catch (error) {}
       this.syncPreview = undefined;
       this.syncBusy = false;
     }
+  }
+
+  private async disconnectSyncAccount(): Promise<void> {
+    if (this.syncBusy || this.localBusy || this.setupBusy || this.cloudBusy) { return; }
+    this.setupBusy = true;
+    try {
+      await this.revokeAuto();
+      if (traktAuth.disconnect()) { this.clearCloud(); }
+    } catch (error) {
+      this.setupStatus = '无法安全关闭同步授权，未断开登录。';
+    } finally { this.setupBusy = false; }
+  }
+
+  private async beginSyncLogin(): Promise<void> {
+    if (this.syncBusy || this.localBusy || this.setupBusy || this.cloudBusy) { return; }
+    this.setupBusy = true;
+    try {
+      await this.revokeAuto();
+      await traktAuth.begin(this.context(), this.clientId);
+    } catch (error) {
+      this.setupStatus = '无法安全关闭旧同步授权，未开始登录。';
+    } finally { this.setupBusy = false; }
   }
 
   private toggleBatch(id: number): void {
@@ -586,7 +677,7 @@ struct Index {
     this.batchIds = [];
     this.batchConfirm = false;
     try {
-      const fresh = await buildSyncPreview(store, session);
+      const fresh = await buildSyncPreview(store, session, true);
       if (fresh.account.uuid !== preview.account.uuid || !traktAuth.isCurrent(this.clientId, session.generation)) {
         throw new Error('Account changed');
       }
@@ -618,6 +709,9 @@ struct Index {
     try {
       const result = await uploadSelectedEpisode(store, session, preview, episodeId, watchedAt);
       this.uploadStatus = result.message;
+      await store.logSync(preview.account.uuid, 'single', [episodeId], result.message);
+      this.syncLogs = await store.syncLogs(preview.account.uuid);
+      await this.reloadQueue();
     } catch (error) {
       this.uploadStatus = '未能完成安全上传流程。可能已保留尝试凭证；请重新生成预览并在 Trakt 核对，不会自动重试。';
     } finally {
@@ -645,6 +739,9 @@ struct Index {
     try {
       const result = await removeSelectedPlay(store, session, preview, episodeId);
       this.uploadStatus = result.message;
+      await store.logSync(preview.account.uuid, 'remove', [episodeId], result.message);
+      this.syncLogs = await store.syncLogs(preview.account.uuid);
+      await this.reloadQueue();
     } catch (error) {
       this.uploadStatus = '安全撤销流程未完成，请重新生成预览并在 Trakt 核对；不会自动重试。';
     } finally {
@@ -697,18 +794,38 @@ struct Index {
         } else {
           Button('生成同步差异预览').enabled(!this.syncBusy && !this.localBusy && !this.cloudBusy && !this.authBusy)
             .onClick(() => { this.generateSyncPreview(); })
-          Text(this.autoActive() ? '同步模式：本次会话自动新增' : '同步模式：手动（默认）').fontSize(14).width('100%')
-          Text('开启后，接下来单集或整季标记已看将自动上传本次新增；不追溯旧记录、不自动删除、不后台重试。重启或授权变化后关闭。')
+          Text(this.autoActive() ? '同步模式：持久自动新增' : '同步模式：手动（默认）').fontSize(14).width('100%')
+          Text('开启后新标记已看的分集进入持久队列；联网且核实同一账户后在前台同步。重启保留授权，主动换号或断开登录会关闭；不追溯旧日志，不自动删除。')
             .fontSize(12).width('100%')
-          Button(this.autoActive() ? '关闭自动新增' : '授权开启本次会话自动新增')
+          Button(this.autoActive() ? '关闭自动新增' : '授权开启持久自动新增')
             .enabled(!this.syncBusy && !this.localBusy && !this.cloudBusy && !this.authBusy)
-            .onClick(() => {
-              if (this.autoActive()) { this.autoAccount = undefined; this.autoStatus = '自动新增已关闭'; }
-              else { this.enableAuto(); }
-            })
+            .onClick(() => { this.setAuto(!this.autoActive()); })
           if (this.autoStatus) { Text(this.autoStatus).fontSize(13).width('100%') }
-          if (this.syncLogs.length > 0) {
-            Text('最近批量同步与导入日志').fontSize(15).fontWeight(FontWeight.Medium).width('100%')
+          Text('待同步队列：' + this.queueRows.length + ' 集（含受保护项）').fontSize(15).width('100%')
+          ForEach(this.queueRows.slice(0, this.collectionPageSize), (entry: QueueEntry) => {
+            Text(entry.label + ' · ' + (entry.blocked ? '受保护，禁止重发/目录异常' : '等待核验'))
+              .fontSize(12).width('100%')
+          }, (entry: QueueEntry) => entry.seq + ':' + entry.episodeId)
+          if (this.queueRows.length > this.collectionPageSize) {
+            Text('仅预览前 ' + this.collectionPageSize + ' 集；处理时会核验完整队列。').fontSize(12)
+          }
+          Button('核对并处理待同步队列').enabled(!this.syncBusy && !this.localBusy && !this.cloudBusy &&
+            !this.authBusy && this.queueRows.length > 0)
+            .onClick(() => { this.queueConfirm = true; })
+          if (this.queueConfirm) {
+            Text('确认处理此前已授权的 ' + this.queueRows.length + ' 集？使用原本机标记时间；跳过云端已有记录，未知结果不重发。')
+              .fontSize(12).width('100%')
+            Row({ space: 8 }) {
+              Button('取消').layoutWeight(1).onClick(() => { this.queueConfirm = false; })
+              Button('确认处理队列').layoutWeight(1).enabled(!this.syncBusy && !this.localBusy && !this.cloudBusy)
+                .onClick(() => { this.resumeQueued(true); })
+            }.width('100%')
+          }
+          Button(this.showSyncLogs ? '收起同步日志' : '查看同步日志')
+            .onClick(() => { this.showSyncLogs = !this.showSyncLogs; })
+          if (this.showSyncLogs) {
+            Text('最近同步日志（最多 12 条）').fontSize(15).fontWeight(FontWeight.Medium).width('100%')
+            if (!this.syncLogs.length) { Text('暂无记录').fontSize(12) }
             ForEach(this.syncLogs, (log: string, index: number) => {
               Text(log).fontSize(12).width('100%')
             }, (log: string, index: number) => index.toString() + log)
@@ -1756,7 +1873,7 @@ struct Index {
               this.themeButton('深色', 'dark')
             }.width('100%')
             Text(this.themeStatus).fontSize(12)
-            Text('版本 0.8.4').fontSize(12).fontColor($r('app.color.showly_secondary'))
+            Text('版本 0.8.5').fontSize(12).fontColor($r('app.color.showly_secondary'))
             Text('非官方应用，使用 Trakt，但未获 Trakt 认可或认证。')
               .fontSize(12).fontColor($r('app.color.showly_secondary'))
         Text('Trakt 账户').fontSize(20).fontWeight(FontWeight.Medium)
@@ -1794,7 +1911,7 @@ struct Index {
           if (!this.signedIn && !this.authBusy) {
             Button('登录 Trakt').enabled(!this.setupBusy && !this.cloudBusy && !this.syncBusy).onClick(() => {
               this.clearCloud();
-              traktAuth.begin(this.context(), this.clientId);
+              this.beginSyncLogin();
             })
             Button('重试恢复登录').enabled(!this.setupBusy && !this.cloudBusy && !this.syncBusy).onClick(() => {
               traktAuth.restore(this.clientId, true);
@@ -1804,7 +1921,7 @@ struct Index {
             Button('取消当前操作').enabled(!this.setupBusy && !this.cloudBusy && !this.syncBusy).onClick(() => { traktAuth.cancel(); })
           } else {
             if (this.signedIn) {
-              Button('断开本机登录').enabled(!this.setupBusy && !this.cloudBusy && !this.syncBusy).onClick(() => { if (traktAuth.disconnect()) { this.clearCloud(); } })
+              Button('断开本机登录').enabled(!this.setupBusy && !this.cloudBusy && !this.syncBusy).onClick(() => { this.disconnectSyncAccount(); })
             }
             Button('修改 Client ID').enabled(!this.setupBusy && !this.searching && !this.cloudBusy && !this.syncBusy).onClick(() => {
               this.draftId = this.clientId;

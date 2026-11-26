@@ -128,18 +128,35 @@ export function classifyIntent(intent: JournalIntent, cloudWatched: boolean): st
   return intent.watched ? 'addition' : 'conflict';
 }
 
-export async function buildSyncPreview(store: EpisodeStore, session: TraktSession): Promise<SyncPreview> {
+interface WatchedCache {
+  uuid: string;
+  clientId: string;
+  generation: number;
+  activity: string;
+  ids: Set<number>;
+}
+let watchedCache: WatchedCache | undefined;
+
+export function invalidateWatchedCache(): void { watchedCache = undefined; }
+
+export async function buildSyncPreview(store: EpisodeStore, session: TraktSession,
+  force: boolean = false): Promise<SyncPreview> {
   const account = await readSyncAccount(session);
   if (await store.boundAccount() !== account.uuid) { throw new Error('Account not bound'); }
   const local = await store.journalIntents();
   const before = await readActivity(session);
-  const cloud = await readWatched(session);
+  const cache = watchedCache;
+  const reused = !force && cache && cache.uuid === account.uuid && cache.clientId === session.clientId &&
+    cache.generation === session.generation && cache.activity === before;
+  const cloud = reused && cache ? cache.ids : await readWatched(session);
   const after = await readActivity(session);
   const verified = await readSyncAccount(session);
   ensureCurrent(session);
   if (before !== after || verified.uuid !== account.uuid || await store.boundAccount() !== account.uuid) {
+    invalidateWatchedCache();
     throw new Error('Snapshot or account changed');
   }
+  watchedCache = { uuid: account.uuid, clientId: session.clientId, generation: session.generation, activity: after, ids: cloud };
   const rows: SyncDifference[] = [];
   let additions = 0;
   let matches = 0;
