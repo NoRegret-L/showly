@@ -2,6 +2,7 @@ import { common } from '@kit.AbilityKit';
 import { Media, mediaLabel, setWatched } from '../model/Media';
 import { LibraryStore } from '../data/LibraryStore';
 import { MediaStore } from '../data/MediaStore';
+import { BackupData, RestorePlan, createBackup, exportBackup, selectBackup, planRestore, restoreBackup } from '../data/LocalBackup';
 import { MediaRecord, migrateLegacy, isTraktMedia, applyLegacyEdit, setMediaIntent, inLocalWatchlist } from '../model/MediaState';
 import { MediaPreview, MediaDifference, buildMediaPreview } from '../data/TraktMediaPreview';
 import { syncSelectedMedia, reconcilePendingMedia } from '../data/TraktMediaSync';
@@ -73,6 +74,13 @@ struct Index {
   @State localRecent: Media[] = [];
   @State confirmSeason: number = -1;
   @State confirmWatched: boolean = true;
+  @State backupBusy: boolean = false;
+  @State backupStatus: string = '';
+  @State backupReview: string = '';
+  @State backupCanRestore: boolean = false;
+  private backupData?: BackupData;
+  private backupPlan?: RestorePlan;
+  @State localCatalogNeedsVerification: boolean = false;
   @State themeMode: string = 'system';
   @State themeStatus: string = '';
   @State themeBusy: boolean = false;
@@ -174,6 +182,7 @@ struct Index {
   onPageShow(): void {
     this.pageVisible = true;
     this.startNetworkListener();
+    if (this.backupBusy) { return; }
     this.requestMediaRecovery();
     if (this.autoActive()) { this.requestRecovery(); }
     else if (this.clientId && !this.setupBusy && !this.cloudBusy && !this.syncBusy) {
@@ -248,7 +257,7 @@ struct Index {
   }
 
   private requestRecovery(): void {
-    if (!this.pageVisible || !this.autoActive() || !this.episodeReady) { return; }
+    if (this.backupBusy || !this.pageVisible || !this.autoActive() || !this.episodeReady) { return; }
     this.recoveryPending = true;
     this.onRecoveryGateChanged();
   }
@@ -256,7 +265,7 @@ struct Index {
   // A busy auth/DB/sync operation no longer drops the network-resume event.
   // Coalesce to a single pending event, not a periodic retry loop.
   private onRecoveryGateChanged(): void {
-    if (!this.pageVisible || this.syncBusy || this.localBusy || this.cloudBusy ||
+    if (this.backupBusy || !this.pageVisible || this.syncBusy || this.localBusy || this.cloudBusy ||
         this.authBusy || this.setupBusy) { return; }
     if (this.recoveryPending && this.autoActive() && this.episodeReady) {
       this.recoveryPending = false;
@@ -270,7 +279,7 @@ struct Index {
   }
 
   private requestMediaRecovery(): void {
-    if (!this.pageVisible || !this.ready || !this.mediaStore || !this.syncBound || !this.syncAccount ||
+    if (this.backupBusy || !this.pageVisible || !this.ready || !this.mediaStore || !this.syncBound || !this.syncAccount ||
         !traktAuth.isCurrent(this.clientId, this.syncAccount.generation)) { return; }
     this.mediaRecoveryPending = true;
     this.onRecoveryGateChanged();
@@ -358,6 +367,7 @@ struct Index {
       if (revision !== this.detailRevision) { return; }
       if (state) {
         this.localSeries = state;
+        this.localCatalogNeedsVerification = await store.needsCatalogVerification(item.id);
         if (this.localSeason < 0 && state.seasons.length > 0) { this.localSeason = state.seasons[0].number; }
       }
       if (refresh && clientId) {
@@ -369,6 +379,7 @@ struct Index {
       }
       if (revision === this.detailRevision) {
         this.localSeries = state;
+        this.localCatalogNeedsVerification = state ? await store.needsCatalogVerification(item.id) : false;
         if (state && state.seasons.length > 0 && !state.seasons.some((season: LocalSeasonState) => season.number === this.localSeason)) {
           this.localSeason = state.seasons[0].number;
         }
@@ -386,6 +397,10 @@ struct Index {
   private async markLocal(item: Media, ids: number[], watched: boolean): Promise<void> {
     const store = this.episodeStore;
     if (!store || !this.episodeReady || this.localBusy || this.syncBusy || ids.length === 0) { return; }
+    if (this.localCatalogNeedsVerification) {
+      this.localStatus = '备份恢复的目录需要联网更新后才能修改分集状态。';
+      return;
+    }
     const revision = this.detailRevision;
     this.localBusy = true;
     this.confirmSeason = -1;
@@ -430,6 +445,7 @@ struct Index {
         Text(this.localStatus).fontSize(12).width('100%')
         if (this.autoStatus) { Text(this.autoStatus).fontSize(12).width('100%') }
         if (this.localSeries) {
+          if (this.localCatalogNeedsVerification) { Text('备份目录仅供本机查看，联网更新分集目录后才可编辑。').fontSize(12).width('100%') }
           Text('本机已看 ' + this.localSeries.completed + ' / ' + this.localSeries.catalog.episodes.length + ' 集')
             .fontSize(16).width('100%')
           if (this.localSeries.catalog.episodes.length > 0) {
@@ -445,7 +461,7 @@ struct Index {
                 .onClick(() => { this.localSeason = this.localSeason === season.number ? -1 : season.number; this.confirmSeason = -1; })
               if (this.localSeason === season.number) {
                 Row({ space: 8 }) {
-                  Button('整季已看').layoutWeight(1).enabled(!this.localBusy && !this.syncBusy && season.completed < season.episodes.length)
+                  Button('整季已看').layoutWeight(1).enabled(!this.localCatalogNeedsVerification && !this.localBusy && !this.syncBusy && season.completed < season.episodes.length)
                     .onClick(() => { this.confirmSeason = season.number; this.confirmWatched = true; })
                   Button('整季撤销').layoutWeight(1).enabled(!this.localBusy && !this.syncBusy && season.completed > 0)
                     .onClick(() => { this.confirmSeason = season.number; this.confirmWatched = false; })
@@ -470,7 +486,7 @@ struct Index {
                           .fontColor($r('app.color.showly_secondary'))
                       }
                     }.layoutWeight(1)
-                    Button(entry.watched ? '撤销已看' : '标记已看').fontSize(12).enabled(!this.localBusy && !this.syncBusy)
+                    Button(entry.watched ? '撤销已看' : '标记已看').fontSize(12).enabled(!this.localCatalogNeedsVerification && !this.localBusy && !this.syncBusy)
                       .onClick(() => { this.markLocal(item, [entry.episode.id], !entry.watched); })
                   }.width('100%')
                 }, (entry: LocalEpisodeState) => entry.episode.id + ':' + entry.watched)
@@ -537,13 +553,150 @@ struct Index {
     }
   }
 
+  private backupAvailable(): boolean {
+    return this.ready && this.episodeReady && !!this.mediaStore && !!this.episodeStore &&
+      !this.backupBusy && !this.syncBusy && !this.saving && !this.localBusy && !this.cloudBusy &&
+      !this.authBusy && !this.setupBusy;
+  }
+
+  private beginBackup(): void {
+    this.backupBusy = true;
+    this.syncBusy = true;
+  }
+
+  private endBackup(): void {
+    // Picker foreground/network events must not trigger existing auto uploads
+    // as a side effect of a local-only backup operation.
+    this.recoveryPending = false;
+    this.mediaRecoveryPending = false;
+    this.syncBusy = false;
+    this.backupBusy = false;
+  }
+
+  private clearBackupReview(): void {
+    this.backupData = undefined;
+    this.backupPlan = undefined;
+    this.backupCanRestore = false;
+    this.backupReview = '';
+  }
+
+  private backupError(error: Error): string {
+    const message = error.message;
+    if (typeof message === 'string' &&
+        /^(Unsupported backup (?:schema|file)|Backup checksum mismatch|Invalid backup (?:title|title state|show|show identity|size \(maximum 32 MiB\))|Invalid watched episode IDs|Duplicate backup (?:title|show)|Duplicate cross-show episode ID|Backup exceeds 32 MiB|Incomplete backup (?:read|write)|Backup file readback mismatch|Restore preview changed|Episode restore transaction failed)$/.test(message)) {
+      return message;
+    }
+    return safeSyncError(error);
+  }
+
+  private async saveLocalBackup(): Promise<void> {
+    const media = this.mediaStore;
+    const episodes = this.episodeStore;
+    if (!media || !episodes || !this.backupAvailable()) { return; }
+    this.clearBackupReview();
+    this.beginBackup();
+    this.backupStatus = '正在生成本机快照…';
+    try {
+      const snapshot = await createBackup(media, episodes);
+      const saved = await exportBackup(this.context(), snapshot);
+      this.backupStatus = saved ? '备份文件已保存并回读校验 · ' + snapshot.titles.length + ' 部收藏 / ' +
+        snapshot.shows.length + ' 部剧集目录。请妥善保管文件。' : '已取消保存。';
+    } catch (error) {
+      this.backupStatus = '备份未确认成功：' + this.backupError(error as Error) + '；请勿使用可能不完整的文件。';
+    } finally { this.endBackup(); }
+  }
+
+  private async reviewLocalBackup(): Promise<void> {
+    const media = this.mediaStore;
+    const episodes = this.episodeStore;
+    if (!media || !episodes || !this.backupAvailable()) { return; }
+    this.clearBackupReview();
+    this.beginBackup();
+    this.backupStatus = '请选择 Showly 鸿蒙备份 JSON 文件…';
+    try {
+      const data = await selectBackup(this.context());
+      if (!data) { this.backupStatus = '已取消选择。'; return; }
+      const plan = await planRestore(data, media, episodes);
+      this.backupData = data;
+      this.backupPlan = plan;
+      this.backupCanRestore = plan.titles.length > 0 || plan.shows.length > 0;
+      this.backupReview = '备份时间：' + new Date(data.createdAt).toLocaleString() +
+        '\n收藏新增 ' + plan.titles.length + ' 部，跳过已有 ' + plan.skippedTitles + ' 部' +
+        '\n分集目录新增 ' + plan.shows.length + ' 部，跳过已有 ' + plan.skippedShows + ' 部' +
+        '\n恢复已看分集 ' + plan.watchedEpisodes + ' 集（仅本机）';
+      this.backupStatus = this.backupCanRestore ? '文件校验通过。请核对预览；尚未修改数据。' :
+        '文件校验通过；已有记录全部保留，没有需要补充的内容。';
+    } catch (error) {
+      this.clearBackupReview();
+      this.backupStatus = '备份读取或校验失败：' + this.backupError(error as Error) + '；未修改数据。';
+    } finally { this.endBackup(); }
+  }
+
+  private async applyLocalBackup(): Promise<void> {
+    const media = this.mediaStore;
+    const episodes = this.episodeStore;
+    const data = this.backupData;
+    const plan = this.backupPlan;
+    if (!media || !episodes || !data || !plan || !this.backupCanRestore || !this.backupAvailable()) { return; }
+    this.beginBackup();
+    this.backupStatus = '正在补充缺失的本机数据…';
+    this.clearBackupReview();
+    try {
+      const result = await restoreBackup(data, plan, media, episodes);
+      this.backupStatus = '恢复完成：新增收藏 ' + result.titles + ' 部，新增分集目录 ' + result.shows +
+        ' 部；原有记录未覆盖，未发送 Trakt 写入。';
+    } catch (error) {
+      this.backupStatus = '恢复中断：' + this.backupError(error as Error) +
+        '；可能已有部分本机记录提交。重新选择同一文件可补充剩余内容，既有记录不会覆盖。';
+    } finally {
+      try {
+        const records = await media.load();
+        this.mediaRecords = records;
+        this.items = records.map((record: MediaRecord) => record.media);
+        this.migrationStatus = '收藏数据库已就绪 · ' + records.length + ' 部；旧版 Preferences 保留。';
+        this.resetCollection();
+        this.localRecent = await episodes.recent();
+        this.localSeries = undefined;
+        this.localCatalogNeedsVerification = false;
+        this.invalidateSync();
+        await this.reloadQueue();
+      } catch (error) {
+        this.ready = false;
+        this.backupStatus += '；本机回读失败，请重启检查，不要清除数据。';
+      }
+      this.endBackup();
+    }
+  }
+
+  @Builder
+  backupView() {
+    Column({ space: 8 }) {
+      Text('本地备份与恢复').fontSize(19).fontWeight(FontWeight.Medium).width('100%')
+      Text('导出收藏、待看和本机可见的分集进度及目录。文件不加密，请保存在可信位置；不含 OAuth、API 密钥、账户绑定、同步凭证或待上传队列。')
+        .fontSize(12).width('100%')
+      Button('导出本地备份 JSON').enabled(this.backupAvailable()).onClick(() => { this.saveLocalBackup(); })
+      Button('选择备份并预览恢复').enabled(this.backupAvailable()).onClick(() => { this.reviewLocalBackup(); })
+      if (this.backupStatus) { Text(this.backupStatus).fontSize(13).width('100%') }
+      if (this.backupReview) {
+        Text(this.backupReview).fontSize(13).width('100%')
+        Text('只补充缺失条目，现有收藏和整部剧集目录不覆盖。恢复后的状态不是同步意图；分集目录须联网更新后才能编辑。')
+          .fontSize(12).width('100%')
+        Row({ space: 8 }) {
+          Button('关闭预览').layoutWeight(1).enabled(!this.backupBusy).onClick(() => { this.clearBackupReview(); })
+          Button('确认补充恢复').layoutWeight(1).enabled(this.backupCanRestore && this.backupAvailable())
+            .onClick(() => { this.applyLocalBackup(); })
+        }.width('100%')
+      }
+    }.width('100%').padding(12).borderRadius(12).backgroundColor($r('app.color.showly_surface'))
+  }
+
   @Builder
   updateView() {
     Column({ space: 8 }) {
       Text('版本与更新').fontSize(19).fontWeight(FontWeight.Medium).width('100%')
-      Text('当前版本 ' + APP_VERSION + ' · 未签名个人预览版 · 0.9.2b.1').fontSize(13)
+      Text('当前版本 ' + APP_VERSION + ' · 未签名个人预览版 · 0.9.3a').fontSize(13)
         .fontColor($r('app.color.showly_secondary')).width('100%')
-      Text('v0.9.2b.1 电影与待看回读修复版；自动只读恢复，不自动写入。').fontSize(12).width('100%')
+      Text('v0.9.3a 本地备份与安全补充恢复版。').fontSize(12).width('100%')
       Button('查看功能审计与验收计划').onClick(() => { this.openFeatureAudit(); })
       Button(this.updateBusy ? '检查中…' : '检查更新').enabled(!this.updateBusy)
         .onClick(() => { this.checkAppUpdate(); })
@@ -2510,6 +2663,7 @@ struct Index {
               this.themeButton('深色', 'dark')
             }.width('100%')
             Text(this.themeStatus).fontSize(12)
+            this.backupView()
             this.updateView()
             Text('非官方应用，使用 Trakt，但未获 Trakt 认可或认证。')
               .fontSize(12).fontColor($r('app.color.showly_secondary'))

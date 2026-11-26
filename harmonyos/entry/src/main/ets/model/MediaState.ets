@@ -4,6 +4,7 @@ export interface MediaRecord {
   media: Media;
   movieState: string;
   watchlistState: string;
+  restoredWatchlist?: boolean;
 }
 export interface MediaSnapshot {
   schema: number;
@@ -37,6 +38,7 @@ export function validateMediaRecords(records: MediaRecord[]): void {
         typeof item.kind !== 'string' || typeof item.year !== 'number' ||
         !Number.isFinite(item.year) || typeof item.watched !== 'boolean' || seen.has(item.id) ||
         !isState(record.movieState) || !isState(record.watchlistState) ||
+        (record.restoredWatchlist !== undefined && typeof record.restoredWatchlist !== 'boolean') ||
         ((!isTraktMedia(item) || item.kind !== 'movie') && record.movieState !== 'unknown') ||
         (!isTraktMedia(item) && record.watchlistState !== 'unknown') ||
         (record.movieState !== 'unknown' && item.watched !== (record.movieState === 'yes'))) {
@@ -65,7 +67,8 @@ export function applyLegacyEdit(records: MediaRecord[], items: Media[], origin: 
         if (origin !== 'toggle') { throw new Error('Unexpected state overwrite'); }
         if (isTraktMedia(item) && item.kind === 'movie') { movieState = item.watched ? 'yes' : 'no'; }
       }
-      next.push({ media: item, movieState: movieState, watchlistState: prior.watchlistState });
+      next.push({ media: item, movieState: movieState, watchlistState: prior.watchlistState,
+        restoredWatchlist: prior.restoredWatchlist });
       old.delete(item.id);
     }
   }
@@ -85,7 +88,8 @@ export function setMediaIntent(records: MediaRecord[], item: Media, domain: stri
     year: original.year, watched: domain === 'movie' ? value === 'yes' : original.watched };
   const updated: MediaRecord = { media: media,
     movieState: domain === 'movie' ? value : prior?.movieState ?? 'unknown',
-    watchlistState: domain === 'watchlist' ? value : prior?.watchlistState ?? 'unknown' };
+    watchlistState: domain === 'watchlist' ? value : prior?.watchlistState ?? 'unknown',
+    restoredWatchlist: prior?.restoredWatchlist };
   const next = prior ? records.map((record: MediaRecord) => record.media.id === item.id ? updated : record) :
     [...records, updated];
   validateMediaRecords(next);
@@ -93,5 +97,5 @@ export function setMediaIntent(records: MediaRecord[], item: Media, domain: stri
 }
 
 export function inLocalWatchlist(record: MediaRecord): boolean {
-  return record.watchlistState === 'unknown' ? !record.media.watched : record.watchlistState === 'yes';
+  return record.watchlistState === 'unknown' ? (record.restoredWatchlist ?? !record.media.watched) : record.watchlistState === 'yes';
 }

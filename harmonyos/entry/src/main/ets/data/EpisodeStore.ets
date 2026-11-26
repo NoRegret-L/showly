@@ -56,6 +56,10 @@ export interface JournalIntent {
   watched: boolean;
   catalogKnown: boolean;
 }
+export interface EpisodeBackupState {
+  catalog: EpisodeCatalog;
+  watchedIds: number[];
+}
 export interface LocalEpisodeState {
   episode: LocalEpisode;
   watched: boolean;
@@ -75,7 +79,7 @@ export interface LocalSeriesState {
 function validId(value: number): boolean {
   return Number.isSafeInteger(value) && value > 0;
 }
-function validateCatalog(catalog: EpisodeCatalog, showId: string): void {
+export function validateCatalog(catalog: EpisodeCatalog, showId: string): void {
   if (catalog.showId !== showId || !/^show:[1-9][0-9]*$/.test(showId) ||
       typeof catalog.title !== 'string' || typeof catalog.year !== 'number' || !Array.isArray(catalog.episodes)) {
     throw new Error('Invalid episode catalog');
@@ -199,6 +203,7 @@ export class EpisodeStore {
     await db.executeSql('CREATE TABLE IF NOT EXISTS sync_auto_consent (slot INTEGER PRIMARY KEY CHECK(slot=1), account_uuid TEXT NOT NULL, client_id TEXT NOT NULL)');
     await db.executeSql('CREATE TABLE IF NOT EXISTS sync_queue_done (account_uuid TEXT NOT NULL, event_seq INTEGER NOT NULL, episode_id INTEGER NOT NULL, PRIMARY KEY(account_uuid,event_seq,episode_id))');
     await db.executeSql('CREATE TABLE IF NOT EXISTS sync_play_archive (account_uuid TEXT NOT NULL, episode_id INTEGER NOT NULL, history_id INTEGER NOT NULL, watched_at TEXT NOT NULL, archived_at INTEGER NOT NULL, PRIMARY KEY(account_uuid,history_id))');
+    await db.executeSql('CREATE TABLE IF NOT EXISTS episode_restore_baseline (show_id TEXT PRIMARY KEY, episode_ids TEXT NOT NULL, verified INTEGER NOT NULL DEFAULT 0 CHECK(verified IN (0,1)))');
     return new EpisodeStore(db);
   }
 
@@ -223,6 +228,9 @@ export class EpisodeStore {
     }
     await this.db.executeSql('INSERT OR REPLACE INTO episode_catalog(show_id,catalog,updated_at) VALUES(?,?,?)',
       [catalog.showId, JSON.stringify(catalog), Date.now()]);
+    // A catalog obtained from the public Trakt API is required before edits
+    // to restored shows can create explicit synchronization intents.
+    await this.db.executeSql('UPDATE episode_restore_baseline SET verified=1 WHERE show_id=?', [catalog.showId]);
   }
 
   async read(showId: string): Promise<LocalSeriesState | undefined> {
@@ -243,12 +251,14 @@ export class EpisodeStore {
     }
     const uuid = await this.boundAccount();
     const baseline = uuid ? await this.cloudBaseline(uuid) : [];
-    return materialize(catalog, events, baseline);
+    const restored = await this.restoredIds(showId);
+    return materialize(catalog, events, [...baseline, ...restored]);
   }
 
   async mark(showId: string, ids: number[], watched: boolean, autoUuid: string = ''): Promise<void> {
     const catalog = await this.catalog(showId);
     if (!catalog || ids.length === 0) { throw new Error('Missing episode catalog'); }
+    if (await this.needsCatalogVerification(showId)) { throw new Error('Restored catalog must be refreshed'); }
     const allowed: Set<number> = new Set<number>(catalog.episodes.map((ep: LocalEpisode) => ep.id));
     const unique: Set<number> = new Set<number>(ids);
     if (ids.some((id: number) => !allowed.has(id))) { throw new Error('Episode no longer available'); }
@@ -482,8 +492,80 @@ export class EpisodeStore {
     return Array.from(latest.values());
   }
 
+  private async restoredIds(showId: string): Promise<number[]> {
+    const rows = await this.db.querySql('SELECT episode_ids FROM episode_restore_baseline WHERE show_id=?', [showId]);
+    try {
+      if (!rows.goToFirstRow()) { return []; }
+      const ids = JSON.parse(rows.getString(0)) as number[];
+      if (!Array.isArray(ids) || ids.some((id: number) => !validId(id)) ||
+          new Set<number>(ids).size !== ids.length) { throw new Error('Invalid restored baseline'); }
+      return ids;
+    } finally { rows.close(); }
+  }
+
+  async needsCatalogVerification(showId: string): Promise<boolean> {
+    const rows = await this.db.querySql('SELECT verified FROM episode_restore_baseline WHERE show_id=?', [showId]);
+    try { return rows.goToFirstRow() && rows.getLong(0) !== 1; } finally { rows.close(); }
+  }
+
+  async backupStates(): Promise<EpisodeBackupState[]> {
+    const rows = await this.db.querySql('SELECT show_id FROM episode_catalog ORDER BY show_id');
+    const ids: string[] = [];
+    try {
+      while (rows.goToNextRow()) { ids.push(rows.getString(0)); }
+    } finally { rows.close(); }
+    const result: EpisodeBackupState[] = [];
+    for (const id of ids) {
+      const state = await this.read(id);
+      if (!state) { throw new Error('Catalog disappeared during backup'); }
+      const watchedIds: number[] = [];
+      for (const season of state.seasons) {
+        for (const ep of season.episodes) {
+          if (ep.watched) { watchedIds.push(ep.episode.id); }
+        }
+      }
+      result.push({ catalog: state.catalog, watchedIds: watchedIds });
+    }
+    return result;
+  }
+
+  async missingBackupShows(states: EpisodeBackupState[]): Promise<EpisodeBackupState[]> {
+    const rows = await this.db.querySql('SELECT show_id FROM episode_catalog UNION SELECT show_id FROM episode_event UNION SELECT show_id FROM episode_restore_baseline');
+    const existing: Set<string> = new Set<string>();
+    try {
+      while (rows.goToNextRow()) { existing.add(rows.getString(0)); }
+    } finally { rows.close(); }
+    return states.filter((state: EpisodeBackupState) => !existing.has(state.catalog.showId));
+  }
+
+  async restoreMissingShows(states: EpisodeBackupState[]): Promise<number> {
+    const missing = await this.missingBackupShows(states);
+    if (!missing.length) { return 0; }
+    // All episode additions are one transaction; no events, guards, receipts,
+    // account IDs or auto-consent are restored from an external file.
+    this.db.beginTransaction();
+    try {
+      for (const state of missing) {
+        validateCatalog(state.catalog, state.catalog.showId);
+        const allowed: Set<number> = new Set<number>(state.catalog.episodes.map((ep: LocalEpisode) => ep.id));
+        if (!Array.isArray(state.watchedIds) ||
+            state.watchedIds.some((id: number) => !allowed.has(id)) ||
+            new Set<number>(state.watchedIds).size !== state.watchedIds.length) { throw new Error('Invalid backup watched IDs'); }
+        await this.db.executeSql('INSERT INTO episode_catalog(show_id,catalog,updated_at) VALUES(?,?,?)',
+          [state.catalog.showId, JSON.stringify(state.catalog), Date.now()]);
+        await this.db.executeSql('INSERT INTO episode_restore_baseline(show_id,episode_ids,verified) VALUES(?,?,0)',
+          [state.catalog.showId, JSON.stringify(state.watchedIds)]);
+      }
+      this.db.commit();
+    } catch (error) {
+      this.db.rollBack();
+      throw new Error('Episode restore transaction failed');
+    }
+    return missing.length;
+  }
+
   async recent(): Promise<Media[]> {
-    const rows = await this.db.querySql('SELECT c.show_id,c.catalog FROM episode_catalog c JOIN (SELECT show_id,MAX(seq) AS last_seq FROM episode_event GROUP BY show_id) e ON e.show_id=c.show_id ORDER BY e.last_seq DESC LIMIT 12');
+    const rows = await this.db.querySql('SELECT c.show_id,c.catalog FROM episode_catalog c LEFT JOIN (SELECT show_id,MAX(seq) AS last_seq FROM episode_event GROUP BY show_id) e ON e.show_id=c.show_id LEFT JOIN episode_restore_baseline r ON r.show_id=c.show_id WHERE e.last_seq IS NOT NULL OR r.show_id IS NOT NULL ORDER BY COALESCE(e.last_seq,0) DESC,c.updated_at DESC LIMIT 12');
     const items: Media[] = [];
     try {
       while (rows.goToNextRow()) {
