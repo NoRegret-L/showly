@@ -1031,7 +1031,7 @@ struct Index {
         this.headerAction('设置', 'account')
       }.width('100%').padding(12).backgroundColor($r('app.color.showly_surface'))
       Divider().color($r('app.color.showly_line'))
-      Refresh({ refreshing: $this.refreshing }) {
+      Refresh({ refreshing: $$this.refreshing }) {
         Scroll() {
         Column({ space: 14 }) {
           if (this.selectedMedia) {
