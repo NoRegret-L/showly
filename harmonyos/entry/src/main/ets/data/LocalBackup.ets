@@ -7,7 +7,7 @@ import { MediaRecord, inLocalWatchlist, validateMediaRecords } from '../model/Me
 import { EpisodeStore, EpisodeBackupState, EpisodeCatalog, LocalEpisode, validateCatalog } from './EpisodeStore';
 import { MediaStore } from './MediaStore';
 
-interface BackupTitle { media: Media; watchlist: boolean; }
+interface BackupTitle { media: Media; watchlist: boolean; following?: boolean; }
 export interface BackupData {
   schema: number;
   createdAt: string;
@@ -69,7 +69,9 @@ export function validateBackup(data: BackupData): BackupData {
     const media = cleanMedia(title.media);
     if (ids.has(media.id)) { throw new Error('Duplicate backup title'); }
     ids.add(media.id);
-    titles.push({ media: media, watchlist: title.watchlist });
+    if (title.following !== undefined && (typeof title.following !== 'boolean' || media.kind !== 'show' ||
+        (title.following && title.watchlist))) { throw new Error('Invalid followed state'); }
+    titles.push({ media: media, watchlist: title.watchlist, following: title.following });
   }
   const shows: EpisodeBackupState[] = [];
   const showIds: Set<string> = new Set<string>();
@@ -99,7 +101,8 @@ async function sha256(value: string): Promise<string> {
 export async function createBackup(mediaStore: MediaStore, episodeStore: EpisodeStore): Promise<BackupData> {
   const records = await mediaStore.load();
   const titles: BackupTitle[] = records.map((record: MediaRecord): BackupTitle => {
-    return { media: cleanMedia(record.media), watchlist: inLocalWatchlist(record) };
+    return { media: cleanMedia(record.media), watchlist: inLocalWatchlist(record),
+      following: record.followState === undefined ? undefined : record.followState === 'yes' };
   });
   const data: BackupData = { schema: 1, createdAt: new Date().toISOString(), titles: titles,
     shows: await episodeStore.backupStates() };
@@ -178,7 +181,8 @@ export async function planRestore(data: BackupData, mediaStore: MediaStore,
   for (const title of clean.titles) {
     if (!existing.has(title.media.id)) {
       titles.push({ media: title.media, movieState: 'unknown', watchlistState: 'unknown',
-        restoredWatchlist: title.watchlist });
+        restoredWatchlist: title.watchlist,
+        followState: title.following === undefined ? undefined : title.following ? 'yes' : 'no' });
     }
   }
   validateMediaRecords([...current, ...titles]);

@@ -5,6 +5,7 @@ export interface MediaRecord {
   movieState: string;
   watchlistState: string;
   restoredWatchlist?: boolean;
+  followState?: string;
 }
 export interface MediaSnapshot {
   schema: number;
@@ -38,6 +39,9 @@ export function validateMediaRecords(records: MediaRecord[]): void {
         typeof item.kind !== 'string' || typeof item.year !== 'number' ||
         !Number.isFinite(item.year) || typeof item.watched !== 'boolean' || seen.has(item.id) ||
         !isState(record.movieState) || !isState(record.watchlistState) ||
+        (record.followState !== undefined && (!isTraktMedia(item) || item.kind !== 'show' ||
+          (record.followState !== 'yes' && record.followState !== 'no') ||
+          (record.followState === 'yes' && record.watchlistState === 'yes'))) ||
         (record.restoredWatchlist !== undefined && typeof record.restoredWatchlist !== 'boolean') ||
         ((!isTraktMedia(item) || item.kind !== 'movie') && record.movieState !== 'unknown') ||
         (!isTraktMedia(item) && record.watchlistState !== 'unknown') ||
@@ -60,7 +64,8 @@ export function applyLegacyEdit(records: MediaRecord[], items: Media[], origin: 
     if (!prior) {
       if (origin === 'toggle') { throw new Error('Unexpected new title'); }
       next.push({ media: item, movieState: 'unknown',
-        watchlistState: origin === 'add' && isTraktMedia(item) ? 'yes' : 'unknown' });
+        watchlistState: origin === 'add' && isTraktMedia(item) ? 'yes' : 'unknown',
+        followState: origin === 'add' && item.kind === 'show' && isTraktMedia(item) ? 'no' : undefined });
     } else {
       let movieState = prior.movieState;
       if (prior.media.watched !== item.watched) {
@@ -68,7 +73,7 @@ export function applyLegacyEdit(records: MediaRecord[], items: Media[], origin: 
         if (isTraktMedia(item) && item.kind === 'movie') { movieState = item.watched ? 'yes' : 'no'; }
       }
       next.push({ media: item, movieState: movieState, watchlistState: prior.watchlistState,
-        restoredWatchlist: prior.restoredWatchlist });
+        restoredWatchlist: prior.restoredWatchlist, followState: prior.followState });
       old.delete(item.id);
     }
   }
@@ -89,13 +94,29 @@ export function setMediaIntent(records: MediaRecord[], item: Media, domain: stri
   const updated: MediaRecord = { media: media,
     movieState: domain === 'movie' ? value : prior?.movieState ?? 'unknown',
     watchlistState: domain === 'watchlist' ? value : prior?.watchlistState ?? 'unknown',
-    restoredWatchlist: prior?.restoredWatchlist };
+    restoredWatchlist: prior?.restoredWatchlist,
+    followState: item.kind === 'show' && domain === 'watchlist' && value === 'yes' ? 'no' : prior?.followState };
   const next = prior ? records.map((record: MediaRecord) => record.media.id === item.id ? updated : record) :
     [...records, updated];
   validateMediaRecords(next);
   return next;
 }
 
+// An explicit user action: joining the followed library moves the show out
+// of watchlist locally. Any remote change still requires the existing review.
+export function followShow(records: MediaRecord[], item: Media): MediaRecord[] {
+  if (item.kind !== 'show' || !isTraktMedia(item)) { throw new Error('Invalid followed show'); }
+  const moved = setMediaIntent(records, item, 'watchlist', 'no');
+  const next = moved.map((record: MediaRecord): MediaRecord => {
+    if (record.media.id !== item.id) { return record; }
+    return { media: record.media, movieState: record.movieState, watchlistState: record.watchlistState,
+      restoredWatchlist: record.restoredWatchlist, followState: 'yes' };
+  });
+  validateMediaRecords(next);
+  return next;
+}
+
 export function inLocalWatchlist(record: MediaRecord): boolean {
+  if (record.followState === 'yes') { return false; }
   return record.watchlistState === 'unknown' ? (record.restoredWatchlist ?? !record.media.watched) : record.watchlistState === 'yes';
 }

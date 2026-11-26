@@ -3,7 +3,7 @@ import { Media, mediaLabel, setWatched } from '../model/Media';
 import { LibraryStore } from '../data/LibraryStore';
 import { MediaStore } from '../data/MediaStore';
 import { BackupData, RestorePlan, createBackup, exportBackup, selectBackup, planRestore, restoreBackup } from '../data/LocalBackup';
-import { MediaRecord, migrateLegacy, isTraktMedia, applyLegacyEdit, setMediaIntent, inLocalWatchlist } from '../model/MediaState';
+import { MediaRecord, migrateLegacy, isTraktMedia, applyLegacyEdit, setMediaIntent, inLocalWatchlist, followShow } from '../model/MediaState';
 import { PersonalLibraryRow, LibraryShowEvidence, buildPersonalLibrary, filterPersonalLibrary, personalLibraryLabel } from '../model/PersonalLibrary';
 import { MediaPreview, MediaDifference, buildMediaPreview } from '../data/TraktMediaPreview';
 import { syncSelectedMedia, reconcilePendingMedia } from '../data/TraktMediaSync';
@@ -23,7 +23,8 @@ import { MediaDetail, canReadDetails, readDetails, cachePoster, clearDetailMemor
 import { DiscoverItem, readDiscover } from '../data/TraktDiscover';
 import { EpisodeProgress, SeasonProgress, SeriesProgress, ChineseText, readSeriesProgress, readChinese } from '../data/TraktProgress';
 import { AppearanceStore, applyAppearance } from '../data/AppearanceStore';
-import { EpisodeStore, LocalSeriesState, LocalSeasonState, LocalEpisodeState, AutoConsent, QueueEntry, fetchEpisodeCatalog } from '../data/EpisodeStore';
+import { EpisodeStore, LocalEpisode, LocalSeriesState, LocalSeasonState, LocalEpisodeState, AutoConsent, QueueEntry, fetchFullEpisodeCatalog } from '../data/EpisodeStore';
+import { FullEpisodeCatalog, ScheduledEpisode, scheduleEpisodes, scheduleLabel } from '../model/ShowCatalog';
 import { SyncAccount, SyncPreview, SyncDifference, readSyncAccount, buildSyncPreview } from '../data/TraktSyncPreview';
 import { uploadSelectedEpisode } from '../data/TraktSyncUpload';
 import { removeSelectedPlay } from '../data/TraktSyncRemove';
@@ -79,6 +80,8 @@ struct Index {
   @State episodeReady: boolean = false;
   @State episodeInitStatus: string = '';
   @State localSeries?: LocalSeriesState = undefined;
+  @State fullSchedule?: FullEpisodeCatalog = undefined;
+  @State schedulePage: number = 1;
   @State localSeason: number = -1;
   @State @Watch('onRecoveryGateChanged') localBusy: boolean = false;
   @State localStatus: string = '';
@@ -394,17 +397,21 @@ struct Index {
     this.localStatus = '读取本机分集记录…';
     try {
       let state = await store.read(item.id);
+      const existingSchedule = await store.fullCatalog(item.id);
       if (revision !== this.detailRevision) { return; }
+      this.fullSchedule = existingSchedule;
+      this.schedulePage = 1;
       if (state) {
         this.localSeries = state;
         this.localCatalogNeedsVerification = await store.needsCatalogVerification(item.id);
         if (this.localSeason < 0 && state.seasons.length > 0) { this.localSeason = state.seasons[0].number; }
       }
       if (refresh && clientId) {
-        const catalog = await fetchEpisodeCatalog(item, clientId);
+        const catalog = await fetchFullEpisodeCatalog(item, clientId);
         if (revision !== this.detailRevision || this.clientId !== clientId) { return; }
         this.invalidateSync();
-        await store.saveCatalog(catalog);
+        await store.saveFullCatalog(catalog);
+        if (revision === this.detailRevision && this.clientId === clientId) { this.fullSchedule = catalog; }
         this.invalidateNextShows();
         state = await store.read(item.id);
       }
@@ -459,6 +466,43 @@ struct Index {
     if (saved && watched && auto && this.autoActive()) { this.requestRecovery(); }
   }
 
+  private extraSchedule(): ScheduledEpisode[] {
+    const catalog = this.fullSchedule;
+    if (!catalog) { return []; }
+    const eligible: Set<number> = new Set<number>((this.localSeries?.catalog.episodes ?? [])
+      .map((episode: LocalEpisode) => episode.id));
+    return scheduleEpisodes(catalog).filter((episode: ScheduledEpisode) => !eligible.has(episode.id));
+  }
+
+  @Builder
+  scheduleView() {
+    Column({ space: 8 }) {
+      if (this.fullSchedule) {
+        Text('普通集完整目录 · ' + scheduleEpisodes(this.fullSchedule).length + ' 集（含待播及未知日期）')
+          .fontSize(14).width('100%')
+        Text('目录状态：' + (this.fullSchedule.status || '未知') + ' · 需联网刷新获取新资料')
+          .fontSize(12).width('100%')
+        Text('以下分集未进入已播可操作目录，仅供浏览。已播后需更新目录才能标记。').fontSize(12).width('100%')
+        ForEach(this.extraSchedule().slice((this.schedulePage - 1) * this.collectionPageSize,
+          this.schedulePage * this.collectionPageSize), (episode: ScheduledEpisode) => {
+          Text('S' + episode.season + 'E' + episode.number + ' · ' + episode.title +
+            ' · ' + scheduleLabel(episode, Date.now())).fontSize(13).width('100%')
+        }, (episode: ScheduledEpisode) => episode.id.toString())
+        if (this.extraSchedule().length > this.collectionPageSize) {
+          Row({ space: 8 }) {
+            Button('上一页').layoutWeight(1).enabled(this.schedulePage > 1).onClick(() => { this.schedulePage--; })
+            Text(this.schedulePage + ' / ' + Math.ceil(this.extraSchedule().length / this.collectionPageSize)).fontSize(12)
+            Button('下一页').layoutWeight(1)
+              .enabled(this.schedulePage * this.collectionPageSize < this.extraSchedule().length)
+              .onClick(() => { this.schedulePage++; })
+          }.width('100%')
+        }
+      } else {
+        Text('旧版仅保存已播目录；联网更新后可查看完整播出资料。').fontSize(12).width('100%')
+      }
+    }.width('100%')
+  }
+
   @Builder
   localEpisodesView(item: Media) {
     Column({ space: 10 }) {
@@ -475,6 +519,7 @@ struct Index {
             .onClick(() => { this.loadLocalEpisodes(item, true); })
         }.width('100%')
         Text(this.localStatus).fontSize(12).width('100%')
+        this.scheduleView()
         if (this.autoStatus) { Text(this.autoStatus).fontSize(12).width('100%') }
         if (this.localSeries) {
           if (this.localCatalogNeedsVerification) { Text('备份目录仅供本机查看，联网更新分集目录后才可编辑。').fontSize(12).width('100%') }
@@ -1756,6 +1801,12 @@ struct Index {
     }
   }
 
+  private async joinFollowed(item: Media): Promise<void> {
+    if (!this.ready || this.saving || this.cloudBusy || this.syncBusy) { return; }
+    try { await this.persistMedia(followShow(this.mediaRecords, item)); }
+    catch (error) { this.libraryStatus = '追剧状态保存失败。'; }
+  }
+
   @Builder
   mediaStateView(item: Media) {
     Column({ space: 8 }) {
@@ -1770,6 +1821,15 @@ struct Index {
           Button('撤销电影已看').layoutWeight(1).enabled(this.ready && !this.saving && !this.cloudBusy && !this.syncBusy)
             .onClick(() => { this.changeMediaIntent(item, 'movie', 'no'); })
         }.width('100%')
+      }
+      if (item.kind === 'show') {
+        Text('追剧：' + (this.mediaRecords.find((record: MediaRecord) => record.media.id === item.id)?.followState === 'yes' ?
+          '已加入本机追剧' : '未明确加入本机追剧')).fontSize(14).width('100%')
+        Button('加入追剧并移出本机待看')
+          .enabled(this.ready && !this.saving && !this.cloudBusy && !this.syncBusy)
+          .onClick(() => { this.joinFollowed(item); })
+        Text('加入待看会移回待看库；观看历史不变。待看差异仍需经原有同步确认，不会自动上传。')
+          .fontSize(12).width('100%')
       }
       Text('待看清单：' + this.localIntentLabel(this.mediaIntent(item, 'watchlist'))).fontSize(14).width('100%')
       Row({ space: 8 }) {
@@ -2738,7 +2798,7 @@ struct Index {
       return { media: media, watchedEpisodes: show.watchedEpisodes };
     });
     const localShows = this.nextShows.map((show: NextShow): LibraryShowEvidence =>
-      ({ media: show.media, watchedEpisodes: show.completed }));
+      ({ media: show.media, watchedEpisodes: show.completed, sections: show.sections }));
     return buildPersonalLibrary(this.mediaRecords, cloud?.watchedMovies ?? [], cloud?.watchlist ?? [],
       cloudShows, localShows);
   }
@@ -2852,8 +2912,14 @@ struct Index {
         this.collectionFilterButton('追剧记录', 'tracking')
         this.collectionFilterButton('已看', 'watched')
       }.width('100%')
+      Row({ space: 6 }) {
+        this.collectionFilterButton('正在追', 'watching')
+        this.collectionFilterButton('已完结', 'finished')
+        this.collectionFilterButton('等待更新', 'upcoming')
+      }.width('100%')
+      Text('分类依据完整目录与本机逐集记录；云端证据较多或资料缺失时保留待核实。').fontSize(12).width('100%')
       if (this.collectionFilter === 'tracking') {
-        Text('有本机或云端观看证据的剧集；播出状态及完整进度尚待核实。').fontSize(12)
+        Text('明确本机追剧或具有观看证据的旧剧集；仅下载目录不自动追剧。').fontSize(12)
         if (!this.signedIn) {
           Button('前往云端登录').onClick(() => { this.navigate('cloud'); })
         }
@@ -3022,6 +3088,8 @@ struct Index {
   private closeDetail(): void {
     this.detailRevision++;
     this.localSeries = undefined;
+    this.fullSchedule = undefined;
+    this.schedulePage = 1;
     this.localSeason = -1;
     this.localStatus = '';
     this.confirmSeason = -1;

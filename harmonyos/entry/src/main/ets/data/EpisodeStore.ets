@@ -3,7 +3,8 @@ import { common } from '@kit.AbilityKit';
 import { http } from '@kit.NetworkKit';
 import { Media } from '../model/Media';
 import { CommonEntry, CommonUpdate, commonId } from '../model/ThreeWay';
-import { canReadDetails } from './TraktDetails';
+import { canReadDetails, readDetails } from './TraktDetails';
+import { FullEpisodeCatalog, ScheduledSeason, ScheduledEpisode, airDate, aired, scheduleEpisodes, validateFullCatalog } from '../model/ShowCatalog';
 
 interface EpisodeIds { trakt: number; }
 interface RemoteEpisode {
@@ -12,7 +13,7 @@ interface RemoteEpisode {
   first_aired?: string;
   ids: EpisodeIds;
 }
-interface RemoteSeason { number: number; episodes?: RemoteEpisode[]; }
+interface RemoteSeason { number: number; first_aired?: string; episodes?: RemoteEpisode[]; }
 
 export interface LocalEpisode {
   id: number;
@@ -99,7 +100,7 @@ export function validateCatalog(catalog: EpisodeCatalog, showId: string): void {
 }
 
 // Public catalog only; no account history, no Authorization header.
-export async function fetchEpisodeCatalog(item: Media, clientId: string): Promise<EpisodeCatalog> {
+export async function fetchFullEpisodeCatalog(item: Media, clientId: string): Promise<FullEpisodeCatalog> {
   if (!clientId || item.kind !== 'show' || !canReadDetails(item)) {
     throw new Error('Invalid catalog request');
   }
@@ -117,32 +118,47 @@ export async function fetchEpisodeCatalog(item: Media, clientId: string): Promis
     }
     const rows = JSON.parse(response.result) as RemoteSeason[];
     if (!Array.isArray(rows)) { throw new Error('Invalid season catalog'); }
-    const episodes: LocalEpisode[] = [];
-    const now = Date.now();
+    const seasons: ScheduledSeason[] = [];
     for (const season of rows) {
       if (season.number === 0) { continue; }
-      if (!validId(season.number) || !Array.isArray(season.episodes)) {
-        throw new Error('Missing season episodes');
-      }
-      for (const ep of season.episodes) {
-        // Unknown and future air dates are not eligible for watched/bulk actions.
-        const aired = typeof ep.first_aired === 'string' ? Date.parse(ep.first_aired) : NaN;
-        if (!Number.isFinite(aired) || aired > now) { continue; }
-        if (!ep.ids || !validId(ep.ids.trakt) || !validId(ep.number)) {
-          throw new Error('Invalid aired episode identity');
+      if (!validId(season.number) || !Array.isArray(season.episodes)) { throw new Error('Missing season episodes'); }
+      const episodes: ScheduledEpisode[] = [];
+      for (const episode of season.episodes) {
+        if (!episode.ids || !validId(episode.ids.trakt) || !validId(episode.number)) {
+          throw new Error('Invalid episode identity');
         }
-        episodes.push({ id: ep.ids.trakt, season: season.number, number: ep.number,
-          title: typeof ep.title === 'string' ? ep.title : '' });
+        episodes.push({ id: episode.ids.trakt, season: season.number, number: episode.number,
+          title: typeof episode.title === 'string' ? episode.title : '', firstAired: airDate(episode.first_aired) });
       }
+      episodes.sort((left: ScheduledEpisode, right: ScheduledEpisode) => left.number - right.number);
+      seasons.push({ number: season.number, firstAired: airDate(season.first_aired), episodes: episodes });
     }
-    episodes.sort((left: LocalEpisode, right: LocalEpisode) =>
-      left.season - right.season || left.number - right.number);
-    const result: EpisodeCatalog = { showId: item.id, title: item.title, year: item.year, episodes: episodes };
-    validateCatalog(result, item.id);
+    seasons.sort((left: ScheduledSeason, right: ScheduledSeason) => left.number - right.number);
+    let status = '';
+    try { status = (await readDetails(item, clientId, true)).status; } catch (error) {}
+    const result: FullEpisodeCatalog = { media: item, status: status, fetchedAt: Date.now(), seasons: seasons };
+    validateFullCatalog(result, item.id);
     return result;
   } finally {
     request.destroy();
   }
+}
+
+// The existing write-eligible catalog remains an aired-only projection.
+export function eligibleCatalog(full: FullEpisodeCatalog, now: number): EpisodeCatalog {
+  validateFullCatalog(full, full.media.id);
+  const episodes = scheduleEpisodes(full).filter((episode: ScheduledEpisode) => aired(episode, now))
+    .map((episode: ScheduledEpisode): LocalEpisode => {
+      return { id: episode.id, season: episode.season, number: episode.number, title: episode.title };
+    });
+  const catalog: EpisodeCatalog = { showId: full.media.id, title: full.media.title, year: full.media.year, episodes: episodes };
+  validateCatalog(catalog, catalog.showId);
+  return catalog;
+}
+
+export async function fetchEpisodeCatalog(item: Media, clientId: string): Promise<EpisodeCatalog> {
+  const full = await fetchFullEpisodeCatalog(item, clientId);
+  return eligibleCatalog(full, full.fetchedAt);
 }
 
 // Event order (SQLite sequence), not the wall clock, determines final state.
@@ -183,6 +199,7 @@ export class EpisodeStore {
     };
     const db = await relationalStore.getRdbStore(context, config);
     await db.executeSql('CREATE TABLE IF NOT EXISTS episode_catalog (show_id TEXT PRIMARY KEY, catalog TEXT NOT NULL, updated_at INTEGER NOT NULL)');
+    await db.executeSql('CREATE TABLE IF NOT EXISTS episode_schedule (show_id TEXT PRIMARY KEY, payload TEXT NOT NULL)');
     // A single row represents one user action, including a whole season. SQLite
     // commits that row atomically: no partially marked seasons or split state/log.
     await db.executeSql('CREATE TABLE IF NOT EXISTS episode_event (seq INTEGER PRIMARY KEY AUTOINCREMENT, show_id TEXT NOT NULL, episode_ids TEXT NOT NULL, watched INTEGER NOT NULL CHECK(watched IN (0,1)), changed_at INTEGER NOT NULL)');
@@ -277,6 +294,32 @@ export class EpisodeStore {
       return catalog;
     } finally {
       result.close();
+    }
+  }
+
+  async fullCatalog(showId: string): Promise<FullEpisodeCatalog | undefined> {
+    const rows = await this.db.querySql('SELECT payload FROM episode_schedule WHERE show_id=?', [showId]);
+    try {
+      if (!rows.goToFirstRow()) { return undefined; }
+      const full = JSON.parse(rows.getString(0)) as FullEpisodeCatalog;
+      validateFullCatalog(full, showId);
+      return full;
+    } finally { rows.close(); }
+  }
+
+  async saveFullCatalog(full: FullEpisodeCatalog): Promise<void> {
+    const catalog = eligibleCatalog(full, full.fetchedAt);
+    // Both projections commit together. Keep every journal, receipt and
+    // baseline untouched; never make a future/unknown episode eligible.
+    this.db.beginTransaction();
+    try {
+      await this.saveCatalog(catalog);
+      await this.db.executeSql('INSERT OR REPLACE INTO episode_schedule(show_id,payload) VALUES(?,?)',
+        [catalog.showId, JSON.stringify(full)]);
+      this.db.commit();
+    } catch (error) {
+      this.db.rollBack();
+      throw new Error('Catalog refresh failed; previous data retained');
     }
   }
 

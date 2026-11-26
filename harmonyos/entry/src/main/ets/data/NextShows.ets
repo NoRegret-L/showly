@@ -1,5 +1,6 @@
 import { Media } from '../model/Media';
 import { EpisodeStore, EpisodeBackupState, LocalEpisode, JournalIntent } from './EpisodeStore';
+import { showSections } from '../model/ShowCatalog';
 
 export interface NextShow {
   media: Media;
@@ -9,6 +10,7 @@ export interface NextShow {
   nextNumber: number;
   nextTitle: string;
   lastSeq: number;
+  sections?: string[];
 }
 
 export function projectShow(state: EpisodeBackupState, lastSeq: number): NextShow {
@@ -30,7 +32,15 @@ export async function readNextShows(store: EpisodeStore): Promise<NextShow[]> {
   for (const intent of intents) {
     latest.set(intent.showId, Math.max(latest.get(intent.showId) ?? 0, intent.seq));
   }
-  return states.map((state: EpisodeBackupState) => projectShow(state, latest.get(state.catalog.showId) ?? 0));
+  const result: NextShow[] = [];
+  const now = Date.now();
+  for (const state of states) {
+    const row = projectShow(state, latest.get(state.catalog.showId) ?? 0);
+    const full = await store.fullCatalog(state.catalog.showId);
+    if (full) { row.sections = showSections(full, state.watchedIds, now); }
+    result.push(row);
+  }
+  return result;
 }
 
 export function sortNextShows(rows: NextShow[], mode: string): NextShow[] {
