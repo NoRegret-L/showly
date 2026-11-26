@@ -13,6 +13,15 @@ export interface MediaOperation {
   watchedAt: string;
   message: string;
 }
+export interface PendingMediaTarget {
+  domain: string;
+  id: string;
+}
+export interface MediaResponseEvidence {
+  httpStatus: number;
+  accepted: boolean;
+  requestedAt: string;
+}
 export interface MediaOperationLog {
   domain: string;
   mediaId: string;
@@ -33,6 +42,7 @@ export class MediaStore {
     await db.executeSql('CREATE TABLE IF NOT EXISTS media_snapshot (slot INTEGER PRIMARY KEY CHECK(slot=1), payload TEXT NOT NULL, legacy_backup TEXT NOT NULL)');
     await db.executeSql("CREATE TABLE IF NOT EXISTS media_operation (seq INTEGER PRIMARY KEY AUTOINCREMENT, account_uuid TEXT NOT NULL, domain TEXT NOT NULL CHECK(domain IN ('movie','watchlist')), media_id TEXT NOT NULL, action TEXT NOT NULL CHECK(action IN ('add','remove')), state TEXT NOT NULL CHECK(state IN ('pending','verified','unsent')), history_id INTEGER NOT NULL DEFAULT 0, watched_at TEXT NOT NULL DEFAULT '', message TEXT NOT NULL, created_at INTEGER NOT NULL)");
     await db.executeSql('CREATE INDEX IF NOT EXISTS media_operation_lookup ON media_operation(account_uuid,domain,media_id,seq)');
+    await db.executeSql('CREATE TABLE IF NOT EXISTS media_response_evidence (seq INTEGER PRIMARY KEY, account_uuid TEXT NOT NULL, requested_at TEXT NOT NULL, http_status INTEGER NOT NULL, accepted INTEGER NOT NULL CHECK(accepted IN (0,1)))');
     const store = new MediaStore(db);
     const existing = await store.readOptional();
     if (existing !== undefined) { return store; }
@@ -118,14 +128,54 @@ export class MediaStore {
       [state, historyId, watchedAt, message, uuid, seq]);
   }
 
+  async pendingTargets(uuid: string): Promise<PendingMediaTarget[]> {
+    const rows = await this.db.querySql("SELECT domain,media_id FROM media_operation WHERE account_uuid=? AND state='pending' ORDER BY seq", [uuid]);
+    const result: PendingMediaTarget[] = [];
+    try {
+      while (rows.goToNextRow()) {
+        const domain = rows.getString(0);
+        const id = rows.getString(1);
+        if ((domain !== 'movie' && domain !== 'watchlist') || !/^(movie|show):[1-9][0-9]*$/.test(id) ||
+            (domain === 'movie' && !id.startsWith('movie:')) ||
+            !Number.isSafeInteger(Number(id.substring(id.indexOf(':') + 1)))) { throw new Error('Invalid pending target'); }
+        result.push({ domain: domain, id: id });
+      }
+    } finally { rows.close(); }
+    return result;
+  }
+
+  async recordResponse(uuid: string, seq: number, requestedAt: string, httpStatus: number,
+    accepted: boolean): Promise<void> {
+    if (!Number.isSafeInteger(seq) || seq <= 0 || !Number.isSafeInteger(httpStatus) ||
+        httpStatus < 100 || httpStatus > 599 || !Number.isFinite(Date.parse(requestedAt)) ||
+        (accepted && httpStatus !== 200 && httpStatus !== 201)) { throw new Error('Invalid response evidence'); }
+    await this.db.executeSql('INSERT INTO media_response_evidence(seq,account_uuid,requested_at,http_status,accepted) VALUES(?,?,?,?,?)',
+      [seq, uuid, requestedAt, httpStatus, accepted ? 1 : 0]);
+  }
+
+  async responseEvidence(uuid: string, seq: number): Promise<MediaResponseEvidence | undefined> {
+    const rows = await this.db.querySql('SELECT requested_at,http_status,accepted FROM media_response_evidence WHERE account_uuid=? AND seq=?', [uuid, seq]);
+    try {
+      if (!rows.goToFirstRow()) { return undefined; }
+      const requestedAt = rows.getString(0);
+      const httpStatus = rows.getLong(1);
+      const accepted = rows.getLong(2);
+      if (!Number.isFinite(Date.parse(requestedAt)) || !Number.isSafeInteger(httpStatus) ||
+          httpStatus < 100 || httpStatus > 599 || (accepted !== 0 && accepted !== 1) ||
+          (accepted === 1 && httpStatus !== 200 && httpStatus !== 201)) { throw new Error('Invalid response evidence'); }
+      return { requestedAt: requestedAt, httpStatus: httpStatus, accepted: accepted === 1 };
+    } finally { rows.close(); }
+  }
+
   async operationLogs(uuid: string): Promise<string[]> {
-    const rows = await this.db.querySql('SELECT domain,media_id,action,state,message,created_at FROM media_operation WHERE account_uuid=? ORDER BY seq DESC LIMIT 12', [uuid]);
+    const rows = await this.db.querySql('SELECT o.domain,o.media_id,o.action,o.state,o.message,o.created_at,e.http_status,e.accepted FROM media_operation o LEFT JOIN media_response_evidence e ON e.seq=o.seq AND e.account_uuid=o.account_uuid WHERE o.account_uuid=? ORDER BY o.seq DESC LIMIT 12', [uuid]);
     const result: string[] = [];
     try {
       while (rows.goToNextRow()) {
         result.push(new Date(rows.getLong(5)).toLocaleString() + ' · ' +
           (rows.getString(0) === 'movie' ? '电影观看' : '待看') + ' · ' + rows.getString(1) + ' · ' +
-          (rows.getString(2) === 'add' ? '新增' : '移除') + ' · ' + rows.getString(4));
+          (rows.getString(2) === 'add' ? '新增' : '移除') + ' · ' + rows.getString(4) +
+          (rows.isColumnNull(6) ? '' : ' · 响应证据 HTTP ' + rows.getLong(6) + (rows.getLong(7) === 1 ? ' / 新增计数已验证' : '')));
       }
     } finally { rows.close(); }
     return result;

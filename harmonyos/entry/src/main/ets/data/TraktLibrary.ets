@@ -231,3 +231,9 @@ export async function readCloudMedia(session: TraktSession): Promise<CloudMediaS
   return { generation: session.generation, activity: after, watchedMovies: movies,
     watchlist: [...queueMovies, ...queueShows] };
 }
+
+// Read exactly the affected watchlist domain, not movie history or other titles.
+export async function readWatchlistKind(session: TraktSession, kind: string): Promise<Media[]> {
+  if (kind !== 'movie' && kind !== 'show') { throw new Error('Invalid watchlist kind'); }
+  return uniqueTitles(await readAll(session, 'sync/watchlist/' + (kind === 'movie' ? 'movies' : 'shows')), kind, false);
+}

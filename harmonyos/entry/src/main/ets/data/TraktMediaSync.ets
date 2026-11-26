@@ -1,13 +1,15 @@
 import { http } from '@kit.NetworkKit';
+import { Media } from '../model/Media';
 import { MediaRecord, isTraktMedia } from '../model/MediaState';
 import { EpisodeStore } from './EpisodeStore';
 import { MediaStore, MediaOperation } from './MediaStore';
 import { MediaPreview, MediaDifference, buildMediaPreview } from './TraktMediaPreview';
 import { TraktSession, traktAuth } from './TraktAuth';
 import { readSyncAccount, invalidateWatchedCache } from './TraktSyncPreview';
-import { CloudMediaSnapshot, readCloudMedia, readActivity } from './TraktLibrary';
+import { readWatchlistKind, readActivity } from './TraktLibrary';
 import { readMovieHistory, MoviePlay } from './TraktMovieHistory';
 import { sameMinute } from './TraktPlayHistory';
+import { safeSyncError } from './SyncDiagnostics';
 
 interface TitleIds { trakt: number; }
 interface TitleItem { ids: TitleIds; watched_at?: string; }
@@ -17,6 +19,8 @@ interface Counts { movies?: number; shows?: number; episodes?: number; seasons?:
 interface Missing { movies?: TitleItem[]; }
 interface AddResponse { added?: Counts; not_found?: Missing; }
 export interface TitleSyncResult { message: string; }
+export interface PendingMediaResult { confirmed: number; remaining: number; failed: number; message: string; }
+interface PendingCheck { verified: boolean; message: string; }
 
 function ensureCurrent(session: TraktSession): void {
   if (!traktAuth.isCurrent(session.clientId, session.generation)) { throw new Error('Session changed'); }
@@ -28,33 +32,90 @@ async function verifyAccount(binding: EpisodeStore, session: TraktSession, uuid:
   ensureCurrent(session);
 }
 
-function present(snapshot: CloudMediaSnapshot, domain: string, id: string): boolean {
-  const rows = domain === 'movie' ? snapshot.watchedMovies : snapshot.watchlist;
-  return rows.some((item) => item.id === id);
-}
-
+// Only the affected domain is read, independently of the full UI snapshot.
+// An accepted response alone is never enough to prove a history receipt.
 async function confirmPending(store: MediaStore, binding: EpisodeStore, session: TraktSession,
-  uuid: string, domain: string, id: string, op: MediaOperation): Promise<TitleSyncResult> {
-  const snapshot = await readCloudMedia(session);
-  let verified = present(snapshot, domain, id) === (op.action === 'add');
-  if (domain === 'movie' && op.action === 'remove') {
-    const history = await readMovieHistory(session, Number(id.substring(6)));
-    verified = op.historyId > 0 && history.count <= 2 &&
-      !history.plays.some((play: MoviePlay) => play.id === op.historyId);
+  uuid: string, domain: string, id: string, op: MediaOperation,
+  liveAccepted: boolean = false): Promise<PendingCheck> {
+  await verifyAccount(binding, session, uuid);
+  const before = await readActivity(session);
+  const evidence = await store.responseEvidence(uuid, op.seq);
+  let verified = false;
+  let receiptId = op.action === 'remove' ? op.historyId : 0;
+  let receiptAt = op.action === 'remove' ? op.watchedAt : '';
+  const numericId = Number(id.substring(id.indexOf(':') + 1));
+  if (domain === 'movie') {
+    const history = await readMovieHistory(session, numericId);
+    if (op.action === 'add') {
+      verified = history.count > 0;
+      // Do not infer ownership on a later invocation, even with a stored
+      // accepted-response count. The contemporaneous read must succeed.
+      if (verified && liveAccepted && evidence?.accepted === true && history.count === 1 &&
+          history.plays[0].action === 'watch' && sameMinute(history.plays[0].watched_at, evidence.requestedAt)) {
+        receiptId = history.plays[0].id;
+        receiptAt = history.plays[0].watched_at;
+      }
+    } else {
+      verified = op.historyId > 0 && history.count <= 2 &&
+        !history.plays.some((play: MoviePlay) => play.id === op.historyId);
+    }
+  } else {
+    const kind = id.startsWith('movie:') ? 'movie' : 'show';
+    const list = await readWatchlistKind(session, kind);
+    verified = list.some((item: Media) => item.id === id) === (op.action === 'add');
   }
   await verifyAccount(binding, session, uuid);
-  if (await readActivity(session) !== snapshot.activity) { throw new Error('Cloud changed'); }
+  if (await readActivity(session) !== before) { throw new Error('Cloud changed during readback'); }
   ensureCurrent(session);
   if (!verified) {
-    return { message: '只读核对未能确认原操作；保护凭证保留，不会重发。' };
+    return { verified: false, message: '只读核对未能确认原操作；保护凭证保留，不会重发。' };
   }
-  // A later presence observation is not proof that our POST created the play.
-  const historyId = op.action === 'remove' ? op.historyId : 0;
-  const watchedAt = op.action === 'remove' ? op.watchedAt : '';
-  const message = '只读核对确认原操作目标已满足；未重发。' +
-    (domain === 'movie' && op.action === 'add' ? ' 无法归属单次历史，不能撤销该云端记录。' : '');
-  await store.finishOperation(uuid, op.seq, 'verified', historyId, watchedAt, message);
-  return { message: message };
+  const latest = await store.latestOperation(uuid, domain, id);
+  if (!latest || latest.seq !== op.seq || latest.state !== 'pending') { throw new Error('Operation changed'); }
+  let message = liveAccepted ? '云端目标历史回读已确认；未重发。' : '只读核对确认原操作目标已满足；未重发。';
+  if (domain === 'movie' && op.action === 'add') {
+    message += receiptId > 0 ? ' 已保存单次历史凭证。' : ' 无法归属单次历史，不能撤销该云端记录。';
+    message += ' 本机待看不变；云端待看以最新预览为准。';
+  }
+  if (domain === 'watchlist') { message += ' 仅核对待看清单。'; }
+  if (evidence) { message += ' HTTP ' + evidence.httpStatus + '。'; }
+  await store.finishOperation(uuid, op.seq, 'verified', receiptId, receiptAt, message);
+  const stored = await store.latestOperation(uuid, domain, id);
+  if (!stored || stored.seq !== op.seq || stored.state !== 'verified' || stored.historyId !== receiptId) {
+    throw new Error('Operation confirmation not persisted');
+  }
+  return { verified: true, message: message };
+}
+
+// Automatic recovery has no code path to POST. Only pre-existing pending
+// operations of the current bound UUID are eligible, regardless of local edits.
+export async function reconcilePendingMedia(store: MediaStore, binding: EpisodeStore,
+  session: TraktSession, uuid: string): Promise<PendingMediaResult> {
+  const pending = await store.pendingTargets(uuid);
+  let confirmed = 0;
+  let failed = 0;
+  let detail = '';
+  if (pending.length > 0) { await verifyAccount(binding, session, uuid); }
+  for (const target of pending) {
+    ensureCurrent(session);
+    const op = await store.latestOperation(uuid, target.domain, target.id);
+    if (!op || op.state !== 'pending') { continue; }
+    try {
+      const result = await confirmPending(store, binding, session, uuid, target.domain, target.id, op);
+      if (result.verified) { confirmed++; }
+      else { detail = result.message; }
+    } catch (error) {
+      failed++;
+      detail = safeSyncError(error as Error);
+      // Fail closed and stop this pass on a network, identity, or storage error.
+      // No periodic polling and no automatic retransmission.
+      break;
+    }
+  }
+  const remaining = (await store.pendingTargets(uuid)).length;
+  return { confirmed: confirmed, remaining: remaining, failed: failed,
+    message: '自动只读核对：确认 ' + confirmed + ' 条，剩余 ' + remaining + ' 条保护；未重发。' +
+      (detail ? ' ' + detail : '') };
 }
 
 export async function syncSelectedMedia(store: MediaStore, binding: EpisodeStore, session: TraktSession,
@@ -76,7 +137,8 @@ export async function syncSelectedMedia(store: MediaStore, binding: EpisodeStore
   if ((prior?.seq ?? 0) !== selected.operationSeq) { throw new Error('Operation changed'); }
   if (selected.operation === 'reconcile') {
     if (!prior || prior.state !== 'pending') { throw new Error('Operation changed'); }
-    return await confirmPending(store, binding, session, uuid, selected.domain, selected.id, prior);
+    const checked = await confirmPending(store, binding, session, uuid, selected.domain, selected.id, prior);
+    return { message: checked.message };
   }
   const fresh = await buildMediaPreview(binding, session, records, uuid, store);
   const row = fresh.rows.find((item: MediaDifference) => item.id === selected.id && item.domain === selected.domain);
@@ -128,10 +190,13 @@ export async function syncSelectedMedia(store: MediaStore, binding: EpisodeStore
   if (await readActivity(session) !== fresh.activity || !canSend()) {
     return { message: '发送前云端或应用状态变化，未发送。' };
   }
-  const seq = await store.reserveOperation(uuid, row.domain, row.id, row.operation, historyId, historyAt);
+  const seq = await store.reserveOperation(uuid, row.domain, row.id, row.operation, historyId,
+    row.domain === 'movie' && row.operation === 'add' ? watchedAt : historyAt);
   let sent = false;
   let accepted = false;
   let httpStatus = '未确认响应';
+  let stage = '发送前账户与活动复核';
+  let failure = '';
   try {
     await verifyAccount(binding, session, uuid);
     if (await readActivity(session) !== fresh.activity || !canSend()) {
@@ -142,6 +207,7 @@ export async function syncSelectedMedia(store: MediaStore, binding: EpisodeStore
     try {
       if (!canSend()) { throw new Error('Foreground ended'); }
       invalidateWatchedCache();
+      stage = '发送单条操作';
       sent = true;
       const res = await request.request('https://api.trakt.tv/' + path, {
         method: http.RequestMethod.POST,
@@ -150,56 +216,39 @@ export async function syncSelectedMedia(store: MediaStore, binding: EpisodeStore
         extraData: body, expectDataType: http.HttpDataType.STRING
       });
       httpStatus = 'HTTP ' + res.responseCode;
+      stage = '保存服务器响应证据';
       if (row.domain === 'movie' && row.operation === 'add' &&
           (res.responseCode === 200 || res.responseCode === 201) && typeof res.result === 'string') {
-        const data = JSON.parse(res.result) as AddResponse;
-        accepted = data.added?.movies === 1 && (data.added?.episodes ?? 0) === 0 &&
-          Array.isArray(data.not_found?.movies) && data.not_found?.movies?.length === 0;
+        try {
+          const data = JSON.parse(res.result) as AddResponse;
+          accepted = data.added?.movies === 1 && (data.added?.episodes ?? 0) === 0 &&
+            Array.isArray(data.not_found?.movies) && data.not_found?.movies?.length === 0;
+        } catch (error) { accepted = false; }
       }
+      // Persist only validated counts/status/time, never raw response or token.
+      await store.recordResponse(uuid, seq, watchedAt, res.responseCode, accepted);
     } catch (error) {
       if (!sent) { throw new Error('Not sent'); }
-      // POST result is ambiguous, even if no response arrived. Read only.
+      failure = stage + '：' + safeSyncError(error as Error);
+      accepted = false;
+      // The server may have committed; only readback may follow.
     } finally { request.destroy(); }
-    await verifyAccount(binding, session, uuid);
-    const snapshot = await readCloudMedia(session);
-    let verified = present(snapshot, row.domain, row.id) === (row.operation === 'add');
-    let receiptId = historyId;
-    let receiptAt = historyAt;
-    if (row.domain === 'movie') {
-      const history = await readMovieHistory(session, id);
-      if (row.operation === 'add') {
-        verified = verified && history.count > 0;
-        if (verified && accepted && history.count === 1 && history.plays[0].action === 'watch' &&
-            sameMinute(history.plays[0].watched_at, watchedAt)) {
-          receiptId = history.plays[0].id;
-          receiptAt = history.plays[0].watched_at;
-        }
-      } else {
-        verified = history.count <= 2 && !history.plays.some((play: MoviePlay) => play.id === historyId);
-      }
-    }
-    await verifyAccount(binding, session, uuid);
-    if (await readActivity(session) !== snapshot.activity) { throw new Error('Cloud changed during readback'); }
-    ensureCurrent(session);
-    if (verified) {
-      let message = '云端回读已确认' + (row.operation === 'add' ? '存在' : '目标已移除') + ' · ' + httpStatus;
-      if (row.domain === 'movie' && row.operation === 'add') {
-        message += receiptId > 0 ? '；已保存单次历史凭证。' : '；未能归属单次历史，禁止撤销。';
-        message += ' 云端待看：' + (present(snapshot, 'watchlist', row.id) ? '存在' : '不存在') + '，本机待看状态不变。';
-      }
-      if (row.domain === 'watchlist') { message += '；仅操作待看清单。'; }
-      await store.finishOperation(uuid, seq, 'verified', receiptId, receiptAt, message);
-      return { message: message };
-    }
+    stage = row.domain === 'movie' ? '单部电影历史回读' : '对应待看清单回读';
+    const pending = await store.latestOperation(uuid, row.domain, row.id);
+    if (!pending || pending.seq !== seq || pending.state !== 'pending') { throw new Error('Operation changed'); }
+    const result = await confirmPending(store, binding, session, uuid, row.domain, row.id, pending, accepted);
+    if (result.verified) { return { message: result.message }; }
+    failure = stage + '：云端尚未显示目标状态。' + (failure ? ' ' + failure : '');
   } catch (error) {
-    // Do not emit raw server responses or credentials.
+    failure = stage + '：' + safeSyncError(error as Error) + (failure ? '；' + failure : '');
   }
   if (!sent) {
-    const message = '发送前检查失败，未发出请求；本次凭证标记未发送。';
+    const message = '发送前检查失败，未发出请求；本次凭证标记未发送。' + failure;
     await store.finishOperation(uuid, seq, 'unsent', historyId, historyAt, message);
     return { message: message };
   }
-  const message = '请求可能已发送 · ' + httpStatus + '；回读未确认，保留保护，只允许只读核对。';
-  await store.finishOperation(uuid, seq, 'pending', historyId, historyAt, message);
+  const message = '请求可能已发送 · ' + httpStatus + '；回读未确认，保留保护，只允许只读核对。' + failure;
+  await store.finishOperation(uuid, seq, 'pending', historyId,
+    row.domain === 'movie' && row.operation === 'add' ? watchedAt : historyAt, message);
   return { message: message };
 }

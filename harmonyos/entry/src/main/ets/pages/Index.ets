@@ -4,7 +4,7 @@ import { LibraryStore } from '../data/LibraryStore';
 import { MediaStore } from '../data/MediaStore';
 import { MediaRecord, migrateLegacy, isTraktMedia, applyLegacyEdit, setMediaIntent, inLocalWatchlist } from '../model/MediaState';
 import { MediaPreview, MediaDifference, buildMediaPreview } from '../data/TraktMediaPreview';
-import { syncSelectedMedia } from '../data/TraktMediaSync';
+import { syncSelectedMedia, reconcilePendingMedia } from '../data/TraktMediaSync';
 import { searchTrakt } from '../data/TraktSearch';
 import { TRAKT_APPS_URL, TRAKT_REDIRECT_URI } from '../config/TraktConfig';
 import { ClientSettings, validateClientId } from '../data/ClientSettings';
@@ -54,6 +54,7 @@ struct Index {
   @State queueRows: QueueEntry[] = [];
   private pageVisible: boolean = false;
   private recoveryPending: boolean = false;
+  private mediaRecoveryPending: boolean = false;
   private netListener?: connection.NetConnection;
   private netId: number = -1;
   private netValidated: boolean = false;
@@ -126,7 +127,7 @@ struct Index {
   @State items: Media[] = [];
   @State results: Media[] = [];
   @State ready: boolean = false;
-  @State saving: boolean = false;
+  @State @Watch('onRecoveryGateChanged') saving: boolean = false;
   @State searching: boolean = false;
   @State libraryStatus: string = '';
   @State searchStatus: string = '';
@@ -173,6 +174,7 @@ struct Index {
   onPageShow(): void {
     this.pageVisible = true;
     this.startNetworkListener();
+    this.requestMediaRecovery();
     if (this.autoActive()) { this.requestRecovery(); }
     else if (this.clientId && !this.setupBusy && !this.cloudBusy && !this.syncBusy) {
       traktAuth.restore(this.clientId);
@@ -182,11 +184,13 @@ struct Index {
   onPageHide(): void {
     this.pageVisible = false;
     this.recoveryPending = false;
+    this.mediaRecoveryPending = false;
   }
 
   aboutToDisappear(): void {
     this.pageVisible = false;
     this.recoveryPending = false;
+    this.mediaRecoveryPending = false;
     const listener = this.netListener;
     this.netListener = undefined;
     if (listener) {
@@ -206,6 +210,7 @@ struct Index {
           this.netValidated = false;
           this.networkStatus = '网络已连接，等待 Trakt 核验';
           this.requestRecovery();
+          this.requestMediaRecovery();
         }
       });
       listener.on('netCapabilitiesChange', (info: connection.NetCapabilityInfo) => {
@@ -217,6 +222,7 @@ struct Index {
         if (changed && validated) {
           this.networkStatus = '系统网络已验证，正在核对待同步记录';
           this.requestRecovery();
+          this.requestMediaRecovery();
         }
       });
       listener.on('netLost', (handle: connection.NetHandle) => {
@@ -250,11 +256,58 @@ struct Index {
   // A busy auth/DB/sync operation no longer drops the network-resume event.
   // Coalesce to a single pending event, not a periodic retry loop.
   private onRecoveryGateChanged(): void {
-    if (!this.recoveryPending || !this.pageVisible || !this.autoActive() ||
-        !this.episodeReady || this.syncBusy || this.localBusy || this.cloudBusy ||
+    if (!this.pageVisible || this.syncBusy || this.localBusy || this.cloudBusy ||
         this.authBusy || this.setupBusy) { return; }
-    this.recoveryPending = false;
-    this.resumeQueued();
+    if (this.recoveryPending && this.autoActive() && this.episodeReady) {
+      this.recoveryPending = false;
+      this.resumeQueued();
+      return;
+    }
+    if (this.mediaRecoveryPending && !this.saving) {
+      this.mediaRecoveryPending = false;
+      this.recoverMediaPending();
+    }
+  }
+
+  private requestMediaRecovery(): void {
+    if (!this.pageVisible || !this.ready || !this.mediaStore || !this.syncBound || !this.syncAccount ||
+        !traktAuth.isCurrent(this.clientId, this.syncAccount.generation)) { return; }
+    this.mediaRecoveryPending = true;
+    this.onRecoveryGateChanged();
+  }
+
+  private async recoverMediaPending(): Promise<void> {
+    const store = this.mediaStore;
+    const binding = this.episodeStore;
+    const account = this.syncAccount;
+    const clientId = this.clientId;
+    if (!store || !binding || !account || !this.ready || !this.pageVisible || !this.syncBound ||
+        this.syncBusy || this.saving || this.localBusy || this.cloudBusy || this.authBusy || this.setupBusy ||
+        !traktAuth.isCurrent(clientId, account.generation)) { return; }
+    const session = traktAuth.session(clientId);
+    if (!session) { return; }
+    this.syncBusy = true;
+    try {
+      if (!(await store.pendingTargets(account.uuid)).length) { return; }
+      this.mediaSelected = undefined;
+      this.mediaWatchTime = '';
+      this.mediaPreview = undefined;
+      this.mediaSyncStatus = '正在自动只读核对已保留的电影与待看操作…';
+      const result = await reconcilePendingMedia(store, binding, session, account.uuid);
+      if (this.syncAccount?.uuid === account.uuid && traktAuth.isCurrent(clientId, session.generation)) {
+        this.mediaSyncStatus = result.message;
+        this.mediaPreviewStatus = '操作凭证已核对；需要时重新生成差异预览。';
+      }
+    } catch (error) {
+      this.mediaSyncStatus = '自动只读核对中断：' + safeSyncError(error as Error) + '；不会重发。';
+    } finally {
+      try {
+        if (this.syncAccount?.uuid === account.uuid && traktAuth.isCurrent(clientId, session.generation)) {
+          this.mediaLogs = await store.operationLogs(account.uuid);
+        }
+      } catch (error) {}
+      this.syncBusy = false;
+    }
   }
 
   private async initializeMedia(context: common.UIAbilityContext): Promise<void> {
@@ -488,9 +541,9 @@ struct Index {
   updateView() {
     Column({ space: 8 }) {
       Text('版本与更新').fontSize(19).fontWeight(FontWeight.Medium).width('100%')
-      Text('当前版本 ' + APP_VERSION + ' · 未签名个人预览版 · 0.9.2b').fontSize(13)
+      Text('当前版本 ' + APP_VERSION + ' · 未签名个人预览版 · 0.9.2b.1').fontSize(13)
         .fontColor($r('app.color.showly_secondary')).width('100%')
-      Text('v0.9.2b 电影及待看手动增量同步版；未知结果只读核对。').fontSize(12).width('100%')
+      Text('v0.9.2b.1 电影与待看回读修复版；自动只读恢复，不自动写入。').fontSize(12).width('100%')
       Button('查看功能审计与验收计划').onClick(() => { this.openFeatureAudit(); })
       Button(this.updateBusy ? '检查中…' : '检查更新').enabled(!this.updateBusy)
         .onClick(() => { this.checkAppUpdate(); })
@@ -597,6 +650,7 @@ struct Index {
   }
 
   private invalidateSync(): void {
+    this.mediaRecoveryPending = false;
     this.mediaSelected = undefined;
     this.mediaWatchTime = '';
     this.mediaSyncStatus = '';
@@ -642,6 +696,7 @@ struct Index {
       this.syncStatus = this.syncBound ? '账户已验证，可以生成差异预览。' :
         bound ? '本机已绑定另一 Trakt 账户，禁止生成预览或重新绑定。' : '请核对账户并确认绑定；不会上传记录。';
       if (bound && bound !== account.uuid) { this.syncAccount = undefined; }
+      if (this.syncBound) { this.requestMediaRecovery(); }
     } catch (error) {
       this.syncStatus = '账户验证失败，请检查登录或网络。';
     } finally { this.syncBusy = false; }
@@ -665,6 +720,7 @@ struct Index {
       this.syncLogs = await store.syncLogs(verified.uuid);
       await this.reloadQueue();
       this.syncStatus = '账户绑定成功；尚未同步任何记录。';
+      this.requestMediaRecovery();
     } catch (error) {
       this.invalidateSync();
       this.syncStatus = '账户绑定失败或身份变化，请重新验证。';
@@ -1384,6 +1440,15 @@ struct Index {
     this.mediaPage = 1;
     this.mediaPreviewStatus = '读取电影与待看清单的完整云端快照…';
     try {
+      if (this.mediaStore && (await this.mediaStore.pendingTargets(account.uuid)).length > 0) {
+        const checked = await reconcilePendingMedia(this.mediaStore, store, session, account.uuid);
+        this.mediaSyncStatus = checked.message;
+        this.mediaLogs = await this.mediaStore.operationLogs(account.uuid);
+        if (checked.failed > 0) {
+          this.mediaPreviewStatus = '只读核对暂未完成，已保留保护；请联网后再试。';
+          return;
+        }
+      }
       const result = await buildMediaPreview(store, session, this.mediaRecords, account.uuid, this.mediaStore);
       if (this.clientId !== clientId || !traktAuth.isCurrent(clientId, session.generation) ||
           this.syncAccount?.uuid !== account.uuid || !this.syncBound) { throw new Error('Account changed'); }
@@ -1391,7 +1456,7 @@ struct Index {
       if (this.mediaStore) { this.mediaLogs = await this.mediaStore.operationLogs(account.uuid); }
       this.mediaPreviewStatus = '预览完成；未修改本机或云端观看记录。';
     } catch (error) {
-      this.mediaPreviewStatus = '预览失败，账户或云端完整快照无法验证；未修改记录。';
+      this.mediaPreviewStatus = '预览失败：' + safeSyncError(error as Error) + '；未修改观看记录。';
     } finally { this.syncBusy = false; }
   }
 
@@ -1432,23 +1497,51 @@ struct Index {
           traktAuth.isCurrent(clientId, session.generation);
       });
       this.mediaSyncStatus = result.message;
-      this.mediaLogs = await store.operationLogs(preview.account.uuid);
       this.syncPreview = undefined;
       this.cloud = undefined;
       this.cloudStatus = '电影/待看操作已结束；云端清单请重新读取。';
       if (this.collectionFilter === 'tracking') { this.resetCollection(); }
-      // Fresh GET only; no automatic follow-up write.
-      const fresh = await buildMediaPreview(binding, session, this.mediaRecords, preview.account.uuid, store);
-      if (traktAuth.isCurrent(clientId, session.generation) && this.syncAccount?.uuid === preview.account.uuid && this.syncBound) {
-        this.mediaPreview = fresh;
-        this.mediaPreviewStatus = '已刷新只读差异预览。';
-        this.mediaPage = 1;
-      } else { this.mediaPreview = undefined; }
+      this.mediaPreview = undefined;
+      // Supplemental read only after a not-yet-visible result or a revision
+      // race, not repeated network/429 errors. Never resubmit a mutation.
+      const op = await store.latestOperation(preview.account.uuid, selected.domain, selected.id);
+      if (op?.state === 'pending' && this.pageVisible && !result.message.includes('HTTP 429') &&
+          (result.message.includes('云端尚未显示目标状态') || result.message.includes('Cloud changed during readback'))) {
+        const checked = await reconcilePendingMedia(store, binding, session, preview.account.uuid);
+        this.mediaSyncStatus += ' ' + checked.message;
+        if (checked.failed > 0) {
+          this.mediaPreviewStatus = '补充核对中断，请联网后重新生成预览。';
+          return;
+        }
+      }
+      // Refresh is independent from persisted operation confirmation. A
+      // failed full-list refresh must not be reported as a failed upload.
+      const remaining = await store.latestOperation(preview.account.uuid, selected.domain, selected.id);
+      if (remaining?.state === 'pending' || result.message.includes('HTTP 429')) {
+        this.mediaPreviewStatus = '操作仍受保护；重新联网或生成预览时自动只读核对。';
+        return;
+      }
+      try {
+        const fresh = await buildMediaPreview(binding, session, this.mediaRecords, preview.account.uuid, store);
+        if (traktAuth.isCurrent(clientId, session.generation) && this.syncAccount?.uuid === preview.account.uuid && this.syncBound) {
+          this.mediaPreview = fresh;
+          this.mediaPreviewStatus = '已刷新只读差异预览。';
+          this.mediaPage = 1;
+        }
+      } catch (error) {
+        this.mediaPreviewStatus = '差异列表刷新失败：' + safeSyncError(error as Error) + '；已保存的操作结果不受影响。';
+      }
     } catch (error) {
       this.mediaPreview = undefined;
-      this.mediaSyncStatus += '；流程中断，请重新生成预览核对。若已有保护凭证，不会重发。';
-      try { this.mediaLogs = await store.operationLogs(preview.account.uuid); } catch (failure) {}
-    } finally { this.syncBusy = false; }
+      this.mediaSyncStatus += '；流程中断：' + safeSyncError(error as Error) + '；保护凭证不会重发。';
+    } finally {
+      try {
+        if (this.syncAccount?.uuid === preview.account.uuid && traktAuth.isCurrent(clientId, session.generation)) {
+          this.mediaLogs = await store.operationLogs(preview.account.uuid);
+        }
+      } catch (error) { this.mediaPreviewStatus += '；本机日志刷新失败。'; }
+      this.syncBusy = false;
+    }
   }
 
   private async refreshMediaLogs(): Promise<void> {
@@ -1487,7 +1580,7 @@ struct Index {
     Column({ space: 10 }) {
       Text('电影与待看差异预览').fontSize(22).fontWeight(FontWeight.Bold).width('100%')
       Text(this.migrationStatus).fontSize(12).width('100%')
-      Text('只比较明确本机操作。电影与待看仅支持逐条手动确认；旧记录、云端独有记录不自动写入或删除。')
+      Text('只比较明确本机操作。新增/删除仍须逐条手动确认；已有保护凭证会自动只读核对，不会重发。')
         .fontSize(12).width('100%')
       if (!this.syncBound || !this.syncAccount || !traktAuth.isCurrent(this.clientId, this.syncAccount.generation)) {
         Text('请先在上方验证并绑定同步账户。').fontSize(13).width('100%')
