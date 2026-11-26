@@ -9,12 +9,29 @@ import { traktAuth } from '../data/TraktAuth';
 import { CloudLibrary, ShowProgress, readCloudLibrary, mergeNewTitles } from '../data/TraktLibrary';
 import { MediaDetail, canReadDetails, readDetails, cachePoster, clearDetailMemory } from '../data/TraktDetails';
 import { DiscoverItem, readDiscover } from '../data/TraktDiscover';
+import { EpisodeProgress, SeasonProgress, SeriesProgress, readSeriesProgress, readChinese } from '../data/TraktProgress';
 
 @Entry
 @Component
 struct Index {
   @State title: string = '';
   @State tab: string = 'library';
+  @State collectionFilter: string = 'queue';
+  @State collectionPage: number = 1;
+  @State collectionGrid: boolean = false;
+  @State collectionCards: DiscoverItem[] = [];
+  @State collectionBusy: boolean = false;
+  @State collectionStatus: string = '';
+  private collectionRevision: number = 0;
+  private readonly collectionPageSize: number = 12;
+  @State progress?: SeriesProgress = undefined;
+  @State progressBusy: boolean = false;
+  @State progressStatus: string = '';
+  @State seasonNumber: number = -1;
+  @State chineseTitle: string = '';
+  @State chineseOverview: string = '';
+  @State translationBusy: boolean = false;
+  @State translationStatus: string = '';
   @State discoverKind: string = 'movie';
   @State discoverMode: string = 'trending';
   @State discoverItems: DiscoverItem[] = [];
@@ -127,6 +144,7 @@ struct Index {
         }
         await this.settings.save(next);
         this.clientId = next;
+        this.resetCollection();
         this.resetDiscover();
         clearDetailMemory();
         this.closeDetail();
@@ -157,6 +175,7 @@ struct Index {
       }
       await this.settings.save('');
       this.clientId = '';
+      this.resetCollection();
       this.resetDiscover();
       clearDetailMemory();
       this.closeDetail();
@@ -175,6 +194,7 @@ struct Index {
   private clearCloud(): void {
     this.cloud = undefined;
     this.cloudStatus = '';
+    if (this.collectionFilter === 'tracking') { this.resetCollection(); }
   }
 
   private async loadCloud(): Promise<void> {
@@ -194,6 +214,7 @@ struct Index {
       const snapshot = await readCloudLibrary(session);
       if (traktAuth.isCurrent(this.clientId, snapshot.generation)) {
         this.cloud = snapshot;
+        if (this.collectionFilter === 'tracking') { this.resetCollection(); }
         this.cloudStatus = '云端读取完成；尚未修改本机或云端记录。';
       }
     } catch (error) {
@@ -238,6 +259,7 @@ struct Index {
     try {
       await this.store.save(next);
       this.items = next;
+      this.resetCollection();
       this.libraryStatus = '已保存到本机';
       return true;
     } catch (error) {
@@ -422,8 +444,275 @@ struct Index {
       .onClick(() => { this.changeDiscover(this.discoverKind, mode); })
   }
 
+  private resetCollection(): void {
+    ++this.collectionRevision;
+    this.collectionPage = 1;
+    this.collectionCards = [];
+    this.collectionBusy = false;
+    this.collectionStatus = '';
+  }
+
+  private collectionItems(): Media[] {
+    if (this.collectionFilter === 'tracking') {
+      const snapshot = this.cloud;
+      if (!snapshot || !this.signedIn || !traktAuth.isCurrent(this.clientId, snapshot.generation)) {
+        return [];
+      }
+      return snapshot.shows.map((show: ShowProgress): Media => {
+        return { id: show.id, title: show.title, kind: 'show', year: 0, watched: false };
+      });
+    }
+    return this.items.filter((item: Media) => item.watched === (this.collectionFilter === 'watched'));
+  }
+
+  private collectionSlice(): Media[] {
+    const start = (this.collectionPage - 1) * this.collectionPageSize;
+    return this.collectionItems().slice(start, start + this.collectionPageSize);
+  }
+
+  private collectionPages(): number {
+    return Math.max(1, Math.ceil(this.collectionItems().length / this.collectionPageSize));
+  }
+
+  private chooseCollection(filter: string): void {
+    if (this.collectionFilter !== filter) {
+      this.resetCollection();
+      this.collectionFilter = filter;
+    }
+  }
+
+  private goCollectionPage(page: number): void {
+    if (page < 1 || page > this.collectionPages()) {
+      return;
+    }
+    this.resetCollection();
+    this.collectionPage = page;
+  }
+
+  private async loadCollectionPosters(): Promise<void> {
+    if (!this.clientId || this.collectionBusy || this.setupBusy) {
+      return;
+    }
+    const revision = ++this.collectionRevision;
+    const clientId = this.clientId;
+    const items = this.collectionSlice();
+    this.collectionBusy = true;
+    this.collectionStatus = '正在读取本页海报…';
+    this.collectionCards = items.map((media: Media): DiscoverItem => {
+      return { media: media, posterUri: '', posterUrls: [], rating: 0 };
+    });
+    try {
+      let unavailable = 0;
+      for (const item of items) {
+        if (revision !== this.collectionRevision || this.tab !== 'library' || clientId !== this.clientId) {
+          return;
+        }
+        let uri = '';
+        let rating = 0;
+        if (canReadDetails(item)) {
+          try {
+            const detail = await readDetails(item, clientId);
+            if (revision !== this.collectionRevision || clientId !== this.clientId) {
+              return;
+            }
+            rating = detail.rating;
+            const poster = await cachePoster(this.context().cacheDir, item, detail.posterUrls);
+            uri = poster.uri;
+          } catch (error) {
+            // Keep the title usable even when metadata or artwork fails.
+          }
+        }
+        if (revision !== this.collectionRevision || clientId !== this.clientId) {
+          return;
+        }
+        if (!uri) { unavailable++; }
+        const card: DiscoverItem = { media: item, posterUri: uri, posterUrls: [], rating: rating };
+        this.collectionCards = this.collectionCards.map((old: DiscoverItem) =>
+          old.media.id === item.id ? card : old);
+      }
+      this.collectionStatus = unavailable > 0 ? '本页加载完成；' + unavailable + ' 张海报不可用' : '本页海报已加载';
+    } finally {
+      if (revision === this.collectionRevision) { this.collectionBusy = false; }
+    }
+  }
+
+  @Builder
+  collectionFilterButton(label: string, value: string) {
+    Button(label).layoutWeight(1).fontSize(13)
+      .backgroundColor(this.collectionFilter === value ? '#2267D9' : '#F0F2F5')
+      .fontColor(this.collectionFilter === value ? '#FFFFFF' : '#263446')
+      .onClick(() => { this.chooseCollection(value); })
+  }
+
+  @Builder
+  collectionView() {
+    Column({ space: 12 }) {
+      Text('我的收藏').fontSize(25).fontWeight(FontWeight.Bold).width('100%')
+      Text(this.libraryStatus).fontSize(13)
+      Row({ space: 6 }) {
+        this.collectionFilterButton('待看', 'queue')
+        this.collectionFilterButton('追剧记录', 'tracking')
+        this.collectionFilterButton('已看', 'watched')
+      }.width('100%')
+      if (this.collectionFilter === 'tracking') {
+        Text('Trakt 看过的剧集（含可能已追完的剧集），只读。').fontSize(12)
+        if (!this.cloud || !this.signedIn) {
+          Button('前往云端读取记录').onClick(() => { this.tab = 'cloud'; })
+        }
+      }
+      Text('共 ' + this.collectionItems().length + ' 部').fontSize(14)
+      Row({ space: 8 }) {
+        Button(this.collectionGrid ? '切换文字列表' : '切换海报网格').layoutWeight(1)
+          .onClick(() => { this.collectionGrid = !this.collectionGrid; })
+        if (this.collectionGrid) {
+          Button(this.collectionBusy ? '加载中…' : '加载本页海报').layoutWeight(1)
+            .enabled(!this.collectionBusy && !this.setupBusy && !!this.clientId)
+            .onClick(() => { this.loadCollectionPosters(); })
+        }
+      }.width('100%')
+      if (this.collectionGrid) {
+        Text(this.collectionStatus).fontSize(12)
+        Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.SpaceBetween }) {
+          ForEach(this.collectionSlice(), (item: Media) => {
+            Column({ space: 6 }) {
+              if (this.collectionCards.find((card: DiscoverItem) => card.media.id === item.id)?.posterUri) {
+                Image(this.collectionCards.find((card: DiscoverItem) => card.media.id === item.id)?.posterUri)
+                  .width('100%').aspectRatio(0.667).objectFit(ImageFit.Cover).borderRadius(10)
+              } else {
+                Column() {
+                  Text('海报').fontSize(13).fontColor('#687887')
+                }.width('100%').aspectRatio(0.667).justifyContent(FlexAlign.Center)
+                  .backgroundColor('#E8EDF4').borderRadius(10)
+              }
+              Text(mediaLabel(item)).fontSize(14).maxLines(2)
+                .textOverflow({ overflow: TextOverflow.Ellipsis }).width('100%')
+              if (this.collectionFilter !== 'tracking') {
+                Button(item.watched ? '撤销' : '已看').fontSize(12)
+                  .enabled(this.ready && !this.saving && !this.cloudBusy)
+                  .onClick(() => { this.save(setWatched(this.items, item.id, !item.watched)); })
+              }
+            }.width('48%').padding({ bottom: 12 })
+              .onClick(() => { this.openDetail(item); })
+          }, (item: Media) => item.id + ':' +
+            (this.collectionCards.find((card: DiscoverItem) => card.media.id === item.id)?.posterUri ?? ''))
+        }.width('100%')
+      } else {
+        ForEach(this.collectionSlice(), (item: Media) => {
+          if (this.collectionFilter === 'tracking') {
+            Row({ space: 8 }) {
+              Text(item.title).layoutWeight(1)
+              Text('已看 ' + (this.cloud?.shows.find((show: ShowProgress) => show.id === item.id)?.watchedEpisodes ?? 0) + ' 集')
+                .fontSize(13)
+              Button('详情').fontSize(12).onClick(() => { this.openDetail(item); })
+            }.width('100%')
+          } else {
+            this.libraryRow(item)
+          }
+        }, (item: Media) => item.id)
+      }
+      Row({ space: 8 }) {
+        Button('上一页').layoutWeight(1).enabled(!this.collectionBusy && this.collectionPage > 1)
+          .onClick(() => { this.goCollectionPage(this.collectionPage - 1); })
+        Text(this.collectionPage + ' / ' + this.collectionPages()).fontSize(13)
+        Button('下一页').layoutWeight(1).enabled(!this.collectionBusy && this.collectionPage < this.collectionPages())
+          .onClick(() => { this.goCollectionPage(this.collectionPage + 1); })
+      }.width('100%')
+    }.width('100%')
+  }
+
+  private async loadProgress(item: Media): Promise<void> {
+    if (this.progressBusy || this.authBusy || this.setupBusy || item.kind !== 'show') {
+      return;
+    }
+    const revision = this.detailRevision;
+    const clientId = this.clientId;
+    this.progressBusy = true;
+    this.progress = undefined;
+    this.seasonNumber = -1;
+    this.progressStatus = '正在读取真实分集进度…';
+    try {
+      await traktAuth.restore(clientId, true);
+      const session = traktAuth.session(clientId);
+      if (!session) { throw new Error('Sign in required'); }
+      const progress = await readSeriesProgress(item, session);
+      if (revision === this.detailRevision && this.clientId === clientId &&
+          traktAuth.isCurrent(clientId, session.generation)) {
+        this.progress = progress;
+        this.seasonNumber = progress.seasons.length > 0 ? progress.seasons[0].number : -1;
+        this.progressStatus = '仅统计已播普通集数，不含隐藏季与特别篇。';
+      }
+    } catch (error) {
+      if (revision === this.detailRevision) {
+        this.progressStatus = '分集进度读取失败，请检查 Trakt 登录和网络。';
+      }
+    } finally {
+      this.progressBusy = false;
+    }
+  }
+
+  private async translateDetail(item: Media): Promise<void> {
+    if (this.translationBusy || !this.clientId) { return; }
+    const revision = this.detailRevision;
+    const clientId = this.clientId;
+    this.translationBusy = true;
+    this.translationStatus = '正在读取中文译名…';
+    try {
+      const result = await readChinese(item, clientId);
+      if (revision === this.detailRevision && this.clientId === clientId) {
+        this.chineseTitle = result.title;
+        this.chineseOverview = result.overview;
+        this.translationStatus = result.title || result.overview ? '已应用可用中文翻译' : '暂无中文翻译，保留原文';
+      }
+    } catch (error) {
+      if (revision === this.detailRevision) { this.translationStatus = '中文翻译读取失败，保留原文'; }
+    } finally {
+      this.translationBusy = false;
+    }
+  }
+
+  @Builder
+  seriesProgressView(item: Media) {
+    Column({ space: 8 }) {
+      Text('追剧进度').fontSize(20).fontWeight(FontWeight.Medium).width('100%')
+      Button(this.progressBusy ? '读取中…' : '读取分季分集进度')
+        .enabled(this.signedIn && !this.progressBusy && !this.authBusy)
+        .onClick(() => { this.loadProgress(item); })
+      if (!this.signedIn) { Text('登录 Trakt 后查看观看状态').fontSize(13) }
+      Text(this.progressStatus).fontSize(12).width('100%')
+      if (this.progress && this.signedIn) {
+        Text('已看 ' + this.progress.completed + ' / ' + this.progress.aired + ' 集').fontSize(16)
+        if (this.progress.aired > 0) {
+          Progress({ value: this.progress.completed, total: this.progress.aired,
+            type: ProgressType.Linear }).width('100%')
+        }
+        ForEach(this.progress.seasons, (season: SeasonProgress) => {
+          Column({ space: 6 }) {
+            Button('第 ' + season.number + ' 季 · ' + season.completed + '/' + season.aired +
+              (this.seasonNumber === season.number ? '  收起' : '  展开'))
+              .width('100%').fontSize(14)
+              .onClick(() => { this.seasonNumber = this.seasonNumber === season.number ? -1 : season.number; })
+            if (this.seasonNumber === season.number) {
+              ForEach(season.episodes, (episode: EpisodeProgress) => {
+                Row() {
+                  Text('第 ' + episode.number + ' 集').layoutWeight(1)
+                  Text(episode.completed ? '已看' : '未看').fontSize(13)
+                }.width('100%')
+              }, (episode: EpisodeProgress) => episode.number.toString())
+            }
+          }.width('100%')
+        }, (season: SeasonProgress) => season.number.toString())
+      }
+    }.width('100%')
+  }
+
   private closeDetail(): void {
     this.detailRevision++;
+    this.progress = undefined;
+    this.progressStatus = '';
+    this.seasonNumber = -1;
+    this.chineseTitle = '';
+    this.chineseOverview = '';
+    this.translationStatus = '';
     this.selectedMedia = undefined;
     this.detail = undefined;
     this.posterUri = '';
@@ -442,6 +731,7 @@ struct Index {
     if (this.detailBusy || this.setupBusy || !this.clientId || !canReadDetails(item)) {
       return;
     }
+    this.closeDetail();
     const revision = ++this.detailRevision;
     const clientId = this.clientId;
     this.selectedMedia = item;
@@ -485,6 +775,8 @@ struct Index {
       .fontSize(13)
       .onClick(() => {
         this.closeDetail();
+        if (this.tab === 'discover' && value !== 'discover' && this.discoverBusy) { this.resetDiscover(); }
+        if (this.tab === 'library' && value !== 'library' && this.collectionBusy) { this.resetCollection(); }
         this.tab = value;
         if (value === 'discover' && this.discoverItems.length === 0 && !this.discoverBusy) {
           this.loadDiscover();
@@ -496,7 +788,7 @@ struct Index {
   detailPage(item: Media) {
     Column({ space: 12 }) {
       Button('返回').onClick(() => { this.closeDetail(); })
-      Text(this.detail ? this.detail.title : item.title)
+      Text(this.chineseTitle || (this.detail ? this.detail.title : item.title))
         .fontSize(26).fontWeight(FontWeight.Bold).width('100%')
       if (this.posterUri) {
         Image(this.posterUri)
@@ -528,8 +820,12 @@ struct Index {
           Text('已播 ' + this.detail.airedEpisodes + ' 集').fontSize(14)
         }
         Text('剧情简介').fontSize(20).fontWeight(FontWeight.Medium).width('100%')
-        Text(this.detail.overview || '暂无简介').fontSize(15).width('100%')
+        Text(this.chineseOverview || this.detail.overview || '暂无简介').fontSize(15).width('100%')
+        Button('查看中文译名和简介').enabled(!this.translationBusy)
+          .onClick(() => { this.translateDetail(item); })
+        Text(this.translationStatus).fontSize(12)
       }
+      if (item.kind === 'show') { this.seriesProgressView(item) }
       Text(this.detailStatus).fontSize(13).width('100%')
       if (this.detailStatus) {
         Button('复制海报诊断信息').fontSize(13)
@@ -563,7 +859,7 @@ struct Index {
     Column({ space: 0 }) {
       Row() {
         Text('Showly').fontSize(27).fontWeight(FontWeight.Bold).layoutWeight(1)
-        Text('Preview 0.7').fontSize(12).fontColor('#687887')
+        Text('Preview 0.7.1').fontSize(12).fontColor('#687887')
       }.width('100%').padding(16)
       Divider()
       Scroll() {
@@ -573,18 +869,7 @@ struct Index {
           } else if (this.tab === 'discover') {
             this.discoverView()
           } else if (this.tab === 'library') {
-            Text('我的清单').fontSize(23).fontWeight(FontWeight.Bold)
-        Text(this.libraryStatus).fontSize(13)
-        Text('待看 (' + this.items.filter((item: Media) => !item.watched).length + ')')
-          .fontSize(20).fontWeight(FontWeight.Medium)
-        ForEach(this.items.filter((item: Media) => !item.watched), (item: Media) => {
-          this.libraryRow(item)
-        }, (item: Media) => item.id)
-        Text('已看 (' + this.items.filter((item: Media) => item.watched).length + ')')
-          .fontSize(20).fontWeight(FontWeight.Medium)
-        ForEach(this.items.filter((item: Media) => item.watched), (item: Media) => {
-          this.libraryRow(item)
-        }, (item: Media) => item.id)
+            this.collectionView()
           } else if (this.tab === 'search') {
         Text('影视搜索').fontSize(20).fontWeight(FontWeight.Medium)
         TextInput({ placeholder: '电影或剧集名称', text: this.title })
@@ -715,7 +1000,7 @@ struct Index {
       Divider()
       Row({ space: 6 }) {
         this.navigationTab('发现', 'discover')
-        this.navigationTab('清单', 'library')
+        this.navigationTab('收藏', 'library')
         this.navigationTab('搜索', 'search')
         this.navigationTab('云端', 'cloud')
         this.navigationTab('账户', 'account')

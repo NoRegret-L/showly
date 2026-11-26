@@ -1,4 +1,4 @@
-# Showly HarmonyOS Preview v0.7.0
+# Showly HarmonyOS Preview v0.7.1
 
 Unofficial native ArkTS prototype, not a complete Showly port. Your app uses Trakt but is not endorsed or certified by Trakt.
 
@@ -52,3 +52,7 @@ References: https://developer.trakt.tv/docs/images ; https://docs.cantinarr.com/
 References upstream bottom_navigation_menu.xml, fragment_discover.xml, TraktMoviesService.kt and TraktShowsService.kt. Native discovery tab supports movie/show trending, popular and anticipated charts; the existing four destinations remain available. Uses the Standard Trakt API, extended=full and explicit pages of 12 (two columns × six rows). No per-card summary call. Download sequentially into the existing local WebP cache, only on requested pages. Revision/client checks discard obsolete responses; local records and auth schema unchanged. Concurrent detail/discovery downloads have separate temporary filenames. Grid is bounded rather than a full lazy collection; no new image library dependency. Missing images leave usable title cards. No personalized recommendations, full library poster grid, episode management, system theme overhaul or cloud writes yet.
 Device tests: movie/show modes, all three charts, previous/next page, quick mode changes, opening detail while posters load, back navigation, offline behavior, and upgrading with previous credentials/library.
 References: https://developer.trakt.tv/docs/images ; https://developer.trakt.tv/docs/pagination ; https://github.com/trakt/showly .
+
+## v0.7.1 collection and episode progress
+
+Collection now has local queue/watched filters and a read-only cloud watched-show view (includes completed shows, not a precise in-progress classification). Each view is paged using the existing 12-card convention. List mode works offline; poster mode requests only the selected page on explicit user action, reusing metadata and disk cache. Existing local schema and credentials unchanged. Per-show progress uses authenticated GET /shows/{id}/progress/watched, excludes hidden seasons and specials, uses server-provided aired/completed totals, and displays expandable season episode status. No cloud writes, no local episode persistence. Chinese translation is optional, chooses zh/cn first and falls back to other zh or original. Theme and full navigation redesign deferred. Native bounded rendering avoids loading all hundreds of titles; no extra dependency. Test paging, toggling watched, changing account, loading posters, season progress, translations, offline mode and preserving old library. See https://trakt.docs.apiary.io/reference/sync and upstream TraktShowsService.kt / TraktMoviesService.kt. 
