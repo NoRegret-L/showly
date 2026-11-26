@@ -8,6 +8,8 @@ import { MediaPreview, MediaDifference, buildMediaPreview } from '../data/TraktM
 import { syncSelectedMedia, reconcilePendingMedia } from '../data/TraktMediaSync';
 import { checkpointEpisodes, checkpointMedia, adoptEpisodeCloud, adoptMediaCloud } from '../data/ThreeWaySync';
 import { threeWayLabel } from '../model/ThreeWay';
+import { NextShow, readNextShows, sortNextShows } from '../data/NextShows';
+import { CalendarSnapshot, CalendarEntry, readCalendar, calendarWindow } from '../data/TraktCalendar';
 import { searchTrakt } from '../data/TraktSearch';
 import { TRAKT_APPS_URL, TRAKT_REDIRECT_URI } from '../config/TraktConfig';
 import { ClientSettings, validateClientId } from '../data/ClientSettings';
@@ -78,6 +80,20 @@ struct Index {
   @State @Watch('onRecoveryGateChanged') localBusy: boolean = false;
   @State localStatus: string = '';
   @State localRecent: Media[] = [];
+  @State progressMode: string = 'next';
+  @State nextShows: NextShow[] = [];
+  @State nextStatus: string = '';
+  @State nextSort: string = 'recent';
+  @State nextFilter: string = 'remaining';
+  @State nextQuery: string = '';
+  @State nextPage: number = 1;
+  @State calendarKind: string = 'show';
+  @State calendarWeek: number = 0;
+  @State calendarPage: number = 1;
+  @State calendarBusy: boolean = false;
+  @State calendarStatus: string = '';
+  @State calendarData?: CalendarSnapshot = undefined;
+  private calendarRevision: number = 0;
   @State confirmSeason: number = -1;
   @State confirmWatched: boolean = true;
   @State backupBusy: boolean = false;
@@ -355,6 +371,7 @@ struct Index {
       const consent = await this.episodeStore.autoConsent();
       if (consent && consent.clientId === this.clientId) { this.autoConsent = consent; }
       await this.reloadQueue();
+      if (this.tab === 'progress' && this.progressMode === 'next') { await this.loadNextShows(); }
       this.requestRecovery();
     } catch (error) {
       this.episodeInitStatus = '分集数据库打开失败，已停止分集写入；旧收藏不受影响。';
@@ -381,6 +398,7 @@ struct Index {
         if (revision !== this.detailRevision || this.clientId !== clientId) { return; }
         this.invalidateSync();
         await store.saveCatalog(catalog);
+        this.invalidateNextShows();
         state = await store.read(item.id);
       }
       if (revision === this.detailRevision) {
@@ -415,6 +433,7 @@ struct Index {
     try {
       this.invalidateSync();
       await store.mark(item.id, ids, watched, watched && auto ? auto.uuid : '');
+      this.invalidateNextShows();
       saved = true;
       const state = await store.read(item.id);
       this.localRecent = await store.recent();
@@ -661,6 +680,7 @@ struct Index {
         this.items = records.map((record: MediaRecord) => record.media);
         this.migrationStatus = '收藏数据库已就绪 · ' + records.length + ' 部；旧版 Preferences 保留。';
         this.resetCollection();
+        this.invalidateNextShows();
         this.localRecent = await episodes.recent();
         this.localSeries = undefined;
         this.localCatalogNeedsVerification = false;
@@ -700,9 +720,9 @@ struct Index {
   updateView() {
     Column({ space: 8 }) {
       Text('版本与更新').fontSize(19).fontWeight(FontWeight.Medium).width('100%')
-      Text('当前版本 ' + APP_VERSION + ' · 未签名个人预览版 · 0.9.3b').fontSize(13)
+      Text('当前版本 ' + APP_VERSION + ' · 未签名个人预览版 · 0.9.3c').fontSize(13)
         .fontColor($r('app.color.showly_secondary')).width('100%')
-      Text('v0.9.3b 三方共同基线及云端变化保护版。').fontSize(12).width('100%')
+      Text('v0.9.3c 本机追剧进度与个人日历版。').fontSize(12).width('100%')
       Button('查看功能审计与验收计划').onClick(() => { this.openFeatureAudit(); })
       Button(this.updateBusy ? '检查中…' : '检查更新').enabled(!this.updateBusy)
         .onClick(() => { this.checkAppUpdate(); })
@@ -1169,6 +1189,7 @@ struct Index {
         throw new Error('Account changed');
       }
       const added = await store.importCloudBaseline(fresh.account.uuid, fresh.cloudIds);
+      this.invalidateNextShows();
       this.uploadStatus = '已新增保存 ' + added + ' 个云端已看分集 ID 到本机基线；明确本机操作优先，未修改 Trakt。';
       await store.logSync(fresh.account.uuid, 'import', [], this.uploadStatus);
       this.syncLogs = await store.syncLogs(fresh.account.uuid);
@@ -1310,6 +1331,7 @@ struct Index {
     this.threeWayStatus = '正在校验所选分集的最新云端状态…';
     try {
       await adoptEpisodeCloud(store, session, preview, row);
+      this.invalidateNextShows();
       this.threeWayStatus = '已采用云端分集状态并保存共同基线；仅修改本机，不上传或删除云端历史。';
       this.localRecent = await store.recent();
       this.localSeries = undefined;
@@ -1599,6 +1621,7 @@ struct Index {
   }
 
   private clearCloud(): void {
+    this.resetCalendar();
     this.invalidateSync();
     this.cloud = undefined;
     this.cloudStatus = '';
@@ -2215,8 +2238,256 @@ struct Index {
     return Math.max(1, Math.ceil(this.trackingItems().length / this.collectionPageSize));
   }
 
+  private invalidateNextShows(): void {
+    this.nextShows = [];
+    this.nextPage = 1;
+    this.nextStatus = '本机记录已变化，请刷新追剧进度。';
+  }
+
+  private async loadNextShows(): Promise<void> {
+    const store = this.episodeStore;
+    if (!store || !this.episodeReady || this.localBusy || this.syncBusy || this.backupBusy) { return; }
+    this.localBusy = true;
+    this.nextStatus = '正在计算本机已缓存剧集进度…';
+    try {
+      this.nextShows = await readNextShows(store);
+      this.nextPage = 1;
+      this.nextStatus = this.nextShows.length ? '已读取 ' + this.nextShows.length + ' 部本机缓存目录；不代表全部云端剧集。' :
+        '没有缓存分集目录。请打开剧集详情并更新分集目录。';
+    } catch (error) {
+      this.invalidateNextShows();
+      this.nextStatus = '本机进度读取失败：' + safeSyncError(error as Error);
+    } finally { this.localBusy = false; }
+  }
+
+  private nextFiltered(): NextShow[] {
+    const q = this.nextQuery.trim().toLowerCase();
+    return sortNextShows(this.nextShows.filter((row: NextShow) =>
+      (this.nextFilter === 'all' || (this.nextFilter === 'remaining' ? row.nextSeason > 0 :
+        row.total > 0 && row.completed === row.total)) &&
+      (!q || row.media.title.toLowerCase().includes(q))), this.nextSort);
+  }
+
+  private nextPages(): number { return Math.max(1, Math.ceil(this.nextFiltered().length / this.collectionPageSize)); }
+  private nextSlice(): NextShow[] {
+    return this.nextFiltered().slice((this.nextPage - 1) * this.collectionPageSize, this.nextPage * this.collectionPageSize);
+  }
+
+  private resetCalendar(): void {
+    ++this.calendarRevision;
+    this.calendarData = undefined;
+    this.calendarBusy = false;
+    this.calendarPage = 1;
+    this.calendarStatus = '';
+  }
+
+  private async loadCalendar(): Promise<void> {
+    if (this.calendarBusy || this.authBusy || this.setupBusy || this.syncBusy || !this.signedIn || !this.clientId) { return; }
+    const session = traktAuth.session(this.clientId);
+    if (!session) { this.calendarStatus = '登录会话尚不可用，请恢复 Trakt 登录后重试。'; return; }
+    const revision = ++this.calendarRevision;
+    const kind = this.calendarKind;
+    const week = this.calendarWeek;
+    this.calendarBusy = true;
+    this.calendarData = undefined;
+    this.calendarPage = 1;
+    this.calendarStatus = '正在读取 Trakt 个人日历…';
+    try {
+      const result = await readCalendar(session, kind, week);
+      if (revision !== this.calendarRevision || this.calendarKind !== kind || this.calendarWeek !== week ||
+          !this.signedIn || !traktAuth.isCurrent(this.clientId, session.generation)) { return; }
+      this.calendarData = result;
+      this.calendarStatus = (result.entries.length ? '日历读取完成，共 ' + result.entries.length + ' 条。' : '此日期范围暂无返回的日历记录。') +
+        (result.skipped ? ' 跳过日期或标识不完整的 ' + result.skipped + ' 条。' : '');
+    } catch (error) {
+      if (revision === this.calendarRevision) {
+        this.calendarStatus = '日历读取失败：' + safeSyncError(error as Error) + '；未改动观看记录。';
+      }
+    } finally { if (revision === this.calendarRevision) { this.calendarBusy = false; } }
+  }
+
+  private calendarRangeLabel(): string {
+    const range = calendarWindow(new Date(), this.calendarWeek);
+    return range.from + ' 至 ' + range.to;
+  }
+
+  private calendarCurrent(): boolean {
+    return !!this.calendarData && this.signedIn &&
+      traktAuth.isCurrent(this.clientId, this.calendarData.generation) &&
+      this.calendarData.window.from === calendarWindow(new Date(), this.calendarWeek).from &&
+      this.calendarData.window.startMs === calendarWindow(new Date(), this.calendarWeek).startMs;
+  }
+
+  private calendarSlice(): CalendarEntry[] {
+    if (!this.calendarCurrent()) { return []; }
+    return this.calendarData?.entries.slice((this.calendarPage - 1) * this.collectionPageSize,
+      this.calendarPage * this.collectionPageSize) ?? [];
+  }
+
+  private calendarPages(): number {
+    return Math.max(1, Math.ceil((this.calendarData?.entries.length ?? 0) / this.collectionPageSize));
+  }
+
+  private changeCalendar(kind: string, week: number): void {
+    if (this.calendarBusy) { return; }
+    this.resetCalendar();
+    this.calendarKind = kind;
+    this.calendarWeek = week;
+    this.loadCalendar();
+  }
+
+  private chooseProgressMode(mode: string): void {
+    this.progressMode = mode;
+    if (mode === 'next' && !this.nextShows.length) { this.loadNextShows(); }
+    if (mode === 'calendar' && !this.calendarCurrent()) { this.loadCalendar(); }
+  }
+
+  @Builder
+  progressModeButton(label: string, mode: string) {
+    Button(label).layoutWeight(1).fontSize(13)
+      .backgroundColor(this.progressMode === mode ? $r('app.color.showly_accent') : $r('app.color.showly_muted_surface'))
+      .fontColor(this.progressMode === mode ? $r('app.color.showly_on_accent') : $r('app.color.showly_text'))
+      .onClick(() => { this.chooseProgressMode(mode); })
+  }
+
+  @Builder
+  nextFilterButton(label: string, filter: string) {
+    Button(label).layoutWeight(1).fontSize(12)
+      .backgroundColor(this.nextFilter === filter ? $r('app.color.showly_accent') : $r('app.color.showly_muted_surface'))
+      .fontColor(this.nextFilter === filter ? $r('app.color.showly_on_accent') : $r('app.color.showly_text'))
+      .onClick(() => { this.nextFilter = filter; this.nextPage = 1; })
+  }
+
+  @Builder
+  nextSortButton(label: string, mode: string) {
+    Button(label).layoutWeight(1).fontSize(12)
+      .backgroundColor(this.nextSort === mode ? $r('app.color.showly_accent') : $r('app.color.showly_muted_surface'))
+      .fontColor(this.nextSort === mode ? $r('app.color.showly_on_accent') : $r('app.color.showly_text'))
+      .onClick(() => { this.nextSort = mode; this.nextPage = 1; })
+  }
+
+  @Builder
+  nextShowsView() {
+    Column({ space: 10 }) {
+      Text('下一集 · 本机追剧进度').fontSize(21).fontWeight(FontWeight.Medium).width('100%')
+      Text('按本机已缓存目录计算最早未看普通集。已导入云端进度与本机操作按现有规则合并；未缓存和未来分集不推断。')
+        .fontSize(12).width('100%')
+      Button(this.localBusy ? '读取中…' : '刷新本机追剧进度')
+        .enabled(this.episodeReady && !this.localBusy && !this.syncBusy && !this.backupBusy)
+        .onClick(() => { this.loadNextShows(); })
+      if (this.nextStatus) { Text(this.nextStatus).fontSize(12).width('100%') }
+      Row({ space: 4 }) {
+        this.nextFilterButton('待追', 'remaining')
+        this.nextFilterButton('已追完目录', 'completed')
+        this.nextFilterButton('全部目录', 'all')
+      }.width('100%')
+      Row({ space: 4 }) {
+        this.nextSortButton('最近操作', 'recent')
+        this.nextSortButton('剩余集数', 'remaining')
+        this.nextSortButton('片名', 'title')
+      }.width('100%')
+      TextInput({ placeholder: '筛选剧集', text: this.nextQuery })
+        .onChange((value: string) => { this.nextQuery = value; this.nextPage = 1; })
+      Text('符合条件 ' + this.nextFiltered().length + ' 部').fontSize(13).width('100%')
+      ForEach(this.nextSlice(), (row: NextShow) => {
+        Column({ space: 6 }) {
+          Text(row.media.title).fontSize(17).fontWeight(FontWeight.Medium).width('100%')
+          Text('已看 ' + row.completed + ' / ' + row.total + ' 集 · 剩余 ' + (row.total - row.completed) + ' 集')
+            .fontSize(12).width('100%')
+          if (row.total > 0) {
+            Progress({ value: row.completed, total: row.total, type: ProgressType.Linear }).width('100%').color($r('app.color.showly_accent'))
+          }
+          Text(row.nextSeason > 0 ? '下一集：S' + row.nextSeason + 'E' + row.nextNumber +
+            (row.nextTitle ? ' · ' + row.nextTitle : '') : row.total > 0 ? '当前缓存目录已追完' : '暂无已播分集')
+            .fontSize(14).width('100%')
+          Button(row.nextSeason > 0 ? '查看下一集所在季' : '查看剧集详情')
+            .fontSize(12).enabled(!this.localBusy && !this.syncBusy && !this.detailBusy)
+            .onClick(() => { this.openDetail(row.media, false, row.nextSeason); })
+        }.padding(12).borderRadius(10).width('100%').backgroundColor($r('app.color.showly_surface'))
+      }, (row: NextShow) => row.media.id + ':' + row.completed + ':' + row.nextSeason + ':' + row.nextNumber)
+      Row({ space: 8 }) {
+        Button('上一页').layoutWeight(1).enabled(this.nextPage > 1).onClick(() => { this.nextPage--; })
+        Text(this.nextPage + ' / ' + this.nextPages()).fontSize(13)
+        Button('下一页').layoutWeight(1).enabled(this.nextPage < this.nextPages()).onClick(() => { this.nextPage++; })
+      }.width('100%')
+    }.width('100%')
+  }
+
+  @Builder
+  calendarView() {
+    Column({ space: 10 }) {
+      Text('个人更新与上映日历').fontSize(21).fontWeight(FontWeight.Medium).width('100%')
+      Text('使用 Trakt 个人日历，不是全站上映表。剧集播出时间按设备时区显示；电影仅显示 Trakt 提供的上映日期，不代表本地影院排期。')
+        .fontSize(12).width('100%')
+      Row({ space: 6 }) {
+        Button('剧集更新').layoutWeight(1).fontSize(13).enabled(!this.calendarBusy)
+          .backgroundColor(this.calendarKind === 'show' ? $r('app.color.showly_accent') : $r('app.color.showly_muted_surface'))
+          .fontColor(this.calendarKind === 'show' ? $r('app.color.showly_on_accent') : $r('app.color.showly_text'))
+          .onClick(() => { this.changeCalendar('show', this.calendarWeek); })
+        Button('电影上映').layoutWeight(1).fontSize(13).enabled(!this.calendarBusy)
+          .backgroundColor(this.calendarKind === 'movie' ? $r('app.color.showly_accent') : $r('app.color.showly_muted_surface'))
+          .fontColor(this.calendarKind === 'movie' ? $r('app.color.showly_on_accent') : $r('app.color.showly_text'))
+          .onClick(() => { this.changeCalendar('movie', this.calendarWeek); })
+      }.width('100%')
+      Text(this.calendarRangeLabel()).fontSize(15).width('100%')
+      Row({ space: 4 }) {
+        Button('前七天').layoutWeight(1).fontSize(12).enabled(!this.calendarBusy && this.calendarWeek > -1)
+          .onClick(() => { this.changeCalendar(this.calendarKind, this.calendarWeek - 1); })
+        Button('今天起').layoutWeight(1).fontSize(12).enabled(!this.calendarBusy)
+          .onClick(() => { this.changeCalendar(this.calendarKind, 0); })
+        Button('后七天').layoutWeight(1).fontSize(12).enabled(!this.calendarBusy && this.calendarWeek < 1)
+          .onClick(() => { this.changeCalendar(this.calendarKind, this.calendarWeek + 1); })
+      }.width('100%')
+      if (!this.signedIn) {
+        Text('登录 Trakt 后读取个人日历。').fontSize(13).width('100%')
+        Button('连接 Trakt').onClick(() => { this.navigate('account'); })
+      } else {
+        Button(this.calendarBusy ? '读取中…' : '刷新日历').enabled(!this.calendarBusy && !this.authBusy && !this.syncBusy && !this.setupBusy)
+          .onClick(() => { this.loadCalendar(); })
+        if (this.calendarStatus) { Text(this.calendarStatus).fontSize(13).width('100%') }
+        if (this.calendarCurrent()) {
+          ForEach(this.calendarSlice(), (row: CalendarEntry) => {
+            Column({ space: 6 }) {
+              Text(row.day + (row.time ? ' · ' + row.time : ' · 上映日期')).fontSize(13)
+                .fontColor($r('app.color.showly_secondary')).width('100%')
+              Text(row.media.title).fontSize(17).fontWeight(FontWeight.Medium).width('100%')
+              if (row.media.kind === 'show') {
+                Text('S' + row.season + 'E' + row.number + (row.episodeTitle ? ' · ' + row.episodeTitle : ''))
+                  .fontSize(14).width('100%')
+              }
+              Button('查看详情').fontSize(12).enabled(!this.detailBusy && !this.localBusy && !this.syncBusy)
+                .onClick(() => { this.openDetail(row.media, false, row.season); })
+            }.padding(12).width('100%').borderRadius(10).backgroundColor($r('app.color.showly_surface'))
+          }, (row: CalendarEntry) => row.key)
+          Row({ space: 8 }) {
+            Button('上一页').layoutWeight(1).enabled(this.calendarPage > 1).onClick(() => { this.calendarPage--; })
+            Text(this.calendarPage + ' / ' + this.calendarPages()).fontSize(13)
+            Button('下一页').layoutWeight(1).enabled(this.calendarPage < this.calendarPages()).onClick(() => { this.calendarPage++; })
+          }.width('100%')
+        } else if (this.calendarData) {
+          Text('会话或当地日期已变化，请刷新日历。').fontSize(12).width('100%')
+        }
+      }
+    }.width('100%')
+  }
+
   @Builder
   progressView() {
+    Column({ space: 12 }) {
+      Text('观看进度').fontSize(25).fontWeight(FontWeight.Bold).width('100%')
+      Row({ space: 6 }) {
+        this.progressModeButton('下一集', 'next')
+        this.progressModeButton('日历', 'calendar')
+        this.progressModeButton('云端记录', 'cloud')
+      }.width('100%')
+      if (this.progressMode === 'next') { this.nextShowsView() }
+      else if (this.progressMode === 'calendar') { this.calendarView() }
+      else { this.legacyProgressView() }
+    }.width('100%')
+  }
+
+  @Builder
+  legacyProgressView() {
     Column({ space: 12 }) {
       Text('观看进度').fontSize(25).fontWeight(FontWeight.Bold).width('100%')
       if (this.localRecent.length > 0) {
@@ -2284,7 +2555,11 @@ struct Index {
         await this.loadDiscover(this.discoverPage);
       } else if (this.tab === 'library') {
         if (this.collectionGrid) { await this.loadCollectionPosters(); }
-      } else if (this.tab === 'progress' || this.tab === 'cloud') {
+      } else if (this.tab === 'progress') {
+        if (this.progressMode === 'next') { await this.loadNextShows(); }
+        else if (this.progressMode === 'calendar') { await this.loadCalendar(); }
+        else if (this.signedIn) { await this.loadCloud(); }
+      } else if (this.tab === 'cloud') {
         if (this.signedIn) { await this.loadCloud(); }
       } else if (this.tab === 'search' && this.title.trim()) {
         await this.search();
@@ -2599,6 +2874,7 @@ struct Index {
   onBackPress(): boolean {
     if (this.selectedMedia) {
       this.closeDetail();
+      if (this.tab === 'progress' && this.progressMode === 'next' && !this.nextShows.length) { this.loadNextShows(); }
       return true;
     }
     if (this.tab === 'search' || this.tab === 'cloud' || this.tab === 'account') {
@@ -2608,11 +2884,12 @@ struct Index {
     return false;
   }
 
-  private async openDetail(item: Media, reload: boolean = false): Promise<void> {
+  private async openDetail(item: Media, reload: boolean = false, preferredSeason: number = 0): Promise<void> {
     if (this.detailBusy || this.localBusy || this.setupBusy || !canReadDetails(item) || (!this.clientId && item.kind !== 'show')) {
       return;
     }
     this.closeDetail();
+    if (preferredSeason > 0 && item.kind === 'show') { this.localSeason = preferredSeason; }
     const revision = ++this.detailRevision;
     const clientId = this.clientId;
     this.selectedMedia = item;
@@ -2659,6 +2936,7 @@ struct Index {
     if (this.tab === 'discover' && value !== 'discover' && this.discoverBusy) { this.resetDiscover(); }
     if (this.tab === 'library' && value !== 'library' && this.collectionBusy) { this.resetCollection(); }
     this.tab = value;
+    if (value === 'progress' && this.progressMode === 'next' && !this.nextShows.length) { this.loadNextShows(); }
     if (value === 'discover' && this.discoverItems.length === 0 && !this.discoverBusy) {
       this.loadDiscover();
     }
@@ -2690,7 +2968,7 @@ struct Index {
   @Builder
   detailPage(item: Media) {
     Column({ space: 12 }) {
-      Button('返回').onClick(() => { this.closeDetail(); })
+      Button('返回').onClick(() => { this.closeDetail(); if (this.tab === 'progress' && this.progressMode === 'next' && !this.nextShows.length) { this.loadNextShows(); } })
       Text(this.chineseTitle || (this.detail ? this.detail.title : item.title))
         .fontSize(26).fontWeight(FontWeight.Bold).width('100%')
       if (this.posterUri) {
