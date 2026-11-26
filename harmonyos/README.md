@@ -1,4 +1,4 @@
-# Showly HarmonyOS Preview v0.6.1
+# Showly HarmonyOS Preview v0.6.2
 
 Unofficial native ArkTS prototype, not a complete Showly port. Your app uses Trakt but is not endorsed or certified by Trakt.
 
@@ -41,3 +41,8 @@ Device tests: navigate tabs and back, open movie and show details, verify poster
 ## v0.6.1 artwork diagnostics
 
 The app distinguishes absent API artwork, rejected URL shape, DNS/connect/timeout, CDN HTTP status, invalid binary/WebP signature, cache write and ArkUI image rendering failures. Select the first eligible URL in the API poster array; permit variable artwork size path segments while retaining strict HTTPS Trakt host and media-path checks. Use a truthful app User-Agent and accept WebP. No API key or token is sent to the CDN. Copyable diagnostics contain only stage, CDN hostname and numeric error/status, not credentials or user account data. No proxy, extra image service or new key. Official Trakt images guide prefers extended=full, so leave that query unchanged. Device verification required to establish the actual failure stage.
+
+## v0.6.2 poster URL compatibility
+
+Device diagnostics from v0.6.1 confirmed rejection before any CDN request. The URL validator now accepts HTTPS (including protocol-relative and bare host variants), case-insensitive Trakt subdomains, safe variable paths under /images/, and ordinary image paths on known Trakt media/walter CDN hosts. Optional query parameters are preserved on download but excluded from cache filenames and diagnostics. Host boundaries, traversal rejection, actual WebP signature checks, and local caching remain. If rejected, diagnostics show a sanitized address without query, fragment, or embedded credentials. No external hosts, proxy, HTTP downgrade or TLS bypass. The exact rejected URL from the original device is not yet known. Evaluated 16 URL examples (including malformed hosts, traversal, old and new CDN formats) against the equivalent JavaScript validator; ArkTS build and live device check pending.
+References: https://developer.trakt.tv/docs/images ; https://docs.cantinarr.com/reference/generated/api/discover-media-user/ .

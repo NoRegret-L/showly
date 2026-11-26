@@ -54,7 +54,7 @@ export async function readDetails(item: Media, clientId: string, reload: boolean
     const response = await request.request('https://api.trakt.tv/' +
       (item.kind === 'show' ? 'shows/' : 'movies/') + id + '?extended=full', {
       method: http.RequestMethod.GET,
-      header: { 'Content-Type': 'application/json', 'trakt-api-version': '2', 'trakt-api-key': clientId, 'User-Agent': 'Showly-HarmonyOS-Personal/0.6.1' },
+      header: { 'Content-Type': 'application/json', 'trakt-api-version': '2', 'trakt-api-key': clientId, 'User-Agent': 'Showly-HarmonyOS-Personal/0.6.2' },
       expectDataType: http.HttpDataType.STRING
     });
     if (response.responseCode !== 200 || typeof response.result !== 'string') {
@@ -92,14 +92,46 @@ export interface PosterResult {
   status: string;
 }
 
+// The API examples and CDN hosts change over time. Validate the authority and
+// traversal-safe path, not the provider's internal ID/size directory layout.
 function normalizePoster(raw: string): string {
-  const url = raw.startsWith('https://') ? raw : 'https://' + raw;
-  // Constrain to Trakt-owned HTTPS hosts and the documented artwork namespace.
-  // Do not hardcode CDN host names or artwork sizes: Trakt can migrate them.
-  if (!/^https:\/\/[a-z0-9-]+\.trakt\.tv\/images\/(movies|shows)\/[0-9]+(?:\/[0-9]+)*\/posters\/[a-zA-Z0-9_-]+\/[a-zA-Z0-9._-]+\.webp$/.test(url)) {
+  const value = raw.trim();
+  if (!value || /[\s\\#\x00-\x1f\x7f]/.test(value)) {
     return '';
   }
-  return url;
+  const url = /^https:\/\//i.test(value) ? 'https://' + value.substring(8) :
+    value.startsWith('//') ? 'https:' + value : 'https://' + value;
+  const slash = url.indexOf('/', 8);
+  if (slash < 0) {
+    return '';
+  }
+  const host = url.substring(8, slash).toLowerCase();
+  if (!/^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+trakt\.tv$/i.test(host)) {
+    return '';
+  }
+  const q = url.indexOf('?', slash);
+  const path = q < 0 ? url.substring(slash) : url.substring(slash, q);
+  if (!/^\/[A-Za-z0-9._~/-]+$/.test(path) || path.endsWith('/') ||
+      path.split('/').some((segment: string) => segment === '.' || segment === '..')) {
+    return '';
+  }
+  if (!path.startsWith('/images/') &&
+      !(/^(?:media|walter(?:-[a-z0-9-]+)?)\.trakt\.tv$/i.test(host) && /\.(?:webp|jpg|jpeg|png)$/i.test(path))) {
+    return '';
+  }
+  return 'https://' + host + url.substring(slash);
+}
+
+// Show only an authority and a sanitized path. Never copy query strings,
+// fragments, embedded user information, or credentials into diagnostics.
+function rejectedPosterHint(raw: string): string {
+  const value = raw.trim();
+  const address = value.replace(/^https?:\/\//i, '').replace(/^\/\//, '');
+  const clean = address.split('?')[0].split('#')[0];
+  if (!/^[A-Za-z0-9._~/-]+$/.test(clean)) {
+    return '地址含未支持字符';
+  }
+  return clean;
 }
 
 function networkError(code: number): string {
@@ -130,10 +162,11 @@ export async function cachePoster(cacheDir: string, item: Media, candidates: str
     }
   }
   if (!url) {
-    return { uri: '', status: 'Trakt 返回了海报地址，但不符合受信任的 HTTPS 图片路径规则' };
+    return { uri: '', status: '海报地址未通过安全校验 · ' + rejectedPosterHint(candidates[0]) };
   }
   const host = url.substring(8, url.indexOf('/', 8));
-  const filename = url.substring(url.lastIndexOf('/') + 1);
+  const imagePath = url.split('?')[0];
+  const filename = imagePath.substring(imagePath.lastIndexOf('/') + 1);
   const path = cacheDir + '/showly_poster_' + item.kind + '_' +
     item.id.substring(item.kind.length + 1) + '_' + filename;
   try {
@@ -149,7 +182,7 @@ export async function cachePoster(cacheDir: string, item: Media, candidates: str
   try {
     response = await request.request(url, {
       method: http.RequestMethod.GET,
-      header: { 'User-Agent': 'Showly-HarmonyOS-Personal/0.6.1', 'Accept': 'image/webp' },
+      header: { 'User-Agent': 'Showly-HarmonyOS-Personal/0.6.2', 'Accept': 'image/webp' },
       expectDataType: http.HttpDataType.ARRAY_BUFFER
     });
   } catch (error) {

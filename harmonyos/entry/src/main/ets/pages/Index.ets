@@ -400,7 +400,7 @@ struct Index {
     Column({ space: 0 }) {
       Row() {
         Text('Showly').fontSize(27).fontWeight(FontWeight.Bold).layoutWeight(1)
-        Text('Preview 0.6.1').fontSize(12).fontColor('#687887')
+        Text('Preview 0.6.2').fontSize(12).fontColor('#687887')
       }.width('100%').padding(16)
       Divider()
       Scroll() {
