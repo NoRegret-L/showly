@@ -1,4 +1,4 @@
-name: HarmonyOS bootstrap CI
+name: HarmonyOS preview CI and release
 
 on:
   push:
@@ -19,7 +19,7 @@ permissions:
 
 concurrency:
   group: harmonyos-bootstrap-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   verify:
@@ -36,7 +36,17 @@ jobs:
           set -euo pipefail
           git ls-remote https://github.com/trakt/showly.git refs/heads/master | tee upstream-revision.txt
           test -s upstream-revision.txt
-          echo "Upstream revision: $(cut -f1 upstream-revision.txt)" >> "$GITHUB_STEP_SUMMARY"
+          upstream="$(cut -f1 upstream-revision.txt)"
+          baseline="$(cat harmonyos/upstream-baseline.txt)"
+          [[ "$upstream" =~ ^[0-9a-f]{40}$ && "$baseline" =~ ^[0-9a-f]{40}$ ]]
+          echo "Upstream revision: $upstream" >> "$GITHUB_STEP_SUMMARY"
+          echo "Recorded observation baseline: $baseline (not port completeness)" >> "$GITHUB_STEP_SUMMARY"
+          if [[ "$upstream" != "$baseline" ]]; then
+            echo "::notice::Android upstream changed; native port requires review."
+            echo "[Review Android changes](https://github.com/trakt/showly/compare/$baseline...$upstream)" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No change from observation baseline." >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Install Linux dependencies
         run: |
@@ -93,3 +103,75 @@ jobs:
           name: upstream-revision
           path: upstream-revision.txt
           if-no-files-found: error
+
+  publish-preview:
+    needs: verify
+    if: ${{ github.event_name == 'push' && github.repository == 'NoRegret-L/showly' && github.ref == 'refs/heads/harmonyos-bootstrap' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - name: Check out exact built revision
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      # No SDK setup, app credentials, or build scripts run in the write job.
+      - name: Download successful build artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "experimental-hap-$GITHUB_SHA" --dir "$RUNNER_TEMP/hap-input"
+          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name upstream-revision --dir "$RUNNER_TEMP/upstream-input"
+
+      - name: Validate and prepare unsigned preview
+        id: prepare
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/release"
+          python3 harmonyos/tools/prepare_preview_release.py \
+            --source "$GITHUB_WORKSPACE" \
+            --hap-dir "$RUNNER_TEMP/hap-input" \
+            --upstream "$RUNNER_TEMP/upstream-input/upstream-revision.txt" \
+            --output "$RUNNER_TEMP/release" \
+            --commit "$GITHUB_SHA" --run "$GITHUB_RUN_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Publish verified preview assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.prepare.outputs.tag }}
+        run: |
+          set -euo pipefail
+          [[ "$TAG" =~ ^harmonyos-v[0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+)?-b[1-9][0-9]*$ ]]
+          cd "$RUNNER_TEMP/release"
+          # Never overwrite or move an existing release/tag. A retry after a
+          # failed draft requires maintainer inspection, not automatic cleanup.
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::Release already exists. Inspect it; increment versionCode for a new build."
+            exit 1
+          fi
+          if ! existing="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" --jq '.object.sha' 2>/dev/null)"; then
+            gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+              -f "ref=refs/tags/$TAG" -f "sha=$GITHUB_SHA" >/dev/null
+            existing="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" --jq '.object.sha')"
+          fi
+          [[ "$existing" == "$GITHUB_SHA" ]] || { echo "::error::Tag points to another commit"; exit 1; }
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --draft --prerelease \
+            --title "Showly HarmonyOS $TAG (unsigned preview)" --notes-file release-notes.md \
+            "showly-$TAG-unsigned.hap" SHA256SUMS.txt release-info.json
+          release_id="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json databaseId --jq .databaseId)"
+          [[ "$release_id" =~ ^[0-9]+$ ]]
+          gh api "repos/$GITHUB_REPOSITORY/releases/$release_id/assets?per_page=100" > remote-assets.json
+          for file in "showly-$TAG-unsigned.hap" SHA256SUMS.txt release-info.json; do
+            digest="sha256:$(sha256sum "$file" | cut -d' ' -f1)"
+            size="$(stat -c%s "$file")"
+            jq -e --arg file "$file" --arg digest "$digest" --argjson size "$size" \
+              '[.[] | select(.name == $file and .state == "uploaded" and .digest == $digest and .size == $size)] | length == 1' \
+              remote-assets.json >/dev/null
+          done
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --prerelease --latest=false
+          echo "[Unsigned preview release](https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG)" >> "$GITHUB_STEP_SUMMARY"

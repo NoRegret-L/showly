@@ -20,11 +20,18 @@ import { connection } from '@kit.NetworkKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { reconcileQueue } from '../data/TraktQueueReconcile';
 import { safeSyncError } from '../data/SyncDiagnostics';
+import { APP_VERSION, RELEASES_URL } from '../config/BuildInfo';
+import { UpdateInfo, UpstreamInfo, checkRelease, checkUpstream } from '../data/ReleaseUpdates';
 
 @Entry
 @Component
 struct Index {
   @State title: string = '';
+  @State updateBusy: boolean = false;
+  @State updateStatus: string = '';
+  @State availableUpdate?: UpdateInfo = undefined;
+  @State upstreamInfo?: UpstreamInfo = undefined;
+  @State upstreamStatus: string = '';
   @State tab: string = 'progress';
   private episodeStore?: EpisodeStore;
   @State @Watch('onRecoveryGateChanged') syncBusy: boolean = false;
@@ -400,6 +407,64 @@ struct Index {
     } catch (error) {
       this.setupStatus = '请在浏览器访问 ' + TRAKT_APPS_URL;
     }
+  }
+
+  private async checkAppUpdate(): Promise<void> {
+    if (this.updateBusy) { return; }
+    this.updateBusy = true;
+    this.availableUpdate = undefined;
+    this.upstreamInfo = undefined;
+    this.updateStatus = '正在检查鸿蒙预览版…';
+    this.upstreamStatus = '';
+    try {
+      this.availableUpdate = await checkRelease();
+      this.updateStatus = this.availableUpdate ? '发现新版本 ' + this.availableUpdate.version :
+        '未发现比当前版本更新且完整发布的鸿蒙预览包。';
+    } catch (error) {
+      this.updateStatus = '版本检查失败，请检查 GitHub 连通性或 API 限额。';
+    }
+    try {
+      this.upstreamInfo = await checkUpstream();
+      this.upstreamStatus = this.upstreamInfo.changed ?
+        '检测到 Android 上游变化，尚未自动移植 · ' + this.upstreamInfo.sha.substring(0, 12) :
+        'Android 上游与本版记录的检测基线一致 · ' + this.upstreamInfo.sha.substring(0, 12);
+    } catch (error) {
+      this.upstreamStatus = '上游版本检查失败，不影响当前应用。';
+    } finally { this.updateBusy = false; }
+  }
+
+  private async openReleasePage(upstream: boolean = false): Promise<void> {
+    const target = upstream ? this.upstreamInfo?.url : this.availableUpdate?.url ?? RELEASES_URL;
+    if (!target) { return; }
+    try {
+      await this.context().startAbility({ action: 'ohos.want.action.viewData', uri: target });
+    } catch (error) {
+      this.updateStatus = '无法打开浏览器，可从 GitHub Releases 手动下载。';
+    }
+  }
+
+  @Builder
+  updateView() {
+    Column({ space: 8 }) {
+      Text('版本与更新').fontSize(19).fontWeight(FontWeight.Medium).width('100%')
+      Text('当前版本 ' + APP_VERSION + ' · 未签名个人预览版').fontSize(13)
+        .fontColor($r('app.color.showly_secondary')).width('100%')
+      Button(this.updateBusy ? '检查中…' : '检查更新').enabled(!this.updateBusy)
+        .onClick(() => { this.checkAppUpdate(); })
+      if (this.updateStatus) { Text(this.updateStatus).fontSize(13).width('100%') }
+      if (this.availableUpdate) {
+        Text('新版本 ' + this.availableUpdate.version + ' · SHA-256 ' + this.availableUpdate.digest.substring(7))
+          .fontSize(12).width('100%')
+      }
+      Button(this.availableUpdate ? '打开新版本下载页' : '打开鸿蒙发布页')
+        .onClick(() => { this.openReleasePage(); })
+      Text('仅检查公开 GitHub 发布信息，不发送 Trakt 凭据或观看记录。不自动下载、安装或卸载；请核对哈希并用原安装方式覆盖安装。')
+        .fontSize(12).width('100%')
+      if (this.upstreamStatus) { Text(this.upstreamStatus).fontSize(12).width('100%') }
+      if (this.upstreamInfo) {
+        Button('查看 Android 上游变更').onClick(() => { this.openReleasePage(true); })
+      }
+    }.width('100%').padding(12).borderRadius(12).backgroundColor($r('app.color.showly_surface'))
   }
 
   private async copyValue(value: string): Promise<void> {
@@ -2028,7 +2093,7 @@ struct Index {
               this.themeButton('深色', 'dark')
             }.width('100%')
             Text(this.themeStatus).fontSize(12)
-            Text('版本 0.8.5.1').fontSize(12).fontColor($r('app.color.showly_secondary'))
+            this.updateView()
             Text('非官方应用，使用 Trakt，但未获 Trakt 认可或认证。')
               .fontSize(12).fontColor($r('app.color.showly_secondary'))
         Text('Trakt 账户').fontSize(20).fontWeight(FontWeight.Medium)
