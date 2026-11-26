@@ -5,6 +5,7 @@ import { Media } from '../model/Media';
 import { CommonEntry, CommonUpdate, commonId } from '../model/ThreeWay';
 import { canReadDetails, readDetails } from './TraktDetails';
 import { RemoteLibraryObservation, validateObservation } from '../model/RemoteObservation';
+import { ReadCheckpoint } from '../model/EffectiveState';
 import { FullEpisodeCatalog, ScheduledSeason, ScheduledEpisode, airDate, aired, scheduleEpisodes, validateFullCatalog } from '../model/ShowCatalog';
 
 interface EpisodeIds { trakt: number; }
@@ -190,6 +191,10 @@ function materialize(catalog: EpisodeCatalog, events: EpisodeEvent[], baseline: 
   return { catalog: catalog, seasons: seasons, completed: completed, next: next };
 }
 
+export function materializeEffective(catalog: EpisodeCatalog, ids: number[]): LocalSeriesState {
+  return materialize(catalog, [], ids);
+}
+
 export class EpisodeStore {
   private db: relationalStore.RdbStore;
   constructor(db: relationalStore.RdbStore) { this.db = db; }
@@ -202,6 +207,7 @@ export class EpisodeStore {
     await db.executeSql('CREATE TABLE IF NOT EXISTS episode_catalog (show_id TEXT PRIMARY KEY, catalog TEXT NOT NULL, updated_at INTEGER NOT NULL)');
     await db.executeSql('CREATE TABLE IF NOT EXISTS episode_schedule (show_id TEXT PRIMARY KEY, payload TEXT NOT NULL)');
     await db.executeSql('CREATE TABLE IF NOT EXISTS remote_library_observation (account_uuid TEXT PRIMARY KEY, payload TEXT NOT NULL)');
+    await db.executeSql('CREATE TABLE IF NOT EXISTS episode_read_checkpoint (account_uuid TEXT PRIMARY KEY, payload TEXT NOT NULL)');
     // A single row represents one user action, including a whole season. SQLite
     // commits that row atomically: no partially marked seasons or split state/log.
     await db.executeSql('CREATE TABLE IF NOT EXISTS episode_event (seq INTEGER PRIMARY KEY AUTOINCREMENT, show_id TEXT NOT NULL, episode_ids TEXT NOT NULL, watched INTEGER NOT NULL CHECK(watched IN (0,1)), changed_at INTEGER NOT NULL)');
@@ -337,6 +343,39 @@ export class EpisodeStore {
     validateObservation(snapshot);
     await this.db.executeSql('INSERT OR REPLACE INTO remote_library_observation(account_uuid,payload) VALUES(?,?)',
       [uuid, JSON.stringify(snapshot)]);
+  }
+
+  async readCheckpoints(uuid: string): Promise<Map<number, ReadCheckpoint>> {
+    if (!uuid || await this.boundAccount() !== uuid) { throw new Error('Invalid read checkpoint scope'); }
+    const result: Map<number, ReadCheckpoint> = new Map<number, ReadCheckpoint>();
+    const rows = await this.db.querySql('SELECT payload FROM episode_read_checkpoint WHERE account_uuid=?', [uuid]);
+    try {
+      if (!rows.goToFirstRow()) { return result; }
+      const entries = JSON.parse(rows.getString(0)) as ReadCheckpoint[];
+      if (!Array.isArray(entries)) { throw new Error('Invalid read checkpoints'); }
+      for (const entry of entries) {
+        if (!entry || !validId(entry.id) || !validId(entry.seq) ||
+            typeof entry.watched !== 'boolean' || result.has(entry.id)) { throw new Error('Invalid read checkpoint'); }
+        result.set(entry.id, entry);
+      }
+      return result;
+    } finally { rows.close(); }
+  }
+
+  // Read projection acknowledgements are NOT sync_common_state and are
+  // never consumed by upload, removal, or queue eligibility.
+  async saveReadCheckpoints(uuid: string, updates: ReadCheckpoint[]): Promise<void> {
+    if (!updates.length) { return; }
+    const entries = await this.readCheckpoints(uuid);
+    for (const update of updates) {
+      if (!validId(update.id) || !validId(update.seq) || typeof update.watched !== 'boolean') {
+        throw new Error('Invalid read checkpoint update');
+      }
+      const prior = entries.get(update.id);
+      if (!prior || update.seq >= prior.seq) { entries.set(update.id, update); }
+    }
+    await this.db.executeSql('INSERT OR REPLACE INTO episode_read_checkpoint(account_uuid,payload) VALUES(?,?)',
+      [uuid, JSON.stringify(Array.from(entries.values()))]);
   }
 
   async saveFullCatalog(full: FullEpisodeCatalog): Promise<void> {

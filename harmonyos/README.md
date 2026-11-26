@@ -1,4 +1,4 @@
-# Showly HarmonyOS Preview v0.9.3e.1a
+# Showly HarmonyOS Preview v0.9.3e.1b
 
 Unofficial native ArkTS prototype, not a complete Showly port. Your app uses Trakt but is not endorsed or certified by Trakt.
 
@@ -155,3 +155,7 @@ Adds a public read-only episode_schedule table to the existing episode DB. Refre
 ## v0.9.3e.1a — account-scoped read-only cloud observations (package 0.9.3.6, build 30)
 
 Cloud observation stores exact season/episode positions, play counts, latest watch timestamps, movie plays and activity revision per verified account UUID. A complete activity-checked snapshot is replaced atomically; unchanged revision reuses it. Library refresh fills missing/changed public schedules sequentially and stops network fill at the first failure, retaining prior data and resuming next refresh. Public schedules alone never grant edit eligibility. Classification maps positions to catalog IDs and applies local explicit decisions; unclassified tracking members remain visible. No new POST, auto-consent, sync intent, receipt, common baseline or history mutation. Cache requires online UUID verification after a cold start; offline cold-start account identification deferred. Only latest play time/count, not complete repeated history, is represented. See docs/REMOTE_OBSERVATION.md.
+
+## v0.9.3e.1b — shared effective viewing state (package 0.9.3.7, build 31)
+
+Collection and detail use the same read-side resolver. A verified matching episode intent sequence is acknowledged in a new account-scoped read checkpoint, distinct from upload common baselines; a later remote-only change is visible without rewriting history. Existing manual write baselines are consulted when no read checkpoint exists. Unbound or differently bound cloud accounts are read-only and do not merge the device library. Foreground/auth/network-restored events coalesce into observation refresh; unchanged activity reuses the account snapshot. Explicit edit may verify missing eligible catalog metadata; bulk observation cannot grant eligibility. No new auto upload, deletion, consent or remote history operations. See docs/EFFECTIVE_STATE.md for scope and limitations.

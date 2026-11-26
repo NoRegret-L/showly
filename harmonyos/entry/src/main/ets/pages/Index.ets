@@ -19,12 +19,14 @@ import { ClientSettings, validateClientId } from '../data/ClientSettings';
 import { pasteboard } from '@kit.BasicServicesKit';
 import { traktAuth } from '../data/TraktAuth';
 import { CloudLibrary, ShowProgress, readCloudLibrary, mergeNewTitles, readActivity } from '../data/TraktLibrary';
-import { projectLibrary } from '../data/LibraryProjection';
+import { projectLibrary, projectDetail } from '../data/LibraryProjection';
+import { allowLocalScope } from '../model/EffectiveState';
+import { hasTrackingEvidence } from '../model/PersonalLibrary';
 import { MediaDetail, canReadDetails, readDetails, cachePoster, clearDetailMemory } from '../data/TraktDetails';
 import { DiscoverItem, readDiscover } from '../data/TraktDiscover';
 import { EpisodeProgress, SeasonProgress, SeriesProgress, ChineseText, readSeriesProgress, readChinese } from '../data/TraktProgress';
 import { AppearanceStore, applyAppearance } from '../data/AppearanceStore';
-import { EpisodeStore, LocalEpisode, LocalSeriesState, LocalSeasonState, LocalEpisodeState, AutoConsent, QueueEntry, fetchFullEpisodeCatalog } from '../data/EpisodeStore';
+import { EpisodeStore, LocalEpisode, LocalSeriesState, LocalSeasonState, LocalEpisodeState, AutoConsent, QueueEntry, fetchFullEpisodeCatalog, eligibleCatalog } from '../data/EpisodeStore';
 import { FullEpisodeCatalog, ScheduledEpisode, scheduleEpisodes, scheduleLabel } from '../model/ShowCatalog';
 import { SyncAccount, SyncPreview, SyncDifference, readSyncAccount, buildSyncPreview } from '../data/TraktSyncPreview';
 import { uploadSelectedEpisode } from '../data/TraktSyncUpload';
@@ -161,12 +163,16 @@ struct Index {
   @State libraryEvidence: LibraryShowEvidence[] = [];
   private cloudUuid: string = '';
   private cloudFresh: boolean = false;
+  @State cloudLocalAllowed: boolean = false;
+  @State effectiveEditable: boolean = false;
+  private observationPending: boolean = false;
+  private projectionPending: boolean = false;
   @State @Watch('onRecoveryGateChanged') cloudBusy: boolean = false;
   @State cloudStatus: string = '';
   private settings?: ClientSettings;
   @StorageLink('traktAuthStatus') authStatus: string = '尚未登录 Trakt';
   @StorageLink('traktAuthBusy') @Watch('onRecoveryGateChanged') authBusy: boolean = false;
-  @StorageLink('traktSignedIn') signedIn: boolean = false;
+  @StorageLink('traktSignedIn') @Watch('onObservationAuthChanged') signedIn: boolean = false;
   @State items: Media[] = [];
   @State results: Media[] = [];
   @State ready: boolean = false;
@@ -219,6 +225,7 @@ struct Index {
     this.startNetworkListener();
     if (this.backupBusy) { return; }
     this.requestMediaRecovery();
+    this.requestObservation();
     if (this.autoActive()) { this.requestRecovery(); }
     else if (this.clientId && !this.setupBusy && !this.cloudBusy && !this.syncBusy) {
       traktAuth.restore(this.clientId);
@@ -229,6 +236,8 @@ struct Index {
     this.pageVisible = false;
     this.recoveryPending = false;
     this.mediaRecoveryPending = false;
+    this.observationPending = false;
+    this.projectionPending = false;
   }
 
   aboutToDisappear(): void {
@@ -267,6 +276,7 @@ struct Index {
           this.networkStatus = '系统网络已验证，正在核对待同步记录';
           this.requestRecovery();
           this.requestMediaRecovery();
+          this.requestObservation();
         }
       });
       listener.on('netLost', (handle: connection.NetHandle) => {
@@ -299,6 +309,36 @@ struct Index {
 
   // A busy auth/DB/sync operation no longer drops the network-resume event.
   // Coalesce to a single pending event, not a periodic retry loop.
+  private onObservationAuthChanged(): void {
+    if (!this.signedIn) {
+      this.cloudLocalAllowed = false;
+      this.libraryEvidence = [];
+      this.localSeries = undefined;
+      this.effectiveEditable = false;
+      this.observationPending = false;
+      this.projectionPending = false;
+      return;
+    }
+    this.cloudLocalAllowed = false;
+    this.libraryEvidence = [];
+    this.nextShows = [];
+    this.localSeries = undefined;
+    this.effectiveEditable = false;
+    this.requestObservation();
+  }
+
+  private requestObservation(): void {
+    if (!this.pageVisible || !this.signedIn || !this.clientId) { return; }
+    this.observationPending = true;
+    this.onRecoveryGateChanged();
+  }
+
+  private requestProjection(): void {
+    if (!this.pageVisible) { return; }
+    this.projectionPending = true;
+    this.onRecoveryGateChanged();
+  }
+
   private onRecoveryGateChanged(): void {
     if (this.backupBusy || !this.pageVisible || this.syncBusy || this.localBusy || this.cloudBusy ||
         this.authBusy || this.setupBusy) { return; }
@@ -310,6 +350,18 @@ struct Index {
     if (this.mediaRecoveryPending && !this.saving) {
       this.mediaRecoveryPending = false;
       this.recoverMediaPending();
+      return;
+    }
+    if (!this.ready || !this.episodeReady || this.saving) { return; }
+    if (this.observationPending && this.signedIn) {
+      this.observationPending = false;
+      this.projectionPending = false;
+      this.loadCloud();
+      return;
+    }
+    if (this.projectionPending) {
+      this.projectionPending = false;
+      this.loadNextShows();
     }
   }
 
@@ -371,6 +423,7 @@ struct Index {
       this.resetCollection();
       this.migrationStatus = '收藏数据库已就绪 · ' + records.length + ' 部；旧版 Preferences 保留。';
       this.ready = true;
+      this.requestObservation();
     } catch (error) {
       this.migrationStatus = '收藏迁移或读取失败；仅显示可读的旧版快照，已停止收藏写入。请勿卸载或清除数据。';
       this.libraryStatus = this.migrationStatus;
@@ -387,6 +440,7 @@ struct Index {
       await this.reloadQueue();
       if (this.tab === 'library' || (this.tab === 'progress' && this.progressMode === 'next')) { await this.loadNextShows(); }
       this.requestRecovery();
+      this.requestObservation();
     } catch (error) {
       this.episodeInitStatus = '分集数据库打开失败，已停止分集写入；旧收藏不受影响。';
     }
@@ -394,39 +448,30 @@ struct Index {
 
   private async loadLocalEpisodes(item: Media, refresh: boolean = false): Promise<void> {
     const store = this.episodeStore;
-    if (!store || !this.episodeReady || this.localBusy || this.syncBusy || item.kind !== 'show') { return; }
+    if (!store || !this.episodeReady || this.localBusy || this.cloudBusy || this.syncBusy || item.kind !== 'show') { return; }
     const revision = this.detailRevision;
     const clientId = this.clientId;
     this.localBusy = true;
     this.localStatus = '读取本机分集记录…';
     try {
-      let state = await store.read(item.id);
-      const existingSchedule = await store.fullCatalog(item.id);
+      let full = await store.fullCatalog(item.id);
       if (revision !== this.detailRevision) { return; }
-      this.fullSchedule = existingSchedule;
+      this.fullSchedule = full;
       this.schedulePage = 1;
-      if (state) {
-        this.localSeries = state;
-        this.localCatalogNeedsVerification = await store.needsCatalogVerification(item.id);
-        if (this.localSeason < 0 && state.seasons.length > 0) { this.localSeason = state.seasons[0].number; }
-      }
       if (refresh && clientId) {
-        const catalog = await fetchFullEpisodeCatalog(item, clientId);
+        full = await fetchFullEpisodeCatalog(item, clientId);
         if (revision !== this.detailRevision || this.clientId !== clientId) { return; }
-        this.invalidateSync();
-        await store.saveFullCatalog(catalog);
-        if (revision === this.detailRevision && this.clientId === clientId) { this.fullSchedule = catalog; }
-        this.invalidateNextShows();
-        state = await store.read(item.id);
-      }
-      if (revision === this.detailRevision) {
-        this.localSeries = state;
-        this.localCatalogNeedsVerification = state ? await store.needsCatalogVerification(item.id) : false;
-        if (state && state.seasons.length > 0 && !state.seasons.some((season: LocalSeasonState) => season.number === this.localSeason)) {
-          this.localSeason = state.seasons[0].number;
+        if (this.canEditLibrary()) {
+          this.invalidateSync();
+          await store.saveFullCatalog(full);
+        } else {
+          await store.saveObservedSchedule(full);
         }
-        this.localStatus = state ? '本机状态（可含已导入云端记录）· 手动模式不会上传' : '首次使用请联网下载分集目录';
+        this.fullSchedule = full;
+        this.invalidateNextShows();
+        this.requestProjection();
       }
+      await this.refreshEffectiveDetail();
     } catch (error) {
       if (revision === this.detailRevision) {
         this.localStatus = '读取或更新失败，保留已有本机记录。';
@@ -436,9 +481,53 @@ struct Index {
     }
   }
 
+  private activeCloud(): CloudLibrary | undefined {
+    const snapshot = this.cloud;
+    return snapshot && this.signedIn && traktAuth.isCurrent(this.clientId, snapshot.generation) ? snapshot : undefined;
+  }
+
+  private canEditLibrary(): boolean {
+    return !this.signedIn || (!!this.activeCloud() && this.cloudLocalAllowed);
+  }
+
+  private async refreshEffectiveDetail(): Promise<void> {
+    const store = this.episodeStore;
+    const item = this.selectedMedia;
+    if (!store || !item || item.kind !== 'show') { return; }
+    const revision = this.detailRevision;
+    const snapshot = this.activeCloud();
+    const uuid = this.cloudUuid;
+    if (this.signedIn && !snapshot) {
+      this.localSeries = undefined;
+      this.effectiveEditable = false;
+      this.localStatus = '正在等待账户验证；暂不读取本机私有记录。';
+      return;
+    }
+    const full = await store.fullCatalog(item.id);
+    const result = await projectDetail(store, full, item.id, snapshot, uuid);
+    if (revision !== this.detailRevision || snapshot !== this.activeCloud() || uuid !== this.cloudUuid) { return; }
+    this.fullSchedule = full;
+    this.localSeries = result.state;
+    this.localCatalogNeedsVerification = result.localAllowed ? await store.needsCatalogVerification(item.id) : false;
+    if (revision !== this.detailRevision || snapshot !== this.activeCloud() || uuid !== this.cloudUuid) {
+      this.localSeries = undefined;
+      this.effectiveEditable = false;
+      return;
+    }
+    this.effectiveEditable = result.complete && result.localAllowed && this.canEditLibrary();
+    if (result.state && result.state.seasons.length > 0 &&
+        !result.state.seasons.some((season: LocalSeasonState) => season.number === this.localSeason)) {
+      this.localSeason = result.state.seasons[0].number;
+    }
+    this.localStatus = !result.complete ? '分集资料未齐，暂不允许修改；请刷新个人库或目录。' :
+      !this.effectiveEditable ? '当前账户仅供浏览；本机库需明确绑定，不能跨账户修改。' :
+      result.state ? '有效观看状态 · 本机操作仍使用原有同步保护' : '请联网获取分集目录';
+  }
+
   private async markLocal(item: Media, ids: number[], watched: boolean): Promise<void> {
     const store = this.episodeStore;
-    if (!store || !this.episodeReady || this.localBusy || this.syncBusy || ids.length === 0) { return; }
+    if (!store || !this.episodeReady || this.localBusy || this.cloudBusy || this.syncBusy || ids.length === 0 ||
+        !this.effectiveEditable || !this.canEditLibrary()) { return; }
     if (this.localCatalogNeedsVerification) {
       this.localStatus = '备份恢复的目录需要联网更新后才能修改分集状态。';
       return;
@@ -450,14 +539,27 @@ struct Index {
     let saved = false;
     try {
       this.invalidateSync();
+      const existing = await store.catalog(item.id);
+      if (ids.some((id: number) => !existing?.episodes.some((episode: LocalEpisode) => episode.id === id))) {
+        // A user action may verify missing write-eligible metadata. Read-only
+        // bulk catalog repair alone never grants this eligibility.
+        const fresh = await fetchFullEpisodeCatalog(item, this.clientId);
+        const eligible = eligibleCatalog(fresh, fresh.fetchedAt);
+        if (revision !== this.detailRevision || !this.canEditLibrary() ||
+            ids.some((id: number) => !eligible.episodes.some((episode: LocalEpisode) => episode.id === id))) {
+          throw new Error('Episode not eligible');
+        }
+        await store.saveFullCatalog(fresh);
+      }
+      if (revision !== this.detailRevision || !this.canEditLibrary()) { return; }
       await store.mark(item.id, ids, watched, watched && auto ? auto.uuid : '');
       this.invalidateNextShows();
       saved = true;
-      const state = await store.read(item.id);
+      this.requestProjection();
       this.localRecent = await store.recent();
       await this.reloadQueue();
       if (revision === this.detailRevision) {
-        this.localSeries = state;
+        await this.refreshEffectiveDetail();
         this.localStatus = '已保存到本机 · 本地操作完成';
       }
     } catch (error) {
@@ -510,14 +612,14 @@ struct Index {
   @Builder
   localEpisodesView(item: Media) {
     Column({ space: 10 }) {
-      Text('本机分集管理').fontSize(20).fontWeight(FontWeight.Medium).width('100%')
-      Text('本机明确操作优先于已导入的云端记录。仅统计已播普通集；持久自动新增须主动开启。')
+      Text('分集观看状态').fontSize(20).fontWeight(FontWeight.Medium).width('100%')
+      Text('收藏与详情使用同一有效状态。仅统计已播普通集；自动上传仍须主动授权。')
         .fontSize(12).fontColor($r('app.color.showly_secondary')).width('100%')
       if (!this.episodeReady) {
         Text(this.episodeInitStatus || '正在打开分集数据库…').fontSize(13).width('100%')
       } else {
         Row({ space: 8 }) {
-          Button('读取本机').layoutWeight(1).enabled(!this.localBusy && !this.syncBusy)
+          Button('刷新观看状态').layoutWeight(1).enabled(!this.localBusy && !this.syncBusy)
             .onClick(() => { this.loadLocalEpisodes(item); })
           Button('更新分集目录').layoutWeight(1).enabled(!this.localBusy && !this.syncBusy && !!this.clientId)
             .onClick(() => { this.loadLocalEpisodes(item, true); })
@@ -527,7 +629,7 @@ struct Index {
         if (this.autoStatus) { Text(this.autoStatus).fontSize(12).width('100%') }
         if (this.localSeries) {
           if (this.localCatalogNeedsVerification) { Text('备份目录仅供本机查看，联网更新分集目录后才可编辑。').fontSize(12).width('100%') }
-          Text('本机已看 ' + this.localSeries.completed + ' / ' + this.localSeries.catalog.episodes.length + ' 集')
+          Text('已看 ' + this.localSeries.completed + ' / ' + this.localSeries.catalog.episodes.length + ' 集')
             .fontSize(16).width('100%')
           if (this.localSeries.catalog.episodes.length > 0) {
             Progress({ value: this.localSeries.completed, total: this.localSeries.catalog.episodes.length,
@@ -542,16 +644,16 @@ struct Index {
                 .onClick(() => { this.localSeason = this.localSeason === season.number ? -1 : season.number; this.confirmSeason = -1; })
               if (this.localSeason === season.number) {
                 Row({ space: 8 }) {
-                  Button('整季已看').layoutWeight(1).enabled(!this.localCatalogNeedsVerification && !this.localBusy && !this.syncBusy && season.completed < season.episodes.length)
+                  Button('整季已看').layoutWeight(1).enabled(this.effectiveEditable && !this.cloudBusy && !this.localCatalogNeedsVerification && !this.localBusy && !this.syncBusy && season.completed < season.episodes.length)
                     .onClick(() => { this.confirmSeason = season.number; this.confirmWatched = true; })
-                  Button('整季撤销').layoutWeight(1).enabled(!this.localBusy && !this.syncBusy && season.completed > 0)
+                  Button('整季撤销').layoutWeight(1).enabled(this.effectiveEditable && !this.cloudBusy && !this.localCatalogNeedsVerification && !this.localBusy && !this.syncBusy && season.completed > 0)
                     .onClick(() => { this.confirmSeason = season.number; this.confirmWatched = false; })
                 }.width('100%')
                 if (this.confirmSeason === season.number) {
-                  Text(this.confirmWatched ? '确认将本季已播集全部标记已看？' : '确认撤销本季全部本机已看标记？').fontSize(13)
+                  Text(this.confirmWatched ? '确认将本季已播集全部标记已看？' : '确认在本机撤销本季有效已看状态？不会自动删除云端历史。').fontSize(13)
                   Row({ space: 8 }) {
                     Button('取消').layoutWeight(1).onClick(() => { this.confirmSeason = -1; })
-                    Button('确认').layoutWeight(1).enabled(!this.localBusy && !this.syncBusy)
+                    Button('确认').layoutWeight(1).enabled(this.effectiveEditable && !this.cloudBusy && !this.localBusy && !this.syncBusy)
                       .onClick(() => {
                         this.markLocal(item, season.episodes.filter((ep: LocalEpisodeState) =>
                           ep.watched !== this.confirmWatched).map((ep: LocalEpisodeState) => ep.episode.id), this.confirmWatched);
@@ -567,7 +669,7 @@ struct Index {
                           .fontColor($r('app.color.showly_secondary'))
                       }
                     }.layoutWeight(1)
-                    Button(entry.watched ? '撤销已看' : '标记已看').fontSize(12).enabled(!this.localCatalogNeedsVerification && !this.localBusy && !this.syncBusy)
+                    Button(entry.watched ? '撤销已看' : '标记已看').fontSize(12).enabled(this.effectiveEditable && !this.cloudBusy && !this.localCatalogNeedsVerification && !this.localBusy && !this.syncBusy)
                       .onClick(() => { this.markLocal(item, [entry.episode.id], !entry.watched); })
                   }.width('100%')
                 }, (entry: LocalEpisodeState) => entry.episode.id + ':' + entry.watched)
@@ -959,6 +1061,7 @@ struct Index {
       await this.reloadQueue();
       this.syncStatus = '账户绑定成功；尚未同步任何记录。';
       this.requestMediaRecovery();
+      this.requestObservation();
     } catch (error) {
       this.invalidateSync();
       this.syncStatus = '账户绑定失败或身份变化，请重新验证。';
@@ -1685,6 +1788,10 @@ struct Index {
     this.cloud = undefined;
     this.cloudUuid = '';
     this.cloudFresh = false;
+    this.cloudLocalAllowed = false;
+    this.localSeries = undefined;
+    this.effectiveEditable = false;
+    this.nextShows = [];
     this.libraryEvidence = [];
     this.cloudStatus = '';
     this.trackingPage = 1;
@@ -1710,6 +1817,9 @@ struct Index {
       if (this.cloudUuid !== account.uuid || this.cloud?.generation !== session.generation) {
         this.clearCloud();
       }
+      const bound = await store.boundAccount();
+      if (!current()) { throw new Error('Session changed'); }
+      this.cloudLocalAllowed = allowLocalScope(true, bound, account.uuid);
       const cached = await store.readRemoteObservation(account.uuid);
       if (!current()) { throw new Error('Session changed'); }
       if (cached) {
@@ -1748,10 +1858,19 @@ struct Index {
           this.cloudStatus = '计算个人库及补齐目录 ' + done + '/' + total;
         });
       if (!current()) { throw new Error('Session changed'); }
+      if (this.cloudFresh && result.localAllowed && result.matches.length &&
+          await readActivity(session) === snapshot.activity && current()) {
+        await store.saveReadCheckpoints(account.uuid, result.matches);
+      }
+      if (!current()) { throw new Error('Session changed'); }
+      this.cloudLocalAllowed = result.localAllowed;
+      if (!result.localAllowed) { this.nextShows = []; }
       this.libraryEvidence = result.evidence;
       this.resetCollection();
+      await this.refreshEffectiveDetail();
+      this.projectionPending = true;
       this.cloudStatus = (this.cloudFresh ? '云端版本已核对' : '使用上次缓存（非实时）') +
-        ' · 缺少目录 ' + result.missing + ' 部 · 下载失败 ' + result.failed + ' 部；未写入 Trakt。';
+        ' · 缺少目录 ' + result.missing + ' 部 · 下载失败 ' + result.failed + ' 部；未写入 Trakt。' + (result.localAllowed ? '' : ' 当前账户只读；本机库未绑定或属于另一账户。');
       if (this.tab === 'library' && this.collectionGrid && !this.selectedMedia) { this.loadCollectionPosters(); }
     } catch (error) {
       if (!this.cloud || !traktAuth.isCurrent(clientId, this.cloud.generation)) { this.clearCloud(); }
@@ -1761,7 +1880,7 @@ struct Index {
 
   private async importCloud(): Promise<void> {
     const snapshot = this.cloud;
-    if (!snapshot || !this.cloudFresh || this.cloudBusy || this.saving || !this.ready || this.authBusy || this.setupBusy) {
+    if (!snapshot || !this.cloudFresh || !this.cloudLocalAllowed || this.cloudBusy || this.saving || !this.ready || this.authBusy || this.setupBusy) {
       return;
     }
     if (!traktAuth.isCurrent(this.clientId, snapshot.generation)) {
@@ -1787,7 +1906,7 @@ struct Index {
 
   private async persistMedia(records: MediaRecord[]): Promise<boolean> {
     const store = this.mediaStore;
-    if (!this.ready || this.saving || this.syncBusy || !store) { return false; }
+    if (!this.ready || this.saving || this.syncBusy || !store || !this.canEditLibrary()) { return false; }
     this.saving = true;
     this.clearThreeWayReview();
     this.mediaSelected = undefined;
@@ -1803,6 +1922,7 @@ struct Index {
       this.resetCollection();
       if (this.collectionGrid && this.tab === 'library' && !this.selectedMedia) { this.loadCollectionPosters(); }
       this.libraryStatus = '已保存到本机；未修改 Trakt';
+      this.requestProjection();
       this.migrationStatus = '收藏数据库已就绪 · ' + verified.length + ' 部；旧版 Preferences 保留。';
       return true;
     } catch (error) {
@@ -1823,9 +1943,19 @@ struct Index {
   }
 
   private add(item: Media): void {
-    if (!this.ready || this.saving || this.cloudBusy || this.syncBusy ||
+    if (!this.ready || this.saving || this.cloudBusy || this.syncBusy || !this.canEditLibrary() ||
         this.items.some((value: Media) => value.id === item.id)) { return; }
     this.save([...this.items, item], 'add');
+  }
+
+  private isInLibrary(item: Media): boolean {
+    const row = this.personalLibrary().find((value: PersonalLibraryRow) => value.media.id === item.id);
+    return !!row && (row.queued || row.watched || hasTrackingEvidence(row));
+  }
+
+  private isFollowed(item: Media): boolean {
+    const row = this.personalLibrary().find((value: PersonalLibraryRow) => value.media.id === item.id);
+    return !!row && hasTrackingEvidence(row);
   }
 
   private mediaIntent(item: Media, domain: string): string {
@@ -1838,7 +1968,7 @@ struct Index {
   }
 
   private async changeMediaIntent(item: Media, domain: string, value: string): Promise<void> {
-    if (!this.ready || this.saving || this.cloudBusy || this.syncBusy) { return; }
+    if (!this.ready || this.saving || this.cloudBusy || this.syncBusy || !this.canEditLibrary()) { return; }
     try {
       await this.persistMedia(setMediaIntent(this.mediaRecords, item, domain, value));
     } catch (error) {
@@ -1847,7 +1977,7 @@ struct Index {
   }
 
   private async joinFollowed(item: Media): Promise<void> {
-    if (!this.ready || this.saving || this.cloudBusy || this.syncBusy) { return; }
+    if (!this.ready || this.saving || this.cloudBusy || this.syncBusy || !this.canEditLibrary()) { return; }
     try { await this.persistMedia(followShow(this.mediaRecords, item)); }
     catch (error) { this.libraryStatus = '追剧状态保存失败。'; }
   }
@@ -1855,11 +1985,13 @@ struct Index {
   @Builder
   mediaStateView(item: Media) {
     Column({ space: 8 }) {
-      Text('独立本机状态').fontSize(20).fontWeight(FontWeight.Medium).width('100%')
-      Text('电影已看和待看清单互不覆盖。旧收藏没有明确同步意图；以下按钮只保存本机。')
+      Text('收藏与观看状态').fontSize(20).fontWeight(FontWeight.Medium).width('100%')
+      Text('以下按钮只保存本机明确操作；云端写入仍需既有授权。')
+        .fontSize(12).width('100%')
+      Text(this.canEditLibrary() ? '可操作本机库' : '当前账户只读，需明确绑定本机库。')
         .fontSize(12).width('100%')
       if (item.kind === 'movie') {
-        Text('电影观看：' + this.localIntentLabel(this.mediaIntent(item, 'movie'))).fontSize(14).width('100%')
+        Text('电影观看：' + (this.personalLibrary().find((row: PersonalLibraryRow) => row.media.id === item.id)?.watched ? '已看' : '未看或未确认')).fontSize(14).width('100%')
         Row({ space: 8 }) {
           Button('标记电影已看').layoutWeight(1).enabled(this.ready && !this.saving && !this.cloudBusy && !this.syncBusy)
             .onClick(() => { this.changeMediaIntent(item, 'movie', 'yes'); })
@@ -1868,15 +2000,14 @@ struct Index {
         }.width('100%')
       }
       if (item.kind === 'show') {
-        Text('追剧：' + (this.mediaRecords.find((record: MediaRecord) => record.media.id === item.id)?.followState === 'yes' ?
-          '已加入本机追剧' : '未明确加入本机追剧')).fontSize(14).width('100%')
+        Text('追剧：' + (this.isFollowed(item) ? '追剧中' : '未加入追剧')).fontSize(14).width('100%')
         Button('加入追剧并移出本机待看')
           .enabled(this.ready && !this.saving && !this.cloudBusy && !this.syncBusy)
           .onClick(() => { this.joinFollowed(item); })
         Text('加入待看会移回待看库；观看历史不变。待看差异仍需经原有同步确认，不会自动上传。')
           .fontSize(12).width('100%')
       }
-      Text('待看清单：' + this.localIntentLabel(this.mediaIntent(item, 'watchlist'))).fontSize(14).width('100%')
+      Text('待看清单：' + (this.personalLibrary().find((row: PersonalLibraryRow) => row.media.id === item.id)?.queued ? '待看' : '未加入或未确认')).fontSize(14).width('100%')
       Row({ space: 8 }) {
         Button('加入待看').layoutWeight(1).enabled(this.ready && !this.saving && !this.cloudBusy && !this.syncBusy)
           .onClick(() => { this.changeMediaIntent(item, 'watchlist', 'yes'); })
@@ -1964,7 +2095,11 @@ struct Index {
       this.syncPreview = undefined;
       this.invalidateMovieCalendar();
       this.cloud = undefined;
-      this.cloudStatus = '电影/待看操作已结束；云端清单请重新读取。';
+      this.cloudLocalAllowed = false;
+      this.libraryEvidence = [];
+      this.cloudFresh = false;
+      this.requestObservation();
+      this.cloudStatus = '电影/待看操作已结束；正在重新读取云端清单。';
       this.resetCollection();
       this.mediaPreview = undefined;
       // Supplemental read only after a not-yet-visible result or a revision
@@ -2359,6 +2494,7 @@ struct Index {
   private invalidateNextShows(): void {
     this.nextShows = [];
     this.libraryEvidence = [];
+    this.projectionPending = true;
     this.resetCollection();
     this.nextPage = 1;
     this.nextStatus = '本机记录已变化，请刷新追剧进度。';
@@ -2370,27 +2506,35 @@ struct Index {
     this.localBusy = true;
     this.nextStatus = '正在计算本机已缓存剧集进度…';
     try {
-      this.nextShows = await readNextShows(store);
       const snapshot = this.cloud;
       const uuid = this.cloudUuid;
       const clientId = this.clientId;
       const active = snapshot && this.signedIn && traktAuth.isCurrent(clientId, snapshot.generation) ? snapshot : undefined;
+      if (this.signedIn && !active) { this.nextShows = []; this.libraryEvidence = []; return; }
+      const localAllowed = allowLocalScope(!!active, await store.boundAccount(), uuid);
+      const next = localAllowed ? await readNextShows(store) : [];
       const result = await projectLibrary(store, this.mediaRecords, active, uuid, clientId, false,
         (): boolean => !active || (this.cloudUuid === uuid && traktAuth.isCurrent(clientId, active.generation)),
         (done: number, total: number): void => {});
+      if (this.activeCloud() !== active || this.cloudUuid !== uuid || (this.signedIn && !active)) { return; }
+      this.nextShows = next;
+      this.cloudLocalAllowed = result.localAllowed && !!active;
       this.libraryEvidence = result.evidence;
       this.resetCollection();
+      await this.refreshEffectiveDetail();
       if (this.tab === 'library' && this.collectionGrid && !this.selectedMedia) { this.loadCollectionPosters(); }
       this.nextPage = 1;
       this.nextStatus = this.nextShows.length ? '已读取 ' + this.nextShows.length + ' 部本机缓存目录；不代表全部云端剧集。' :
         '没有缓存分集目录。请打开剧集详情并更新分集目录。';
     } catch (error) {
       this.invalidateNextShows();
+      this.projectionPending = false;
       this.nextStatus = '本机进度读取失败：' + safeSyncError(error as Error);
     } finally { this.localBusy = false; }
   }
 
   private nextFiltered(): NextShow[] {
+    if (!this.canEditLibrary()) { return []; }
     const q = this.nextQuery.trim().toLowerCase();
     return sortNextShows(this.nextShows.filter((row: NextShow) =>
       (this.nextFilter === 'all' || (this.nextFilter === 'remaining' ? row.nextSeason > 0 :
@@ -2754,7 +2898,7 @@ struct Index {
   legacyProgressView() {
     Column({ space: 12 }) {
       Text('观看进度').fontSize(25).fontWeight(FontWeight.Bold).width('100%')
-      if (this.localRecent.length > 0) {
+      if (this.canEditLibrary() && this.localRecent.length > 0) {
         Text('最近本机分集记录').fontSize(18).fontWeight(FontWeight.Medium).width('100%')
         ForEach(this.localRecent, (item: Media) => {
           Row() {
@@ -2847,18 +2991,19 @@ struct Index {
     const snapshot = this.cloud;
     const cloud = snapshot && this.signedIn && traktAuth.isCurrent(this.clientId, snapshot.generation) ?
       snapshot : undefined;
+    if (this.signedIn && !cloud) { return []; }
     const cloudShows = (cloud?.shows ?? []).map((show: ShowProgress): LibraryShowEvidence => {
       const media: Media = { id: show.id, title: show.title, kind: 'show', year: show.year ?? 0, watched: false };
       return { media: media, watchedEpisodes: show.watchedEpisodes };
     });
     const localShows = this.libraryEvidence.filter((show: LibraryShowEvidence) => cloud ? show.merged === true : !show.merged);
     const seen: Set<string> = new Set<string>(localShows.map((show: LibraryShowEvidence) => show.media.id));
-    for (const show of this.nextShows) {
+    for (const show of (cloud && !this.cloudLocalAllowed ? [] : this.nextShows)) {
       if (!seen.has(show.media.id)) {
         localShows.push({ media: show.media, watchedEpisodes: show.completed, sections: cloud ? undefined : show.sections });
       }
     }
-    return buildPersonalLibrary(this.mediaRecords, cloud?.watchedMovies ?? [], cloud?.watchlist ?? [],
+    return buildPersonalLibrary(cloud && !this.cloudLocalAllowed ? [] : this.mediaRecords, cloud?.watchedMovies ?? [], cloud?.watchlist ?? [],
       cloudShows, localShows);
   }
 
@@ -2872,6 +3017,7 @@ struct Index {
   }
 
   private toggleCollectionLocal(id: string): void {
+    if (!this.canEditLibrary()) { return; }
     const local = this.items.find((item: Media) => item.id === id);
     if (!local || !this.ready || this.saving || this.cloudBusy || this.syncBusy) { return; }
     this.save(setWatched(this.items, id, !local.watched));
@@ -2959,7 +3105,7 @@ struct Index {
       Text('我的收藏').fontSize(25).fontWeight(FontWeight.Bold).width('100%')
       Text(this.libraryStatus).fontSize(13)
       Text(this.migrationStatus).fontSize(12).width('100%')
-      Text('本机收藏、分集观看证据与当前账户云端清单合并浏览；明确本机意图优先，不自动写入。').fontSize(12).width('100%')
+      Text(this.signedIn && !this.cloudLocalAllowed ? '当前账户只读或正在验证；不混入另一账户的本机库。' : '统一有效观看状态；前台及网络恢复自动读取，不自动扩大上传权限。').fontSize(12).width('100%')
       Text('本机与云端集数分别显示；缓存看完不代表剧集已完结。').fontSize(12).width('100%')
       Button(this.cloudBusy ? '读取中…' : '读取／刷新个人云端清单')
         .enabled(this.signedIn && !this.cloudBusy && !this.syncBusy && !this.authBusy && !this.setupBusy)
@@ -3148,6 +3294,7 @@ struct Index {
   private closeDetail(): void {
     this.detailRevision++;
     this.localSeries = undefined;
+    this.effectiveEditable = false;
     this.fullSchedule = undefined;
     this.schedulePage = 1;
     this.localSeason = -1;
@@ -3236,7 +3383,7 @@ struct Index {
       this.loadDiscover();
     }
     if (value === 'library' && this.episodeReady && this.ready) {
-      if (this.signedIn && (!this.cloud || !traktAuth.isCurrent(this.clientId, this.cloud.generation))) { this.loadCloud(); }
+      if (this.signedIn) { this.requestObservation(); }
       else if (!this.libraryEvidence.length) { this.loadNextShows(); }
     }
     if (value === 'library' && this.collectionGrid && this.collectionCards.length === 0 && !this.collectionBusy) {
@@ -3318,10 +3465,10 @@ struct Index {
       }
       Button('刷新详情').enabled(!this.detailBusy && !this.setupBusy)
         .onClick(() => { this.openDetail(item, true); })
-      Button(this.items.some((value: Media) => value.id === item.id) ? '已在本地清单' : '加入本地待看')
+      Button(this.isInLibrary(item) ? '已在个人库' : '加入待看')
         .enabled(this.ready && !this.saving && !this.cloudBusy &&
-          !this.items.some((value: Media) => value.id === item.id))
-        .onClick(() => { this.add(item); })
+          this.canEditLibrary() && !this.isInLibrary(item))
+        .onClick(() => { this.changeMediaIntent(item, 'watchlist', 'yes'); })
     }.width('100%')
   }
 
@@ -3384,9 +3531,9 @@ struct Index {
               .onClick(() => { this.openDetail(item); })
             Button('详情').fontSize(12).enabled(!this.detailBusy && !this.setupBusy)
               .onClick(() => { this.openDetail(item); })
-            Button(this.items.some((value: Media) => value.id === item.id) ? '已添加' : '添加')
-              .enabled(this.ready && !this.saving && !this.cloudBusy && !this.items.some((value: Media) => value.id === item.id))
-              .onClick(() => { this.add(item); })
+            Button(this.isInLibrary(item) ? '已收藏' : '添加')
+              .enabled(this.ready && !this.saving && !this.cloudBusy && this.canEditLibrary() && !this.isInLibrary(item))
+              .onClick(() => { this.changeMediaIntent(item, 'watchlist', 'yes'); })
           }.width('100%')
         }, (item: Media) => item.id)
         Divider()
