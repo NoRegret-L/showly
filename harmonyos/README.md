@@ -1,4 +1,4 @@
-# Showly HarmonyOS Preview v0.6.0
+# Showly HarmonyOS Preview v0.6.1
 
 Unofficial native ArkTS prototype, not a complete Showly port. Your app uses Trakt but is not endorsed or certified by Trakt.
 
@@ -37,3 +37,7 @@ Device test: verify multi-page lists, no duplicates, correct partial-show counts
 Four native navigation destinations (library, search, cloud, account) share the existing state and local schema. Detail view opens from an identified movie/show in search, local library or cloud show progress. Read the public Trakt summary endpoint with extended=full only on user selection, using the configured client ID. Cache metadata for the current app process, explicit refresh available. No TMDB API key required. Download the documented WebP image from an allowlisted Trakt HTTPS host without API credentials, cache it under the app cacheDir keyed by media ID and image filename, and render the local sandbox URI. No direct CDN links in Image. Missing or failed artwork does not block metadata. The OS can purge the cache. No full-grid poster prefetch or episode detail yet; large list virtualization remains future work.
 References: https://developer.trakt.tv/docs/images ; https://developer.trakt.tv/docs/extended-info ; Huawei Image and Core File Kit APIs. Evaluated ImageKnife; deferred third-party dependency until grid-scale caching is required.
 Device tests: navigate tabs and back, open movie and show details, verify poster cached and re-open, invalid/offline request, rapid back and tab switching, check original library and auth after upgrade. 
+
+## v0.6.1 artwork diagnostics
+
+The app distinguishes absent API artwork, rejected URL shape, DNS/connect/timeout, CDN HTTP status, invalid binary/WebP signature, cache write and ArkUI image rendering failures. Select the first eligible URL in the API poster array; permit variable artwork size path segments while retaining strict HTTPS Trakt host and media-path checks. Use a truthful app User-Agent and accept WebP. No API key or token is sent to the CDN. Copyable diagnostics contain only stage, CDN hostname and numeric error/status, not credentials or user account data. No proxy, extra image service or new key. Official Trakt images guide prefers extended=full, so leave that query unchanged. Device verification required to establish the actual failure stage.

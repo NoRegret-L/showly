@@ -297,12 +297,10 @@ struct Index {
       this.detail = data;
       this.detailStatus = '';
       try {
-        const uri = await cachePoster(this.context().cacheDir, item, data.posterUrl);
+        const poster = await cachePoster(this.context().cacheDir, item, data.posterUrls);
         if (revision === this.detailRevision && this.clientId === clientId) {
-          this.posterUri = uri;
-          if (!uri) {
-            this.detailStatus = '暂无可用海报';
-          }
+          this.posterUri = poster.uri;
+          this.detailStatus = poster.status;
         }
       } catch (error) {
         if (revision === this.detailRevision) {
@@ -342,11 +340,11 @@ struct Index {
           .width(180).height(270).objectFit(ImageFit.Contain).borderRadius(10)
           .onError(() => {
             this.posterUri = '';
-            this.detailStatus = '海报无法显示';
+            this.detailStatus = '海报已缓存，但鸿蒙 Image 组件解码或读取失败';
           })
       } else {
         Column() {
-          Text('暂无海报').fontColor('#657185')
+          Text(this.detailBusy ? '正在加载海报…' : '海报未显示').fontColor('#657185')
         }.width(180).height(270).justifyContent(FlexAlign.Center)
           .backgroundColor('#E8EDF4').borderRadius(10)
       }
@@ -369,7 +367,11 @@ struct Index {
         Text('剧情简介').fontSize(20).fontWeight(FontWeight.Medium).width('100%')
         Text(this.detail.overview || '暂无简介').fontSize(15).width('100%')
       }
-      Text(this.detailStatus).fontSize(13)
+      Text(this.detailStatus).fontSize(13).width('100%')
+      if (this.detailStatus) {
+        Button('复制海报诊断信息').fontSize(13)
+          .onClick(() => { this.copyValue(this.detailStatus); })
+      }
       Button('刷新详情').enabled(!this.detailBusy && !this.setupBusy)
         .onClick(() => { this.openDetail(item, true); })
       Button(this.items.some((value: Media) => value.id === item.id) ? '已在本地清单' : '加入本地待看')
@@ -398,7 +400,7 @@ struct Index {
     Column({ space: 0 }) {
       Row() {
         Text('Showly').fontSize(27).fontWeight(FontWeight.Bold).layoutWeight(1)
-        Text('Preview 0.6').fontSize(12).fontColor('#687887')
+        Text('Preview 0.6.1').fontSize(12).fontColor('#687887')
       }.width('100%').padding(16)
       Divider()
       Scroll() {
