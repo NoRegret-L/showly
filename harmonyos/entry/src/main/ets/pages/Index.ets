@@ -12,7 +12,7 @@ import { syncSelectedMedia, reconcilePendingMedia } from '../data/TraktMediaSync
 import { checkpointEpisodes, checkpointMedia, adoptEpisodeCloud, adoptMediaCloud } from '../data/ThreeWaySync';
 import { threeWayLabel } from '../model/ThreeWay';
 import { NextShow } from '../data/NextShows';
-import { ProgressSource, ProgressPreferences, ProgressFlag, ProgressRow, defaultProgress, validProgress, toggleProgressFlag, progressRows } from '../model/ProgressRules';
+import { ProgressSource, ProgressPreferences, ProgressFlag, ProgressRow, defaultProgress, validProgress, toggleProgressFlag, progressRows, ProgressEntry, progressSections, progressEntries, progressPage, effectiveProgressFilter } from '../model/ProgressRules';
 import { CalendarSnapshot, CalendarEntry, readCalendar, calendarWindow, localDay } from '../data/TraktCalendar';
 import { PersonalMovie, PersonalMovieSnapshot, readPersonalMovies, readPersonalMovieDate } from '../data/TraktLibrary';
 import { MovieCalendarItem, filterMovies, moviePage } from '../data/MovieCalendar';
@@ -117,6 +117,8 @@ struct Index {
   @State progressDaysInput: string = '30';
   @State progressOptionStatus: string = '';
   @State nextFilter: string = 'all';
+  @State progressMenuId: string = '';
+  @State collectionStatusFilter: string = 'all';
   @State nextQuery: string = '';
   @State nextPage: number = 1;
   @State calendarWeek: number = 0;
@@ -232,6 +234,7 @@ struct Index {
       this.mediaMode = normalizeMode(this.settings.loadMode());
       this.progressPrefs = this.settings.loadProgress();
       this.progressDaysInput = this.progressPrefs.days.toString();
+      this.nextFilter = effectiveProgressFilter(this.progressPrefs);
       this.reloadProgressFlags();
       this.draftId = this.clientId;
       this.configuring = !this.clientId;
@@ -341,6 +344,7 @@ struct Index {
   private onObservationAuthChanged(): void {
     this.progressFlags = [];
     this.progressFlagScope = '';
+    this.progressMenuId = '';
     this.nextShows = [];
     this.titleConsent = undefined;
     this.titleQuickPending = false;
@@ -2228,6 +2232,7 @@ struct Index {
       }
       if (item.kind === 'show') {
         Text(this.isFollowed(item) ? '追剧中' : '未加入追剧').fontSize(14).width('100%')
+        this.showProgressActions(item)
         if (!this.isFollowed(item)) {
           Button('加入追剧').width('100%')
             .enabled(this.canEditLibrary() && this.ready && !this.saving && !this.cloudBusy && !this.syncBusy)
@@ -2618,6 +2623,7 @@ struct Index {
       Text((item.media.year > 0 ? item.media.year.toString() : '年份未知') +
         (item.rating > 0 ? ' · ★ ' + item.rating.toFixed(1) : ''))
         .fontSize(12).fontColor($r('app.color.showly_secondary')).width('100%')
+      this.showProgressActions(item.media)
     }.width('48%').padding({ bottom: 12 })
       .onClick(() => { this.openDetail(item.media); })
   }
@@ -2761,15 +2767,17 @@ struct Index {
     try {
       this.progressFlags = this.settings.loadProgressFlags(scope);
       this.progressFlagScope = scope;
-    } catch (error) { this.progressOptionStatus = '置顶与暂停设置无法读取，未覆盖原记录。'; }
+    } catch (error) { this.progressOptionStatus = '置顶与暂缓设置无法读取，未覆盖原记录。'; }
   }
 
-  private async editProgressFlag(id: string, kind: string): Promise<void> {
+  private async editProgressFlag(item: Media, kind: string): Promise<void> {
+    const id = item.id;
     const settings = this.settings;
     const scope = this.currentProgressScope();
     if (!settings || !scope || scope !== this.progressFlagScope || this.progressPrefsBusy ||
-        !this.canEditLibrary() || this.localBusy || this.cloudBusy || this.syncBusy ||
-        !this.nextFiltered().some((row: ProgressRow) => row.media.id === id)) { return; }
+        !this.canEditLibrary() || this.localBusy || this.cloudBusy || this.syncBusy || this.saving ||
+        this.authBusy || this.setupBusy || this.backupBusy || !this.pageVisible ||
+        item.kind !== 'show' || !isTraktMedia(item) || (kind !== 'pin' && kind !== 'hold')) { return; }
     this.progressPrefsBusy = true;
     try {
       const flags = toggleProgressFlag(this.progressFlags, id, kind);
@@ -2794,7 +2802,8 @@ struct Index {
       descending: key === 'direction' ? !old.descending : old.descending,
       newAtTop: key === 'new' ? !old.newAtTop : old.newAtTop,
       upcomingCollapsed: key === 'upcoming' ? !old.upcomingCollapsed : old.upcomingCollapsed,
-      holdCollapsed: key === 'hold' ? !old.holdCollapsed : old.holdCollapsed
+      holdCollapsed: key === 'hold' ? !old.holdCollapsed : old.holdCollapsed,
+      filter: key === 'filter' ? value : this.nextFilter
     };
     if ((key === 'days' && !/^\d+$/.test(value.trim())) || !validProgress(next)) {
       this.progressOptionStatus = '请输入有效的非负整数天数。'; return;
@@ -2805,9 +2814,7 @@ struct Index {
       this.progressPrefs = next;
       this.progressDaysInput = next.days.toString();
       this.progressOptionStatus = '';
-      if (!next.days && (this.nextFilter === 'upcoming' || this.nextFilter === 'both')) {
-        this.nextFilter = this.nextFilter === 'both' ? 'hold' : 'all';
-      }
+      this.nextFilter = effectiveProgressFilter(next);
       this.nextPage = 1;
     } catch (error) { this.progressOptionStatus = '设置保存失败，请重试。'; }
     finally { this.progressPrefsBusy = false; this.reloadProgressFlags(); }
@@ -2821,15 +2828,13 @@ struct Index {
     return progressRows(sources, this.progressPrefs, flags, Date.now(), this.nextFilter, this.nextQuery);
   }
 
-  private visibleNext(): ProgressRow[] {
-    return this.nextFiltered().filter((row: ProgressRow) =>
-      !(row.group === 'upcoming' && this.progressPrefs.upcomingCollapsed) &&
-      !(row.group === 'hold' && this.progressPrefs.holdCollapsed));
+  private nextEntries(): ProgressEntry[] {
+    return progressEntries(progressSections(this.nextFiltered(), this.progressPrefs));
   }
 
-  private nextPages(): number { return Math.max(1, Math.ceil(this.visibleNext().length / this.collectionPageSize)); }
-  private nextSlice(): ProgressRow[] {
-    return this.visibleNext().slice((this.nextPage - 1) * this.collectionPageSize, this.nextPage * this.collectionPageSize);
+  private nextPages(): number { return Math.max(1, Math.ceil(this.nextEntries().length / this.collectionPageSize)); }
+  private nextSlice(): ProgressEntry[] {
+    return progressPage(this.nextEntries(), Math.min(this.nextPage, this.nextPages()), this.collectionPageSize);
   }
 
   private async markNext(row: ProgressRow): Promise<void> {
@@ -3019,18 +3024,18 @@ struct Index {
   }
 
   private changeProgressFilter(filter: string): void {
-    if (filter === 'all') { this.nextFilter = 'all'; }
-    else {
+    let value = 'all';
+    if (filter !== 'all') {
       const upcoming = filter === 'upcoming' ? !this.progressFilterSelected('upcoming') : this.progressFilterSelected('upcoming');
       const hold = filter === 'hold' ? !this.progressFilterSelected('hold') : this.progressFilterSelected('hold');
-      this.nextFilter = upcoming && hold ? 'both' : upcoming ? 'upcoming' : hold ? 'hold' : 'all';
+      value = upcoming && hold ? 'both' : upcoming ? 'upcoming' : hold ? 'hold' : 'all';
     }
-    this.nextPage = 1;
+    this.editProgressOption('filter', value);
   }
 
   @Builder
   nextFilterButton(label: string, filter: string) {
-    Button(label).layoutWeight(1).fontSize(12)
+    Button(label).layoutWeight(1).fontSize(12).enabled(!this.progressPrefsBusy)
       .backgroundColor(this.progressFilterSelected(filter) ? $r('app.color.showly_accent') : $r('app.color.showly_muted_surface'))
       .fontColor(this.progressFilterSelected(filter) ? $r('app.color.showly_on_accent') : $r('app.color.showly_text'))
       .onClick(() => { this.changeProgressFilter(filter); })
@@ -3082,11 +3087,37 @@ struct Index {
     }.width('100%').padding(10).borderRadius(10).backgroundColor($r('app.color.showly_surface'))
   }
 
+  private progressFlag(item: Media): ProgressFlag | undefined {
+    if (this.progressFlagScope !== this.currentProgressScope()) { return undefined; }
+    return this.progressFlags.find((flag: ProgressFlag) => flag.id === item.id);
+  }
+
+  @Builder
+  showProgressActions(item: Media) {
+    if (item.kind === 'show' && isTraktMedia(item)) {
+      Column({ space: 4 }) {
+        Button(this.progressMenuId === item.id ? '收起操作' :
+          this.progressFlag(item)?.held ? '更多 · 暂缓中' : this.progressFlag(item)?.pinned ? '更多 · 置顶' : '更多')
+          .fontSize(12).onClick(() => { this.progressMenuId = this.progressMenuId === item.id ? '' : item.id; })
+        if (this.progressMenuId === item.id) {
+          Row({ space: 4 }) {
+            Button(this.progressFlag(item)?.pinned ? '取消置顶' : '置顶').layoutWeight(1).fontSize(12)
+              .enabled(this.canEditLibrary() && !this.progressPrefsBusy && !!this.progressFlagScope && !this.localBusy && !this.cloudBusy && !this.syncBusy)
+              .onClick(() => { this.editProgressFlag(item, 'pin'); })
+            Button(this.progressFlag(item)?.held ? '取消「暂缓」' : '设为「暂缓中」').layoutWeight(1).fontSize(12)
+              .enabled(this.canEditLibrary() && !this.progressPrefsBusy && !!this.progressFlagScope && !this.localBusy && !this.cloudBusy && !this.syncBusy)
+              .onClick(() => { this.editProgressFlag(item, 'hold'); })
+          }.width('100%')
+        }
+      }.width('100%')
+    }
+  }
+
   @Builder
   nextProgressCard(row: ProgressRow) {
     Column({ space: 6 }) {
       Text(row.media.title).fontSize(17).fontWeight(FontWeight.Medium).width('100%')
-      Text((row.pinned ? '置顶 · ' : row.held ? '暂停 · ' : '') +
+      Text((row.pinned ? '置顶 · ' : row.held ? '暂缓 · ' : '') +
         (row.fresh ? '新集 · ' : '') + 'S' + row.episode.season + 'E' + row.episode.number +
         (row.episode.title ? ' · ' + row.episode.title : '')).fontSize(14).width('100%')
       Text((row.upcoming ? '待播 · ' : '播出 · ') + row.episode.firstAired.substring(0,10)).fontSize(12).width('100%')
@@ -3103,14 +3134,7 @@ struct Index {
           .enabled(!row.upcoming && this.canEditLibrary() && !this.localBusy && !this.cloudBusy && !this.syncBusy && !this.saving)
           .onClick(() => { this.markNext(row); })
       }.width('100%')
-      Row({ space: 6 }) {
-        Button(row.pinned ? '取消置顶' : '置顶').layoutWeight(1).fontSize(12)
-          .enabled(this.canEditLibrary() && !this.progressPrefsBusy && !!this.progressFlagScope)
-          .onClick(() => { this.editProgressFlag(row.media.id, 'pin'); })
-        Button(row.held ? '恢复追剧' : '暂停追剧').layoutWeight(1).fontSize(12)
-          .enabled(this.canEditLibrary() && !this.progressPrefsBusy && !!this.progressFlagScope)
-          .onClick(() => { this.editProgressFlag(row.media.id, 'hold'); })
-      }.width('100%')
+      this.showProgressActions(row.media)
     }.padding(12).borderRadius(10).width('100%').backgroundColor($r('app.color.showly_surface'))
   }
 
@@ -3132,29 +3156,30 @@ struct Index {
       Row({ space: 4 }) {
         this.nextFilterButton('全部', 'all')
         if (this.progressPrefs.days > 0) { this.nextFilterButton('待播', 'upcoming') }
-        this.nextFilterButton('暂停', 'hold')
+        this.nextFilterButton('暂缓观看', 'hold')
       }.width('100%')
       TextInput({ placeholder: '搜索剧集或分集标题', text: this.nextQuery })
         .onChange((value: string) => { this.nextQuery = value; this.nextPage = 1; })
       if (this.nextShows.some((row: NextShow) => !row.source)) {
         Text('部分剧集缺少完整播出目录，暂不推荐。').fontSize(12).width('100%')
       }
-      if (this.nextFiltered().some((row: ProgressRow) => row.group === 'upcoming')) {
-        Button(this.progressPrefs.upcomingCollapsed ? '展开待播' : '折叠待播').fontSize(12)
-          .enabled(!this.progressPrefsBusy).onClick(() => { this.editProgressOption('upcoming', ''); })
-      }
-      if (this.nextFiltered().some((row: ProgressRow) => row.group === 'hold')) {
-        Button(this.progressPrefs.holdCollapsed ? '展开暂停' : '折叠暂停').fontSize(12)
-          .enabled(!this.progressPrefsBusy).onClick(() => { this.editProgressOption('hold', ''); })
-      }
       Text('符合条件 ' + this.nextFiltered().length + ' 部').fontSize(13).width('100%')
       if (!this.nextFiltered().length && !this.cloudBusy && !this.localBusy) {
         Text('暂无符合条件的下一集。').fontSize(14).width('100%')
       }
-      ForEach(this.nextSlice(), (row: ProgressRow) => {
-        this.nextProgressCard(row)
-      }, (row: ProgressRow) => row.media.id + ':' + row.episode.id + ':' + row.completed + ':' + row.total +
-        ':' + row.group + ':' + row.upcoming + ':' + row.fresh)
+      ForEach(this.nextSlice(), (entry: ProgressEntry) => {
+        if (entry.row) {
+          this.nextProgressCard(entry.row)
+        } else {
+          Row({ space: 8 }) {
+            Text(entry.label + ' · ' + entry.count + ' 部').fontSize(17).fontWeight(FontWeight.Medium).layoutWeight(1)
+            Button(entry.collapsed ? '展开' : '折叠').fontSize(12).enabled(!this.progressPrefsBusy)
+              .onClick(() => { this.editProgressOption(entry.group === 'hold' ? 'hold' : 'upcoming', ''); })
+          }.width('100%')
+        }
+      }, (entry: ProgressEntry) => entry.key + ':' + entry.collapsed + ':' + entry.count +
+        ':' + (entry.row?.episode.id ?? 0) + ':' + (entry.row?.completed ?? 0) + ':' + (entry.row?.total ?? 0) +
+        ':' + entry.group + ':' + (entry.row?.fresh ?? false))
       Row({ space: 8 }) {
         Button('上一页').layoutWeight(1).enabled(this.nextPage > 1).onClick(() => { this.nextPage--; })
         Text(this.nextPage + ' / ' + this.nextPages()).fontSize(13)
@@ -3514,11 +3539,11 @@ struct Index {
   }
 
   private collectionItems(): PersonalLibraryRow[] {
-    return collectionRows(this.collectionSource(), this.mediaMode, this.collectionFilter);
+    return collectionRows(this.collectionSource(), this.mediaMode, this.collectionFilter, this.collectionStatusFilter);
   }
 
   private collectionEntries(): GroupEntry[] {
-    return groupEntries(collectionGroups(this.collectionSource(), this.mediaMode, this.collectionFilter));
+    return groupEntries(collectionGroups(this.collectionSource(), this.mediaMode, this.collectionFilter, this.collectionStatusFilter));
   }
 
   private collectionPageGroups(): CollectionGroup[] {
@@ -3553,6 +3578,7 @@ struct Index {
       this.resetCollection();
       this.collectionFilter = filter;
       this.collectionQuery = '';
+      this.collectionStatusFilter = 'all';
       if (this.collectionGrid && this.tab === 'library') { this.loadCollectionPosters(); }
     }
   }
@@ -3644,6 +3670,17 @@ struct Index {
         Text(this.collectionFilter === 'hidden' ? '隐藏影视管理尚未实现。' : '自定义列表尚未实现。')
           .fontSize(14).width('100%')
       } else {
+      if (this.mediaMode === 'show' && this.collectionFilter === 'mine') {
+        Row({ space: 4 }) {
+          this.collectionStatusButton('全部', 'all')
+          this.collectionStatusButton('正在追', 'watching')
+          this.collectionStatusButton('已完结', 'finished')
+        }.width('100%')
+        Row({ space: 4 }) {
+          this.collectionStatusButton('等待更新', 'upcoming')
+          this.collectionStatusButton('待核实', 'unclassified')
+        }.width('100%')
+      }
       TextInput({ placeholder: this.mediaMode === 'show' ? '搜索收藏剧集' : '搜索收藏电影', text: this.collectionQuery })
         .onChange((value: string) => {
           this.collectionQuery = value;
@@ -3684,6 +3721,18 @@ struct Index {
   }
 
   @Builder
+  collectionStatusButton(label: string, status: string) {
+    Button(label).layoutWeight(1).fontSize(12)
+      .backgroundColor(this.collectionStatusFilter === status ? $r('app.color.showly_accent') : $r('app.color.showly_muted_surface'))
+      .fontColor(this.collectionStatusFilter === status ? $r('app.color.showly_on_accent') : $r('app.color.showly_text'))
+      .onClick(() => {
+        this.collectionStatusFilter = status;
+        this.resetCollection();
+        if (this.collectionGrid) { this.loadCollectionPosters(); }
+      })
+  }
+
+  @Builder
   collectionGroupView(group: CollectionGroup) {
     Column({ space: 8 }) {
       if (this.collectionGrid) {
@@ -3702,6 +3751,7 @@ struct Index {
               Text(mediaLabel(row.media)).fontSize(14).maxLines(2)
                 .textOverflow({ overflow: TextOverflow.Ellipsis }).width('100%')
               Text(businessLibraryLabel(row)).fontSize(11).width('100%')
+              this.showProgressActions(row.media)
               if (row.media.kind !== 'show' && this.canEditLibrary()) {
                 Button(row.watched ? '撤销已看' : '标记已看').fontSize(12)
                   .enabled(this.ready && !this.saving && !this.cloudBusy && !this.syncBusy)
@@ -3718,6 +3768,7 @@ struct Index {
             Column({ space: 4 }) {
               Text(mediaLabel(row.media)).width('100%')
               Text(businessLibraryLabel(row)).fontSize(12).width('100%')
+              this.showProgressActions(row.media)
             }.layoutWeight(1).onClick(() => { this.openDetail(row.media); })
             Button('详情').fontSize(12).onClick(() => { this.openDetail(row.media); })
             if (row.media.kind !== 'show' && this.canEditLibrary()) {
@@ -3916,6 +3967,7 @@ struct Index {
       this.progressMode = 'next';
       this.collectionFilter = 'mine';
       this.collectionQuery = '';
+      this.collectionStatusFilter = 'all';
       this.nextPage = 1;
       this.movieProgressPage = 1;
       this.calendarWeek = 0;

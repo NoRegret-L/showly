@@ -14,7 +14,7 @@ export function normalizeMode(mode: string): string { return mode === 'movie' ? 
 export function progressTabs(mode: string): string[] {
   return mode === 'movie' ? ['next','calendar'] : ['next','calendar','history'];
 }
-export function collectionRows(rows: PersonalLibraryRow[], mode: string, section: string): PersonalLibraryRow[] {
+export function collectionRows(rows: PersonalLibraryRow[], mode: string, section: string, status: string = 'all'): PersonalLibraryRow[] {
   if (section === 'other') {
     return rows.filter((row: PersonalLibraryRow) => row.media.kind === 'manual' ||
       (row.media.kind === mode && !isPersonalMember(row)));
@@ -22,27 +22,19 @@ export function collectionRows(rows: PersonalLibraryRow[], mode: string, section
   const typed = rows.filter((row: PersonalLibraryRow) => row.media.kind === mode);
   if (section === 'queue') { return typed.filter((row: PersonalLibraryRow) => row.queued); }
   if (section !== 'mine') { return []; }
-  return typed.filter((row: PersonalLibraryRow) => mode === 'show' ? hasTrackingEvidence(row) : row.watched);
+  const members = typed.filter((row: PersonalLibraryRow) => mode === 'show' ? hasTrackingEvidence(row) : row.watched);
+  return mode === 'show' && ['watching','finished','upcoming','unclassified'].includes(status) ?
+    filterPersonalLibrary(members, status) : members;
 }
-export function collectionGroups(rows: PersonalLibraryRow[], mode: string, section: string): CollectionGroup[] {
-  const members = collectionRows(rows, mode, section);
-  const groups: CollectionGroup[] = [];
-  if (section === 'mine' && mode === 'show') {
-    for (const key of ['watching','finished','upcoming']) {
-      const selected = filterPersonalLibrary(members, key);
-      if (selected.length) {
-        groups.push({ key: key, label: key === 'watching' ? '正在追' : key === 'finished' ? '已完结' : '等待更新', rows: selected });
-      }
-    }
-  }
-  if (members.length) {
-    groups.push({ key: section === 'mine' ? 'all' : section,
-      label: section === 'mine' ? '全部' : section === 'queue' ? '待看清单' : '其他条目', rows: members });
-  }
-  return groups;
+export function collectionGroups(rows: PersonalLibraryRow[], mode: string, section: string, status: string = 'all'): CollectionGroup[] {
+  const members = collectionRows(rows, mode, section, status);
+  if (!members.length) { return []; }
+  const key = section === 'mine' ? mode === 'show' ? status : 'all' : section;
+  const label = key === 'watching' ? '正在追' : key === 'finished' ? '已完结' : key === 'upcoming' ? '等待更新' :
+    key === 'unclassified' ? '待核实' : key === 'all' ? '全部' : key === 'queue' ? '待看清单' : '其他条目';
+  return [{ key: key, label: label, rows: members }];
 }
-// Original sections may contain the same title as All. Pagination retains
-// headings; poster requests deduplicate IDs separately.
+// One main list, one selected status; never append the same member again in All.
 export function groupEntries(groups: CollectionGroup[]): GroupEntry[] {
   const entries: GroupEntry[] = [];
   for (const group of groups) {

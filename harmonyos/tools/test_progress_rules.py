@@ -9,7 +9,7 @@ with tempfile.TemporaryDirectory() as tmp:
     subprocess.run(["tsc","--strict","--target","ES2020","--module","commonjs",*[n+".ts" for n in names]],cwd=work,check=True)
     (work/"test.cjs").write_text("""
 const assert=require('node:assert/strict');
-const {defaultProgress,selectProgress,progressRows,progressSource,toggleProgressFlag,validProgress}=require('./ProgressRules.js');
+const {defaultProgress,selectProgress,progressRows,progressSource,toggleProgressFlag,validProgress,progressSections,progressEntries,progressPage,effectiveProgressFilter}=require('./ProgressRules.js');
 const now=Date.parse('2026-01-10T12:00:00Z'), day=86400000;
 const media={id:'show:1',kind:'show',title:'The Série',year:2025,watched:false};
 const ep=(id,offset,watched=false,watchedAt=0,season=1)=>({episode:{id,season,number:id,title:'Episode '+id,firstAired:offset===null?'':new Date(now+offset*day).toISOString()},watched,watchedAt});
@@ -47,6 +47,19 @@ const remote={id:media.id,title:media.title,watchedEpisodes:1,positions:[{season
 const observed=progressSource(full,[1],remote,[{episodeId:1,seq:4,watched:true,changedAt:now}],new Map([[1,{id:1,seq:4,watched:true}]]),true);
 assert.equal(observed.episodes[0].watchedAt,now-day);
 assert.equal(progressSource(full,[1],undefined,[],new Map(),false).episodes[0].watchedAt,0);
+const heldSource={...source,media:{...media,id:'show:3'}};
+const futureSource={...future,media:{...media,id:'show:4'}};
+const pinnedSource={...source,media:{...media,id:'show:5'}};
+const flags=[{id:'show:3',held:true,pinned:false},{id:'show:5',held:false,pinned:true}];
+const mixed=progressRows([source,heldSource,futureSource,pinnedSource],p,flags,now,'all','');
+assert.deepEqual(mixed.map(x=>x.group),['pinned','aired','upcoming','hold']);
+const sections=progressSections(mixed,p);
+assert.deepEqual(progressEntries(sections).map(x=>x.row?x.row.media.id:x.key),['show:5','show:1','header:upcoming','show:4','header:hold','show:3']);
+assert.deepEqual(progressEntries(progressSections(mixed,{...p,holdCollapsed:true})).map(x=>x.row?x.row.media.id:x.key),['show:5','show:1','header:upcoming','show:4','header:hold']);
+assert.equal(progressPage(progressEntries(sections),2,3)[0].key,'header:upcoming');
+assert.deepEqual(progressRows([source,heldSource,futureSource,pinnedSource],p,flags,now,'both','').map(x=>x.group),['upcoming','hold']);
+assert.equal(effectiveProgressFilter({...p,days:0,filter:'both'}),'hold');
+assert.deepEqual(toggleProgressFlag([], 'show:999','hold'),[{id:'show:999',pinned:false,held:true}]);
 console.log('Upstream progress behavior fixtures passed');
 """,encoding="utf-8")
     subprocess.run(["node","test.cjs"],cwd=work,check=True)

@@ -1,4 +1,4 @@
-# Showly HarmonyOS Preview v0.9.3e.2a
+# Showly HarmonyOS Preview v0.9.3e.2a.1
 
 Unofficial native ArkTS prototype, not a complete Showly port. Your app uses Trakt but is not endorsed or certified by Trakt.
 
@@ -175,3 +175,7 @@ Global persisted shows/movies mode drives progress, discover, calendar and colle
 ## v0.9.3e.2a — show progress rules (0.9.3.11, build 35)
 
 Full-catalog progress projection using verified effective watch state, actual known watch timestamps, LAST_WATCHED/OLDEST, configurable upcoming window, AIRED/ALL counts, grouping, pin/hold and sorting; explicit quick mark uses existing eligibility/consent/event path. Original default LAST_WATCHED, 30-day upcoming, AIRED, recent descending, new-at-top off. Personal rating sort, translated search and custom watched date are not implemented yet. See docs/PROGRESS_PARITY.md.
+
+## v0.9.3e.2a.1 — data-driven feature distribution (0.9.3.12, build 36)
+
+Progress renders actual ordered entries and nonempty Upcoming/On Hold headers at group boundaries, persists filters, and keeps pin/hold independent of candidate existence. Shared show actions reachable from collection, discovery and detail. My Shows uses one selected status list, eliminating duplicate cards across simultaneous groups. No sync writes changed. Recent-added timestamps and native notifications remain pending.

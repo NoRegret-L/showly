@@ -30,6 +30,7 @@ export interface ProgressPreferences {
   newAtTop: boolean;
   upcomingCollapsed: boolean;
   holdCollapsed: boolean;
+  filter?: string;
 }
 export interface ProgressFlag {
   id: string;
@@ -56,14 +57,15 @@ const DAY = 86400000;
 const NEW_DURATION = 3 * DAY;
 export function defaultProgress(): ProgressPreferences {
   return { strategy: 'last', count: 'aired', days: 30, sort: 'recent', descending: true,
-    newAtTop: false, upcomingCollapsed: false, holdCollapsed: false };
+    newAtTop: false, upcomingCollapsed: false, holdCollapsed: false, filter: 'all' };
 }
 export function validProgress(p: ProgressPreferences): boolean {
   return !!p && ['last','oldest'].includes(p.strategy) && ['aired','all'].includes(p.count) &&
     Number.isSafeInteger(p.days) && p.days >= 0 && Number.isFinite(new Date(Date.now() + p.days * DAY).getTime()) &&
     ['recent','remaining','title','newest','rating','random'].includes(p.sort) &&
     typeof p.descending === 'boolean' && typeof p.newAtTop === 'boolean' &&
-    typeof p.upcomingCollapsed === 'boolean' && typeof p.holdCollapsed === 'boolean';
+    typeof p.upcomingCollapsed === 'boolean' && typeof p.holdCollapsed === 'boolean' &&
+    (p.filter === undefined || ['all','upcoming','hold','both'].includes(p.filter));
 }
 export function validFlags(flags: ProgressFlag[]): boolean {
   if (!Array.isArray(flags)) { return false; }
@@ -191,4 +193,64 @@ export function progressRows(sources: ProgressSource[], prefs: ProgressPreferenc
     grouped.push(...rows);
   }
   return grouped;
+}
+
+export interface ProgressSection {
+  key: string;
+  label: string;
+  collapsed: boolean;
+  rows: ProgressRow[];
+}
+export interface ProgressEntry {
+  key: string;
+  group: string;
+  label: string;
+  collapsed: boolean;
+  count: number;
+  row?: ProgressRow;
+}
+// The Android list contains headers only for nonempty Upcoming and On Hold
+// groups, even when collapsed. Headers follow ordinary candidates, rather
+// than being detached controls at the top.
+export function progressSections(rows: ProgressRow[], prefs: ProgressPreferences): ProgressSection[] {
+  const sections: ProgressSection[] = [];
+  for (const group of ['pinned','new','aired','upcoming','hold']) {
+    const items = rows.filter((row: ProgressRow) => row.group === group);
+    if (!items.length) { continue; }
+    sections.push({ key: group, label: group === 'upcoming' ? '待播' : group === 'hold' ? '暂缓观看' : '',
+      collapsed: group === 'upcoming' ? prefs.upcomingCollapsed : group === 'hold' ? prefs.holdCollapsed : false,
+      rows: items });
+  }
+  return sections;
+}
+export function progressEntries(sections: ProgressSection[]): ProgressEntry[] {
+  const result: ProgressEntry[] = [];
+  for (const section of sections) {
+    if (section.label) {
+      result.push({ key: 'header:' + section.key, group: section.key, label: section.label,
+        collapsed: section.collapsed, count: section.rows.length });
+    }
+    if (!section.collapsed) {
+      for (const row of section.rows) {
+        result.push({ key: 'show:' + row.media.id, group: section.key, label: '',
+          collapsed: false, count: 0, row: row });
+      }
+    }
+  }
+  return result;
+}
+export function progressPage(entries: ProgressEntry[], page: number, size: number): ProgressEntry[] {
+  const start = (page - 1) * size;
+  const slice = entries.slice(start, start + size);
+  const first = slice[0];
+  // A continued paginated section keeps its own heading visible.
+  if (start > 0 && first?.row && (first.group === 'upcoming' || first.group === 'hold')) {
+    const header = entries.find((entry: ProgressEntry) => !entry.row && entry.group === first.group);
+    if (header) { return [header, ...slice]; }
+  }
+  return slice;
+}
+export function effectiveProgressFilter(prefs: ProgressPreferences): string {
+  const value = prefs.filter ?? 'all';
+  return prefs.days > 0 ? value : value === 'both' ? 'hold' : value === 'upcoming' ? 'all' : value;
 }
