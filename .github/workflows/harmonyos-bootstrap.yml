@@ -1,0 +1,93 @@
+name: HarmonyOS bootstrap CI
+
+on:
+  push:
+    branches: [harmonyos-bootstrap]
+    paths:
+      - '.github/workflows/harmonyos-bootstrap.yml'
+      - 'harmonyos/**'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'probe checks the SDK; build requires a native HarmonyOS project'
+        type: choice
+        options: [probe, build]
+        default: probe
+
+permissions:
+  contents: read
+
+concurrency:
+  group: harmonyos-bootstrap-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Record upstream revision
+        run: |
+          set -euo pipefail
+          git ls-remote https://github.com/trakt/showly.git refs/heads/master | tee upstream-revision.txt
+          test -s upstream-revision.txt
+          echo "Upstream revision: $(cut -f1 upstream-revision.txt)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgl1-mesa-dev
+
+      # Third-party SDK distribution. No signing or API secrets in this job.
+      - name: Set up HarmonyOS CLI
+        id: sdk
+        uses: ErBWs/setup-ohos@4dbb63025116eb6165ceac58a4bf47cbdc5ac721
+        with:
+          version: '6.1.1.280'
+          cache: false
+
+      - name: Verify toolchain
+        run: |
+          set -euo pipefail
+          node --version
+          ohpm --version
+          hvigorw --version
+          echo "SDK probe passed. This is not an HAP build." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Require native project for explicit build
+        if: ${{ inputs.mode == 'build' }}
+        run: |
+          test -f harmonyos/build-profile.json5 || {
+            echo "::error::No native HarmonyOS project exists yet."
+            exit 1
+          }
+
+      - name: Install project dependencies
+        if: ${{ inputs.mode == 'build' || hashFiles('harmonyos/build-profile.json5') != '' }}
+        working-directory: harmonyos
+        run: ohpm install --all
+
+      - name: Build native HAP
+        if: ${{ inputs.mode == 'build' || hashFiles('harmonyos/build-profile.json5') != '' }}
+        working-directory: harmonyos
+        run: hvigorw assembleHap --mode module -p product=default -p buildMode=debug --no-daemon
+
+      - name: Upload experimental HAP
+        if: ${{ inputs.mode == 'build' || hashFiles('harmonyos/build-profile.json5') != '' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: experimental-hap-${{ github.sha }}
+          path: harmonyos/entry/build/**/*.hap
+          if-no-files-found: error
+
+      - name: Upload upstream revision
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: upstream-revision
+          path: upstream-revision.txt
+          if-no-files-found: error
