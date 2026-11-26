@@ -1,4 +1,4 @@
-# Showly HarmonyOS Preview v0.5.0
+# Showly HarmonyOS Preview v0.6.0
 
 Unofficial native ArkTS prototype, not a complete Showly port. Your app uses Trakt but is not endorsed or certified by Trakt.
 
@@ -31,3 +31,9 @@ The user explicitly requests a cloud read. GET /sync/last_activities brackets th
 The user may import only new watchlist titles and watched movies; existing local records take precedence. If a movie appears in both cloud lists, watched wins for a new local title. Watched shows are shown as counts of unique episodes with positive plays, not marked completed. No cloud episode data is persisted or written back. Season zero is counted if supplied by Trakt. Local schema stays v1; Preferences size limits still apply. Very large imports may require a future relational store.
 Refs: https://developer.trakt.tv/docs/pagination ; https://github.com/trakt/trakt-api/discussions/775 ; https://developer.trakt.tv/docs/api-use-policy .
 Device test: verify multi-page lists, no duplicates, correct partial-show counts, invalid/expired authorization, rate limiting, offline requests, account switch, repeated import (zero new records), and preservation of existing local entries. CI does not validate live account behavior.
+
+## v0.6.0 navigation and details
+
+Four native navigation destinations (library, search, cloud, account) share the existing state and local schema. Detail view opens from an identified movie/show in search, local library or cloud show progress. Read the public Trakt summary endpoint with extended=full only on user selection, using the configured client ID. Cache metadata for the current app process, explicit refresh available. No TMDB API key required. Download the documented WebP image from an allowlisted Trakt HTTPS host without API credentials, cache it under the app cacheDir keyed by media ID and image filename, and render the local sandbox URI. No direct CDN links in Image. Missing or failed artwork does not block metadata. The OS can purge the cache. No full-grid poster prefetch or episode detail yet; large list virtualization remains future work.
+References: https://developer.trakt.tv/docs/images ; https://developer.trakt.tv/docs/extended-info ; Huawei Image and Core File Kit APIs. Evaluated ImageKnife; deferred third-party dependency until grid-scale caching is required.
+Device tests: navigate tabs and back, open movie and show details, verify poster cached and re-open, invalid/offline request, rapid back and tab switching, check original library and auth after upgrade. 

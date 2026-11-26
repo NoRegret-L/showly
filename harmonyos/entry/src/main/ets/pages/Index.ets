@@ -7,11 +7,19 @@ import { ClientSettings, validateClientId } from '../data/ClientSettings';
 import { pasteboard } from '@kit.BasicServicesKit';
 import { traktAuth } from '../data/TraktAuth';
 import { CloudLibrary, ShowProgress, readCloudLibrary, mergeNewTitles } from '../data/TraktLibrary';
+import { MediaDetail, canReadDetails, readDetails, cachePoster, clearDetailMemory } from '../data/TraktDetails';
 
 @Entry
 @Component
 struct Index {
   @State title: string = '';
+  @State tab: string = 'library';
+  @State selectedMedia?: Media = undefined;
+  @State detail?: MediaDetail = undefined;
+  @State detailBusy: boolean = false;
+  @State detailStatus: string = '';
+  @State posterUri: string = '';
+  private detailRevision: number = 0;
   @State clientId: string = '';
   @State draftId: string = '';
   @State configuring: boolean = false;
@@ -41,6 +49,7 @@ struct Index {
       this.clientId = this.settings.load();
       this.draftId = this.clientId;
       this.configuring = !this.clientId;
+      if (!this.clientId) { this.tab = 'account'; }
       this.settingsReady = true;
       if (this.clientId) {
         traktAuth.restore(this.clientId);
@@ -109,6 +118,8 @@ struct Index {
         }
         await this.settings.save(next);
         this.clientId = next;
+        clearDetailMemory();
+        this.closeDetail();
         this.results = [];
         this.clearCloud();
       }
@@ -136,6 +147,8 @@ struct Index {
       }
       await this.settings.save('');
       this.clientId = '';
+      clearDetailMemory();
+      this.closeDetail();
       this.clearCloud();
       this.draftId = '';
       this.results = [];
@@ -249,10 +262,132 @@ struct Index {
     }
   }
 
+  private closeDetail(): void {
+    this.detailRevision++;
+    this.selectedMedia = undefined;
+    this.detail = undefined;
+    this.posterUri = '';
+    this.detailStatus = '';
+  }
+
+  onBackPress(): boolean {
+    if (this.selectedMedia) {
+      this.closeDetail();
+      return true;
+    }
+    return false;
+  }
+
+  private async openDetail(item: Media, reload: boolean = false): Promise<void> {
+    if (this.detailBusy || this.setupBusy || !this.clientId || !canReadDetails(item)) {
+      return;
+    }
+    const revision = ++this.detailRevision;
+    const clientId = this.clientId;
+    this.selectedMedia = item;
+    this.detail = undefined;
+    this.posterUri = '';
+    this.detailBusy = true;
+    this.detailStatus = '正在读取影视详情…';
+    try {
+      const data = await readDetails(item, clientId, reload);
+      if (revision !== this.detailRevision || this.clientId !== clientId) {
+        return;
+      }
+      this.detail = data;
+      this.detailStatus = '';
+      try {
+        const uri = await cachePoster(this.context().cacheDir, item, data.posterUrl);
+        if (revision === this.detailRevision && this.clientId === clientId) {
+          this.posterUri = uri;
+          if (!uri) {
+            this.detailStatus = '暂无可用海报';
+          }
+        }
+      } catch (error) {
+        if (revision === this.detailRevision) {
+          this.detailStatus = '海报缓存失败，其他详情仍可查看。';
+        }
+      }
+    } catch (error) {
+      if (revision === this.detailRevision) {
+        this.detailStatus = '详情读取失败，请检查网络或 Trakt API 权限后重试。';
+      }
+    } finally {
+      this.detailBusy = false;
+    }
+  }
+
+  @Builder
+  navigationTab(name: string, value: string) {
+    Button(name)
+      .layoutWeight(1)
+      .backgroundColor(this.tab === value ? '#2267D9' : '#F0F2F5')
+      .fontColor(this.tab === value ? '#FFFFFF' : '#263446')
+      .fontSize(13)
+      .onClick(() => {
+        this.closeDetail();
+        this.tab = value;
+      })
+  }
+
+  @Builder
+  detailPage(item: Media) {
+    Column({ space: 12 }) {
+      Button('返回').onClick(() => { this.closeDetail(); })
+      Text(this.detail ? this.detail.title : item.title)
+        .fontSize(26).fontWeight(FontWeight.Bold).width('100%')
+      if (this.posterUri) {
+        Image(this.posterUri)
+          .width(180).height(270).objectFit(ImageFit.Contain).borderRadius(10)
+          .onError(() => {
+            this.posterUri = '';
+            this.detailStatus = '海报无法显示';
+          })
+      } else {
+        Column() {
+          Text('暂无海报').fontColor('#657185')
+        }.width(180).height(270).justifyContent(FlexAlign.Center)
+          .backgroundColor('#E8EDF4').borderRadius(10)
+      }
+      if (this.detail) {
+        Text((this.detail.year > 0 ? this.detail.year + ' · ' : '') +
+          (item.kind === 'movie' ? '电影' : '剧集') +
+          (this.detail.runtime > 0 ? ' · ' + this.detail.runtime + ' 分钟' : '')).fontSize(15)
+        if (this.detail.rating > 0) {
+          Text('Trakt 评分 ' + this.detail.rating.toFixed(1) + ' / 10').fontSize(16)
+        }
+        if (this.detail.genres) {
+          Text(this.detail.genres).fontSize(14)
+        }
+        if (this.detail.status) {
+          Text('状态：' + this.detail.status).fontSize(14)
+        }
+        if (item.kind === 'show' && this.detail.airedEpisodes > 0) {
+          Text('已播 ' + this.detail.airedEpisodes + ' 集').fontSize(14)
+        }
+        Text('剧情简介').fontSize(20).fontWeight(FontWeight.Medium).width('100%')
+        Text(this.detail.overview || '暂无简介').fontSize(15).width('100%')
+      }
+      Text(this.detailStatus).fontSize(13)
+      Button('刷新详情').enabled(!this.detailBusy && !this.setupBusy)
+        .onClick(() => { this.openDetail(item, true); })
+      Button(this.items.some((value: Media) => value.id === item.id) ? '已在本地清单' : '加入本地待看')
+        .enabled(this.ready && !this.saving && !this.cloudBusy &&
+          !this.items.some((value: Media) => value.id === item.id))
+        .onClick(() => { this.add(item); })
+    }.width('100%')
+  }
+
   @Builder
   libraryRow(item: Media) {
     Row({ space: 8 }) {
       Text(mediaLabel(item)).layoutWeight(1)
+        .onClick(() => { this.openDetail(item); })
+      if (this.clientId && canReadDetails(item)) {
+        Button('详情').fontSize(12).enabled(!this.detailBusy && !this.setupBusy)
+          .onClick(() => { this.openDetail(item); })
+      }
       Button(item.watched ? '撤销' : '已看')
         .enabled(this.ready && !this.saving && !this.cloudBusy)
         .onClick(() => { this.save(setWatched(this.items, item.id, !item.watched)); })
@@ -260,12 +395,95 @@ struct Index {
   }
 
   build() {
-    Scroll() {
-      Column({ space: 14 }) {
-        Text('Showly Preview').fontSize(30).fontWeight(FontWeight.Bold)
-        Text('本地影视清单 · Trakt 搜索').fontSize(16)
-        Text('非官方应用，使用 Trakt，但未获 Trakt 认可或认证。')
-          .fontSize(12).fontColor('#687887')
+    Column({ space: 0 }) {
+      Row() {
+        Text('Showly').fontSize(27).fontWeight(FontWeight.Bold).layoutWeight(1)
+        Text('Preview 0.6').fontSize(12).fontColor('#687887')
+      }.width('100%').padding(16)
+      Divider()
+      Scroll() {
+        Column({ space: 14 }) {
+          if (this.selectedMedia) {
+            this.detailPage(this.selectedMedia)
+          } else if (this.tab === 'library') {
+            Text('我的清单').fontSize(23).fontWeight(FontWeight.Bold)
+        Text(this.libraryStatus).fontSize(13)
+        Text('待看 (' + this.items.filter((item: Media) => !item.watched).length + ')')
+          .fontSize(20).fontWeight(FontWeight.Medium)
+        ForEach(this.items.filter((item: Media) => !item.watched), (item: Media) => {
+          this.libraryRow(item)
+        }, (item: Media) => item.id)
+        Text('已看 (' + this.items.filter((item: Media) => item.watched).length + ')')
+          .fontSize(20).fontWeight(FontWeight.Medium)
+        ForEach(this.items.filter((item: Media) => item.watched), (item: Media) => {
+          this.libraryRow(item)
+        }, (item: Media) => item.id)
+          } else if (this.tab === 'search') {
+        Text('影视搜索').fontSize(20).fontWeight(FontWeight.Medium)
+        TextInput({ placeholder: '电影或剧集名称', text: this.title })
+          .onChange((value: string) => { this.title = value; })
+        Row({ space: 8 }) {
+          Button('搜索 Trakt').layoutWeight(1)
+            .enabled(!this.searching && !this.setupBusy && this.title.trim().length > 0 && this.clientId.length > 0)
+            .onClick(() => { this.search(); })
+          Button('手动添加').layoutWeight(1)
+            .enabled(this.ready && !this.saving && !this.cloudBusy && this.title.trim().length > 0)
+            .onClick(() => {
+              const title: string = this.title.trim();
+              const item: Media = { id: 'local:' + title.toLowerCase(), title: title,
+                kind: 'manual', year: 0, watched: false };
+              this.add(item);
+            })
+        }.width('100%')
+        Text(this.searchStatus).fontSize(13)
+        ForEach(this.results, (item: Media) => {
+          Row({ space: 8 }) {
+            Text(mediaLabel(item)).layoutWeight(1)
+              .onClick(() => { this.openDetail(item); })
+            Button('详情').fontSize(12).enabled(!this.detailBusy && !this.setupBusy)
+              .onClick(() => { this.openDetail(item); })
+            Button(this.items.some((value: Media) => value.id === item.id) ? '已添加' : '添加')
+              .enabled(this.ready && !this.saving && !this.cloudBusy && !this.items.some((value: Media) => value.id === item.id))
+              .onClick(() => { this.add(item); })
+          }.width('100%')
+        }, (item: Media) => item.id)
+        Divider()
+
+          } else if (this.tab === 'cloud') {
+            Text('Trakt 云端').fontSize(23).fontWeight(FontWeight.Bold)
+            Text('只读预览和本地新增导入，不会修改云端。').fontSize(13)
+            if (!this.signedIn && !this.cloudBusy) {
+              Text('请先在账户页面登录 Trakt。').fontSize(14)
+              Button('前往账户').onClick(() => { this.tab = 'account'; })
+            }
+          if (this.signedIn || this.cloudBusy) {
+            Button(this.cloudBusy ? '正在处理…' : '读取 Trakt 云端记录')
+              .enabled(!this.cloudBusy && !this.setupBusy && !this.authBusy && !this.saving)
+              .onClick(() => { this.loadCloud(); })
+            Text(this.cloudStatus).fontSize(13)
+            if (this.cloud && this.signedIn) {
+              Text('云端待看：' + this.cloud.watchlist.length +
+                ' · 已看电影：' + this.cloud.watchedMovies.length +
+                ' · 看过的剧集：' + this.cloud.shows.length).fontSize(14)
+              Button('仅导入新待看与已看电影到本机')
+                .enabled(this.ready && !this.saving && !this.cloudBusy && !this.authBusy)
+                .onClick(() => { this.importCloud(); })
+              Text('已有本机记录不覆盖；剧集观看进度仅展示，不标记整部剧已看。').fontSize(12)
+              Text('Trakt 剧集进度').fontSize(18).fontWeight(FontWeight.Medium)
+              ForEach(this.cloud.shows, (show: ShowProgress) => {
+                Row() {
+                  Text(show.title).layoutWeight(1)
+                    .onClick(() => { this.openDetail({ id: show.id, title: show.title, kind: 'show', year: 0, watched: false }); })
+                  Text('已看 ' + show.watchedEpisodes + ' 集').fontSize(13)
+                }.width('100%')
+              }, (show: ShowProgress) => show.id)
+              Button('清除云端预览').enabled(!this.cloudBusy).onClick(() => { this.clearCloud(); })
+            }
+          }
+          } else {
+            Text('账户与设置').fontSize(23).fontWeight(FontWeight.Bold)
+            Text('非官方应用，使用 Trakt，但未获 Trakt 认可或认证。')
+              .fontSize(12).fontColor('#687887')
         Text('Trakt 账户').fontSize(20).fontWeight(FontWeight.Medium)
         if (!this.clientId || this.configuring) {
           Column({ space: 10 }) {
@@ -321,69 +539,19 @@ struct Index {
               .onClick(() => { this.clearClient(); })
           }
           Text('登录使用 Trakt 官方浏览器页面。云端仅只读，不会上传或删除记录。').fontSize(12)
-          if (this.signedIn || this.cloudBusy) {
-            Button(this.cloudBusy ? '正在处理…' : '读取 Trakt 云端记录')
-              .enabled(!this.cloudBusy && !this.setupBusy && !this.authBusy && !this.saving)
-              .onClick(() => { this.loadCloud(); })
-            Text(this.cloudStatus).fontSize(13)
-            if (this.cloud && this.signedIn) {
-              Text('云端待看：' + this.cloud.watchlist.length +
-                ' · 已看电影：' + this.cloud.watchedMovies.length +
-                ' · 看过的剧集：' + this.cloud.shows.length).fontSize(14)
-              Button('仅导入新待看与已看电影到本机')
-                .enabled(this.ready && !this.saving && !this.cloudBusy && !this.cloudBusy && !this.authBusy)
-                .onClick(() => { this.importCloud(); })
-              Text('已有本机记录不覆盖；剧集观看进度仅展示，不标记整部剧已看。').fontSize(12)
-              Text('Trakt 剧集进度').fontSize(18).fontWeight(FontWeight.Medium)
-              ForEach(this.cloud.shows, (show: ShowProgress) => {
-                Row() {
-                  Text(show.title).layoutWeight(1)
-                  Text('已看 ' + show.watchedEpisodes + ' 集').fontSize(13)
-                }.width('100%')
-              }, (show: ShowProgress) => show.id)
-              Button('清除云端预览').enabled(!this.cloudBusy).onClick(() => { this.clearCloud(); })
-            }
-          }
+
         }
-        Divider()
-        Text('影视搜索').fontSize(20).fontWeight(FontWeight.Medium)
-        TextInput({ placeholder: '电影或剧集名称', text: this.title })
-          .onChange((value: string) => { this.title = value; })
-        Row({ space: 8 }) {
-          Button('搜索 Trakt').layoutWeight(1)
-            .enabled(!this.searching && !this.setupBusy && this.title.trim().length > 0 && this.clientId.length > 0)
-            .onClick(() => { this.search(); })
-          Button('手动添加').layoutWeight(1)
-            .enabled(this.ready && !this.saving && !this.cloudBusy && this.title.trim().length > 0)
-            .onClick(() => {
-              const title: string = this.title.trim();
-              const item: Media = { id: 'local:' + title.toLowerCase(), title: title,
-                kind: 'manual', year: 0, watched: false };
-              this.add(item);
-            })
-        }.width('100%')
-        Text(this.searchStatus).fontSize(13)
-        ForEach(this.results, (item: Media) => {
-          Row({ space: 8 }) {
-            Text(mediaLabel(item)).layoutWeight(1)
-            Button(this.items.some((value: Media) => value.id === item.id) ? '已添加' : '添加')
-              .enabled(this.ready && !this.saving && !this.cloudBusy && !this.items.some((value: Media) => value.id === item.id))
-              .onClick(() => { this.add(item); })
-          }.width('100%')
-        }, (item: Media) => item.id)
-        Divider()
-        Text(this.libraryStatus).fontSize(13)
-        Text('待看 (' + this.items.filter((item: Media) => !item.watched).length + ')')
-          .fontSize(20).fontWeight(FontWeight.Medium)
-        ForEach(this.items.filter((item: Media) => !item.watched), (item: Media) => {
-          this.libraryRow(item)
-        }, (item: Media) => item.id)
-        Text('已看 (' + this.items.filter((item: Media) => item.watched).length + ')')
-          .fontSize(20).fontWeight(FontWeight.Medium)
-        ForEach(this.items.filter((item: Media) => item.watched), (item: Media) => {
-          this.libraryRow(item)
-        }, (item: Media) => item.id)
-      }.width('100%').padding(24)
+
+          }
+        }.width('100%').padding(16)
+      }.width('100%').layoutWeight(1).align(Alignment.TopStart)
+      Divider()
+      Row({ space: 6 }) {
+        this.navigationTab('清单', 'library')
+        this.navigationTab('搜索', 'search')
+        this.navigationTab('云端', 'cloud')
+        this.navigationTab('账户', 'account')
+      }.padding(12).width('100%')
     }.width('100%').height('100%')
   }
 }
