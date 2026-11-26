@@ -443,12 +443,23 @@ struct Index {
     }
   }
 
+  private async openFeatureAudit(): Promise<void> {
+    try {
+      await this.context().startAbility({ action: 'ohos.want.action.viewData',
+        uri: 'https://github.com/NoRegret-L/showly/blob/harmonyos-v0.9.1-b20/harmonyos/docs/FEATURE_AUDIT.md' });
+    } catch (error) {
+      this.updateStatus = '无法打开功能审计报告，请从鸿蒙 GitHub 发布页进入。';
+    }
+  }
+
   @Builder
   updateView() {
     Column({ space: 8 }) {
       Text('版本与更新').fontSize(19).fontWeight(FontWeight.Medium).width('100%')
       Text('当前版本 ' + APP_VERSION + ' · 未签名个人预览版').fontSize(13)
         .fontColor($r('app.color.showly_secondary')).width('100%')
+      Text('v0.9.1 功能审计版：电影、待看双向同步与日历尚未对齐原版。').fontSize(12).width('100%')
+      Button('查看功能审计与验收计划').onClick(() => { this.openFeatureAudit(); })
       Button(this.updateBusy ? '检查中…' : '检查更新').enabled(!this.updateBusy)
         .onClick(() => { this.checkAppUpdate(); })
       if (this.updateStatus) { Text(this.updateStatus).fontSize(13).width('100%') }

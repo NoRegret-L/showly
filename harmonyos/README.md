@@ -1,4 +1,4 @@
-# Showly HarmonyOS Preview v0.9.0
+# Showly HarmonyOS Preview v0.9.1
 
 Unofficial native ArkTS prototype, not a complete Showly port. Your app uses Trakt but is not endorsed or certified by Trakt.
 
@@ -103,3 +103,7 @@ Builds of the independent harmonyos-bootstrap branch detect upstream master chan
 Settings > Version & Updates > Check for updates reads public GitHub releases and upstream commit metadata without Trakt credentials. It compares numeric versionCode and ignores Android releases, drafts, and incomplete packages. No update download or background poll, no downgrade. A release with a valid published asset and digest is a preview, not a production signing or device-test claim.
 GitHub schedule and workflow_dispatch require workflow availability on the default branch; master is intentionally untouched, so no independent periodic upstream monitoring or autonomous Android-to-ArkTS merge is enabled. Upstream detection runs on native pushes and user-initiated in-app checks. To enable independent scheduled detection, an explicit default-branch workflow or separate automation repository is needed.
 References: https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows ; https://cli.github.com/manual/gh_release_create ; https://docs.github.com/en/rest/releases/assets .
+
+## v0.9.1 feature parity audit
+
+Read [the source-pinned feature matrix and acceptance plan](docs/FEATURE_AUDIT.md). The settings update panel links to the version-specific report. Audit-only release: no new runtime dependency, data schema or Trakt sync behavior. Existing HAP release pipeline remains; Android master unchanged. No full parity or regression-suite pass is claimed.
