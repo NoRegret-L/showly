@@ -9,16 +9,25 @@ import { traktAuth } from '../data/TraktAuth';
 import { CloudLibrary, ShowProgress, readCloudLibrary, mergeNewTitles } from '../data/TraktLibrary';
 import { MediaDetail, canReadDetails, readDetails, cachePoster, clearDetailMemory } from '../data/TraktDetails';
 import { DiscoverItem, readDiscover } from '../data/TraktDiscover';
-import { EpisodeProgress, SeasonProgress, SeriesProgress, readSeriesProgress, readChinese } from '../data/TraktProgress';
+import { EpisodeProgress, SeasonProgress, SeriesProgress, ChineseText, readSeriesProgress, readChinese } from '../data/TraktProgress';
+import { AppearanceStore, applyAppearance } from '../data/AppearanceStore';
 
 @Entry
 @Component
 struct Index {
   @State title: string = '';
-  @State tab: string = 'library';
+  @State tab: string = 'progress';
+  @State themeMode: string = 'system';
+  @State themeStatus: string = '';
+  @State themeBusy: boolean = false;
+  private appearance?: AppearanceStore;
+  @State refreshing: boolean = false;
+  @State trackingPage: number = 1;
+  @State trackingQuery: string = '';
+  private translationCache: Map<string, ChineseText> = new Map<string, ChineseText>();
   @State collectionFilter: string = 'queue';
   @State collectionPage: number = 1;
-  @State collectionGrid: boolean = false;
+  @State collectionGrid: boolean = true;
   @State collectionCards: DiscoverItem[] = [];
   @State collectionBusy: boolean = false;
   @State collectionStatus: string = '';
@@ -70,6 +79,13 @@ struct Index {
 
   aboutToAppear(): void {
     const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
+    try {
+      this.appearance = new AppearanceStore(context);
+      this.themeMode = this.appearance.load();
+      applyAppearance(context, this.themeMode);
+    } catch (error) {
+      this.themeStatus = '主题设置暂不可用';
+    }
     try {
       this.settings = new ClientSettings(context);
       this.clientId = this.settings.load();
@@ -144,6 +160,7 @@ struct Index {
         }
         await this.settings.save(next);
         this.clientId = next;
+        this.translationCache.clear();
         this.resetCollection();
         this.resetDiscover();
         clearDetailMemory();
@@ -175,6 +192,7 @@ struct Index {
       }
       await this.settings.save('');
       this.clientId = '';
+      this.translationCache.clear();
       this.resetCollection();
       this.resetDiscover();
       clearDetailMemory();
@@ -194,6 +212,8 @@ struct Index {
   private clearCloud(): void {
     this.cloud = undefined;
     this.cloudStatus = '';
+    this.trackingPage = 1;
+    this.trackingQuery = '';
     if (this.collectionFilter === 'tracking') { this.resetCollection(); }
   }
 
@@ -260,6 +280,7 @@ struct Index {
       await this.store.save(next);
       this.items = next;
       this.resetCollection();
+      if (this.collectionGrid && this.tab === 'library' && !this.selectedMedia) { this.loadCollectionPosters(); }
       this.libraryStatus = '已保存到本机';
       return true;
     } catch (error) {
@@ -378,15 +399,15 @@ struct Index {
           .objectFit(ImageFit.Cover).borderRadius(10)
       } else {
         Column() {
-          Text('海报').fontColor('#687887').fontSize(14)
+          Text('海报').fontColor($r('app.color.showly_secondary')).fontSize(14)
         }.width('100%').aspectRatio(0.667)
-          .justifyContent(FlexAlign.Center).backgroundColor('#E8EDF4').borderRadius(10)
+          .justifyContent(FlexAlign.Center).backgroundColor($r('app.color.showly_placeholder')).borderRadius(10)
       }
       Text(item.media.title).fontSize(15).fontWeight(FontWeight.Medium)
         .maxLines(2).textOverflow({ overflow: TextOverflow.Ellipsis }).width('100%')
       Text((item.media.year > 0 ? item.media.year.toString() : '年份未知') +
         (item.rating > 0 ? ' · ★ ' + item.rating.toFixed(1) : ''))
-        .fontSize(12).fontColor('#687887').width('100%')
+        .fontSize(12).fontColor($r('app.color.showly_secondary')).width('100%')
     }.width('48%').padding({ bottom: 12 })
       .onClick(() => { this.openDetail(item.media); })
   }
@@ -401,12 +422,12 @@ struct Index {
       } else {
         Row({ space: 8 }) {
           Button('电影').layoutWeight(1)
-            .backgroundColor(this.discoverKind === 'movie' ? '#2267D9' : '#F0F2F5')
-            .fontColor(this.discoverKind === 'movie' ? '#FFFFFF' : '#263446')
+            .backgroundColor(this.discoverKind === 'movie' ? $r('app.color.showly_accent') : $r('app.color.showly_muted_surface'))
+            .fontColor(this.discoverKind === 'movie' ? $r('app.color.showly_on_accent') : $r('app.color.showly_text'))
             .onClick(() => { this.changeDiscover('movie', this.discoverMode); })
           Button('剧集').layoutWeight(1)
-            .backgroundColor(this.discoverKind === 'show' ? '#2267D9' : '#F0F2F5')
-            .fontColor(this.discoverKind === 'show' ? '#FFFFFF' : '#263446')
+            .backgroundColor(this.discoverKind === 'show' ? $r('app.color.showly_accent') : $r('app.color.showly_muted_surface'))
+            .fontColor(this.discoverKind === 'show' ? $r('app.color.showly_on_accent') : $r('app.color.showly_text'))
             .onClick(() => { this.changeDiscover('show', this.discoverMode); })
         }.width('100%')
         Row({ space: 6 }) {
@@ -439,9 +460,120 @@ struct Index {
   @Builder
   discoverModeButton(label: string, mode: string) {
     Button(label).layoutWeight(1).fontSize(13)
-      .backgroundColor(this.discoverMode === mode ? '#2267D9' : '#F0F2F5')
-      .fontColor(this.discoverMode === mode ? '#FFFFFF' : '#263446')
+      .backgroundColor(this.discoverMode === mode ? $r('app.color.showly_accent') : $r('app.color.showly_muted_surface'))
+      .fontColor(this.discoverMode === mode ? $r('app.color.showly_on_accent') : $r('app.color.showly_text'))
       .onClick(() => { this.changeDiscover(this.discoverKind, mode); })
+  }
+
+  private async changeTheme(mode: string): Promise<void> {
+    if (!this.appearance || this.themeBusy || mode === this.themeMode) { return; }
+    this.themeBusy = true;
+    try {
+      applyAppearance(this.context(), mode);
+      this.themeMode = mode;
+      await this.appearance.save(mode);
+      this.themeStatus = '';
+    } catch (error) {
+      this.themeStatus = '主题切换或保存失败，请重试。';
+    } finally {
+      this.themeBusy = false;
+    }
+  }
+
+  @Builder
+  themeButton(label: string, mode: string) {
+    Button(label).layoutWeight(1).fontSize(13)
+      .enabled(!this.themeBusy)
+      .backgroundColor(this.themeMode === mode ? $r('app.color.showly_accent') : $r('app.color.showly_muted_surface'))
+      .fontColor(this.themeMode === mode ? $r('app.color.showly_on_accent') : $r('app.color.showly_text'))
+      .onClick(() => { this.changeTheme(mode); })
+  }
+
+  private trackingItems(): ShowProgress[] {
+    const snapshot = this.cloud;
+    if (!snapshot || !this.signedIn || !traktAuth.isCurrent(this.clientId, snapshot.generation)) {
+      return [];
+    }
+    const query = this.trackingQuery.trim().toLowerCase();
+    return snapshot.shows.filter((show: ShowProgress) => show.title.toLowerCase().includes(query));
+  }
+
+  private trackingSlice(): ShowProgress[] {
+    const start = (this.trackingPage - 1) * this.collectionPageSize;
+    return this.trackingItems().slice(start, start + this.collectionPageSize);
+  }
+
+  private trackingPages(): number {
+    return Math.max(1, Math.ceil(this.trackingItems().length / this.collectionPageSize));
+  }
+
+  @Builder
+  progressView() {
+    Column({ space: 12 }) {
+      Text('观看进度').fontSize(25).fontWeight(FontWeight.Bold).width('100%')
+      Text('Trakt 观看记录').fontSize(14).fontColor($r('app.color.showly_secondary')).width('100%')
+      if (!this.signedIn && !this.cloudBusy) {
+        Text('登录 Trakt 后查看已看剧集与分集进度。').width('100%')
+        Button('连接 Trakt').onClick(() => { this.navigate('account'); })
+      } else {
+        Row({ space: 8 }) {
+          Text('看过的剧集 ' + this.trackingItems().length).fontSize(16).layoutWeight(1)
+          Button(this.cloudBusy ? '读取中…' : '刷新')
+            .enabled(!this.cloudBusy && !this.authBusy && !this.saving && !this.setupBusy)
+            .onClick(() => { this.loadCloud(); })
+        }.width('100%')
+        if (this.cloudStatus) { Text(this.cloudStatus).fontSize(12).width('100%') }
+        if (this.cloud) {
+          TextInput({ placeholder: '筛选剧集', text: this.trackingQuery })
+            .onChange((value: string) => { this.trackingQuery = value; this.trackingPage = 1; })
+          ForEach(this.trackingSlice(), (show: ShowProgress) => {
+            Row({ space: 12 }) {
+              Column({ space: 6 }) {
+                Text(show.title).fontSize(16).fontWeight(FontWeight.Medium).width('100%')
+                Text('已看 ' + show.watchedEpisodes + ' 集 · 点击查看分集')
+                  .fontSize(12).fontColor($r('app.color.showly_secondary')).width('100%')
+              }.layoutWeight(1)
+              Text('›').fontSize(24).fontColor($r('app.color.showly_secondary'))
+            }.padding(14).width('100%').borderRadius(12)
+              .backgroundColor($r('app.color.showly_surface'))
+              .onClick(() => {
+                this.openDetail({ id: show.id, title: show.title, kind: 'show', year: 0, watched: false });
+              })
+          }, (show: ShowProgress) => show.id)
+          Row({ space: 8 }) {
+            Button('上一页').layoutWeight(1).enabled(this.trackingPage > 1)
+              .onClick(() => { this.trackingPage--; })
+            Text(this.trackingPage + ' / ' + this.trackingPages()).fontSize(13)
+            Button('下一页').layoutWeight(1).enabled(this.trackingPage < this.trackingPages())
+              .onClick(() => { this.trackingPage++; })
+          }.width('100%')
+          Text('含已追完的剧集。分季分集状态仅供查看。').fontSize(12).width('100%')
+        }
+        Button('云端导入与管理').onClick(() => { this.navigate('cloud'); })
+      }
+      Divider()
+      Text('本地待看').fontSize(20).fontWeight(FontWeight.Medium).width('100%')
+      Text('待看 ' + this.items.filter((item: Media) => !item.watched).length + ' 部影视').width('100%')
+      Button('打开收藏').onClick(() => { this.chooseCollection('queue'); this.navigate('library'); })
+    }.width('100%')
+  }
+
+  private async refreshPage(): Promise<void> {
+    try {
+      if (this.selectedMedia) {
+        await this.openDetail(this.selectedMedia, true);
+      } else if (this.tab === 'discover') {
+        await this.loadDiscover(this.discoverPage);
+      } else if (this.tab === 'library') {
+        if (this.collectionGrid) { await this.loadCollectionPosters(); }
+      } else if (this.tab === 'progress' || this.tab === 'cloud') {
+        if (this.signedIn) { await this.loadCloud(); }
+      } else if (this.tab === 'search' && this.title.trim()) {
+        await this.search();
+      }
+    } finally {
+      this.refreshing = false;
+    }
   }
 
   private resetCollection(): void {
@@ -478,6 +610,7 @@ struct Index {
     if (this.collectionFilter !== filter) {
       this.resetCollection();
       this.collectionFilter = filter;
+      if (this.collectionGrid && this.tab === 'library') { this.loadCollectionPosters(); }
     }
   }
 
@@ -487,6 +620,7 @@ struct Index {
     }
     this.resetCollection();
     this.collectionPage = page;
+    if (this.collectionGrid && this.tab === 'library') { this.loadCollectionPosters(); }
   }
 
   private async loadCollectionPosters(): Promise<void> {
@@ -539,8 +673,8 @@ struct Index {
   @Builder
   collectionFilterButton(label: string, value: string) {
     Button(label).layoutWeight(1).fontSize(13)
-      .backgroundColor(this.collectionFilter === value ? '#2267D9' : '#F0F2F5')
-      .fontColor(this.collectionFilter === value ? '#FFFFFF' : '#263446')
+      .backgroundColor(this.collectionFilter === value ? $r('app.color.showly_accent') : $r('app.color.showly_muted_surface'))
+      .fontColor(this.collectionFilter === value ? $r('app.color.showly_on_accent') : $r('app.color.showly_text'))
       .onClick(() => { this.chooseCollection(value); })
   }
 
@@ -563,7 +697,10 @@ struct Index {
       Text('共 ' + this.collectionItems().length + ' 部').fontSize(14)
       Row({ space: 8 }) {
         Button(this.collectionGrid ? '切换文字列表' : '切换海报网格').layoutWeight(1)
-          .onClick(() => { this.collectionGrid = !this.collectionGrid; })
+          .onClick(() => {
+            this.collectionGrid = !this.collectionGrid;
+            if (this.collectionGrid) { this.loadCollectionPosters(); }
+          })
         if (this.collectionGrid) {
           Button(this.collectionBusy ? '加载中…' : '加载本页海报').layoutWeight(1)
             .enabled(!this.collectionBusy && !this.setupBusy && !!this.clientId)
@@ -580,9 +717,9 @@ struct Index {
                   .width('100%').aspectRatio(0.667).objectFit(ImageFit.Cover).borderRadius(10)
               } else {
                 Column() {
-                  Text('海报').fontSize(13).fontColor('#687887')
+                  Text('海报').fontSize(13).fontColor($r('app.color.showly_secondary'))
                 }.width('100%').aspectRatio(0.667).justifyContent(FlexAlign.Center)
-                  .backgroundColor('#E8EDF4').borderRadius(10)
+                  .backgroundColor($r('app.color.showly_placeholder')).borderRadius(10)
               }
               Text(mediaLabel(item)).fontSize(14).maxLines(2)
                 .textOverflow({ overflow: TextOverflow.Ellipsis }).width('100%')
@@ -654,11 +791,20 @@ struct Index {
     if (this.translationBusy || !this.clientId) { return; }
     const revision = this.detailRevision;
     const clientId = this.clientId;
+    const cacheKey = clientId + ':' + item.id;
+    const cached = this.translationCache.get(cacheKey);
+    if (cached) {
+      this.chineseTitle = cached.title;
+      this.chineseOverview = cached.overview;
+      this.translationStatus = cached.title || cached.overview ? '已应用可用中文翻译' : '暂无中文翻译，保留原文';
+      return;
+    }
     this.translationBusy = true;
     this.translationStatus = '正在读取中文译名…';
     try {
       const result = await readChinese(item, clientId);
       if (revision === this.detailRevision && this.clientId === clientId) {
+        this.translationCache.set(cacheKey, result);
         this.chineseTitle = result.title;
         this.chineseOverview = result.overview;
         this.translationStatus = result.title || result.overview ? '已应用可用中文翻译' : '暂无中文翻译，保留原文';
@@ -666,7 +812,7 @@ struct Index {
     } catch (error) {
       if (revision === this.detailRevision) { this.translationStatus = '中文翻译读取失败，保留原文'; }
     } finally {
-      this.translationBusy = false;
+      if (revision === this.detailRevision) { this.translationBusy = false; }
     }
   }
 
@@ -710,6 +856,7 @@ struct Index {
     this.progress = undefined;
     this.progressStatus = '';
     this.seasonNumber = -1;
+    this.translationBusy = false;
     this.chineseTitle = '';
     this.chineseOverview = '';
     this.translationStatus = '';
@@ -722,6 +869,10 @@ struct Index {
   onBackPress(): boolean {
     if (this.selectedMedia) {
       this.closeDetail();
+      return true;
+    }
+    if (this.tab === 'search' || this.tab === 'cloud' || this.tab === 'account') {
+      this.navigate('progress');
       return true;
     }
     return false;
@@ -746,6 +897,7 @@ struct Index {
       }
       this.detail = data;
       this.detailStatus = '';
+      this.translateDetail(item);
       try {
         const poster = await cachePoster(this.context().cacheDir, item, data.posterUrls);
         if (revision === this.detailRevision && this.clientId === clientId) {
@@ -766,22 +918,37 @@ struct Index {
     }
   }
 
+  private navigate(value: string): void {
+    this.closeDetail();
+    if (this.tab === 'discover' && value !== 'discover' && this.discoverBusy) { this.resetDiscover(); }
+    if (this.tab === 'library' && value !== 'library' && this.collectionBusy) { this.resetCollection(); }
+    this.tab = value;
+    if (value === 'discover' && this.discoverItems.length === 0 && !this.discoverBusy) {
+      this.loadDiscover();
+    }
+    if (value === 'library' && this.collectionGrid && this.collectionCards.length === 0 && !this.collectionBusy) {
+      this.loadCollectionPosters();
+    }
+  }
+
   @Builder
-  navigationTab(name: string, value: string) {
-    Button(name)
-      .layoutWeight(1)
-      .backgroundColor(this.tab === value ? '#2267D9' : '#F0F2F5')
-      .fontColor(this.tab === value ? '#FFFFFF' : '#263446')
-      .fontSize(13)
-      .onClick(() => {
-        this.closeDetail();
-        if (this.tab === 'discover' && value !== 'discover' && this.discoverBusy) { this.resetDiscover(); }
-        if (this.tab === 'library' && value !== 'library' && this.collectionBusy) { this.resetCollection(); }
-        this.tab = value;
-        if (value === 'discover' && this.discoverItems.length === 0 && !this.discoverBusy) {
-          this.loadDiscover();
-        }
-      })
+  navigationTab(name: string, value: string, icon: Resource) {
+    Column({ space: 4 }) {
+      Image(icon).width(26).height(26)
+        .fillColor(this.tab === value ? $r('app.color.showly_accent') : $r('app.color.showly_secondary'))
+      Text(name).fontSize(12)
+        .fontWeight(this.tab === value ? FontWeight.Bold : FontWeight.Normal)
+        .fontColor(this.tab === value ? $r('app.color.showly_accent') : $r('app.color.showly_secondary'))
+    }.layoutWeight(1).height(54).justifyContent(FlexAlign.Center)
+      .onClick(() => { this.navigate(value); })
+  }
+
+  @Builder
+  headerAction(label: string, value: string) {
+    Button(label).fontSize(12).height(34)
+      .backgroundColor(this.tab === value ? $r('app.color.showly_accent') : $r('app.color.showly_muted_surface'))
+      .fontColor(this.tab === value ? $r('app.color.showly_on_accent') : $r('app.color.showly_text'))
+      .onClick(() => { this.navigate(value); })
   }
 
   @Builder
@@ -799,9 +966,9 @@ struct Index {
           })
       } else {
         Column() {
-          Text(this.detailBusy ? '正在加载海报…' : '海报未显示').fontColor('#657185')
+          Text(this.detailBusy ? '正在加载海报…' : '海报未显示').fontColor($r('app.color.showly_secondary'))
         }.width(180).height(270).justifyContent(FlexAlign.Center)
-          .backgroundColor('#E8EDF4').borderRadius(10)
+          .backgroundColor($r('app.color.showly_placeholder')).borderRadius(10)
       }
       if (this.detail) {
         Text((this.detail.year > 0 ? this.detail.year + ' · ' : '') +
@@ -821,7 +988,7 @@ struct Index {
         }
         Text('剧情简介').fontSize(20).fontWeight(FontWeight.Medium).width('100%')
         Text(this.chineseOverview || this.detail.overview || '暂无简介').fontSize(15).width('100%')
-        Button('查看中文译名和简介').enabled(!this.translationBusy)
+        Button('重试中文资料').enabled(!this.translationBusy)
           .onClick(() => { this.translateDetail(item); })
         Text(this.translationStatus).fontSize(12)
       }
@@ -859,13 +1026,18 @@ struct Index {
     Column({ space: 0 }) {
       Row() {
         Text('Showly').fontSize(27).fontWeight(FontWeight.Bold).layoutWeight(1)
-        Text('Preview 0.7.1').fontSize(12).fontColor('#687887')
-      }.width('100%').padding(16)
-      Divider()
-      Scroll() {
+        this.headerAction('搜索', 'search')
+        this.headerAction('云端', 'cloud')
+        this.headerAction('设置', 'account')
+      }.width('100%').padding(12).backgroundColor($r('app.color.showly_surface'))
+      Divider().color($r('app.color.showly_line'))
+      Refresh({ refreshing: $this.refreshing }) {
+        Scroll() {
         Column({ space: 14 }) {
           if (this.selectedMedia) {
             this.detailPage(this.selectedMedia)
+          } else if (this.tab === 'progress') {
+            this.progressView()
           } else if (this.tab === 'discover') {
             this.discoverView()
           } else if (this.tab === 'library') {
@@ -921,21 +1093,22 @@ struct Index {
                 .enabled(this.ready && !this.saving && !this.cloudBusy && !this.authBusy)
                 .onClick(() => { this.importCloud(); })
               Text('已有本机记录不覆盖；剧集观看进度仅展示，不标记整部剧已看。').fontSize(12)
-              Text('Trakt 剧集进度').fontSize(18).fontWeight(FontWeight.Medium)
-              ForEach(this.cloud.shows, (show: ShowProgress) => {
-                Row() {
-                  Text(show.title).layoutWeight(1)
-                    .onClick(() => { this.openDetail({ id: show.id, title: show.title, kind: 'show', year: 0, watched: false }); })
-                  Text('已看 ' + show.watchedEpisodes + ' 集').fontSize(13)
-                }.width('100%')
-              }, (show: ShowProgress) => show.id)
+              Button('查看剧集进度').onClick(() => { this.navigate('progress'); })
               Button('清除云端预览').enabled(!this.cloudBusy).onClick(() => { this.clearCloud(); })
             }
           }
           } else {
             Text('账户与设置').fontSize(23).fontWeight(FontWeight.Bold)
+            Text('外观').fontSize(19).fontWeight(FontWeight.Medium).width('100%')
+            Row({ space: 8 }) {
+              this.themeButton('跟随系统', 'system')
+              this.themeButton('浅色', 'light')
+              this.themeButton('深色', 'dark')
+            }.width('100%')
+            Text(this.themeStatus).fontSize(12)
+            Text('版本 0.7.2').fontSize(12).fontColor($r('app.color.showly_secondary'))
             Text('非官方应用，使用 Trakt，但未获 Trakt 认可或认证。')
-              .fontSize(12).fontColor('#687887')
+              .fontSize(12).fontColor($r('app.color.showly_secondary'))
         Text('Trakt 账户').fontSize(20).fontWeight(FontWeight.Medium)
         if (!this.clientId || this.configuring) {
           Column({ space: 10 }) {
@@ -963,7 +1136,7 @@ struct Index {
                 .onClick(() => { this.draftId = this.clientId; this.configuring = false; })
             }
             Text('也可暂不配置，继续使用下方离线清单。').fontSize(12)
-          }.width('100%').padding(12).borderRadius(12).backgroundColor('#F1F4F8')
+          }.width('100%').padding(12).borderRadius(12).backgroundColor($r('app.color.showly_surface'))
         }
         Text(this.setupStatus).fontSize(13)
         if (this.clientId && !this.configuring) {
@@ -996,15 +1169,16 @@ struct Index {
 
           }
         }.width('100%').padding(16)
-      }.width('100%').layoutWeight(1).align(Alignment.TopStart)
-      Divider()
+        }.width('100%').height('100%').align(Alignment.TopStart)
+      }.width('100%').layoutWeight(1)
+        .onRefreshing(() => { this.refreshPage(); })
+      Divider().color($r('app.color.showly_line'))
       Row({ space: 6 }) {
-        this.navigationTab('发现', 'discover')
-        this.navigationTab('收藏', 'library')
-        this.navigationTab('搜索', 'search')
-        this.navigationTab('云端', 'cloud')
-        this.navigationTab('账户', 'account')
-      }.padding(12).width('100%')
-    }.width('100%').height('100%')
+        this.navigationTab('进度', 'progress', $r('app.media.nav_ic_check_menu'))
+        this.navigationTab('发现', 'discover', $r('app.media.nav_ic_search'))
+        this.navigationTab('收藏', 'library', $r('app.media.nav_ic_bookmark'))
+      }.padding({ left: 12, right: 12, top: 4, bottom: 4 }).width('100%')
+        .backgroundColor($r('app.color.showly_surface'))
+    }.width('100%').height('100%').backgroundColor($r('app.color.showly_background'))
   }
 }

@@ -1,0 +1,40 @@
+{
+  "color": [
+    {
+      "name": "showly_background",
+      "value": "#131313"
+    },
+    {
+      "name": "showly_surface",
+      "value": "#222327"
+    },
+    {
+      "name": "showly_muted_surface",
+      "value": "#303030"
+    },
+    {
+      "name": "showly_text",
+      "value": "#FFFFFF"
+    },
+    {
+      "name": "showly_secondary",
+      "value": "#AAAAAA"
+    },
+    {
+      "name": "showly_accent",
+      "value": "#F44336"
+    },
+    {
+      "name": "showly_on_accent",
+      "value": "#131313"
+    },
+    {
+      "name": "showly_placeholder",
+      "value": "#303030"
+    },
+    {
+      "name": "showly_line",
+      "value": "#444448"
+    }
+  ]
+}
