@@ -13,6 +13,7 @@ import { EpisodeProgress, SeasonProgress, SeriesProgress, ChineseText, readSerie
 import { AppearanceStore, applyAppearance } from '../data/AppearanceStore';
 import { EpisodeStore, LocalSeriesState, LocalSeasonState, LocalEpisodeState, fetchEpisodeCatalog } from '../data/EpisodeStore';
 import { SyncAccount, SyncPreview, SyncDifference, readSyncAccount, buildSyncPreview } from '../data/TraktSyncPreview';
+import { uploadSelectedEpisode } from '../data/TraktSyncUpload';
 
 @Entry
 @Component
@@ -27,6 +28,8 @@ struct Index {
   @State syncPreview?: SyncPreview = undefined;
   @State syncFilter: string = 'addition';
   @State syncPage: number = 1;
+  @State uploadSelectedId: number = 0;
+  @State uploadStatus: string = '';
   @State episodeReady: boolean = false;
   @State episodeInitStatus: string = '';
   @State localSeries?: LocalSeriesState = undefined;
@@ -370,6 +373,8 @@ struct Index {
   }
 
   private invalidateSync(): void {
+    this.uploadSelectedId = 0;
+    this.uploadStatus = '';
     this.syncPreview = undefined;
     this.syncAccount = undefined;
     this.syncBound = false;
@@ -434,6 +439,7 @@ struct Index {
         this.setupBusy || !traktAuth.isCurrent(clientId, expected.generation)) { return; }
     this.syncBusy = true;
     this.syncPreview = undefined;
+    this.uploadSelectedId = 0;
     this.syncPage = 1;
     this.syncStatus = '正在读取完整云端分集记录并比较…';
     try {
@@ -447,6 +453,33 @@ struct Index {
     } catch (error) {
       this.syncStatus = '预览失败：账户、分页或活动快照无法验证。请检查网络并重试。';
     } finally { this.syncBusy = false; }
+  }
+
+  private async confirmEpisodeUpload(): Promise<void> {
+    const store = this.episodeStore;
+    const preview = this.syncPreview;
+    const episodeId = this.uploadSelectedId;
+    const clientId = this.clientId;
+    if (!store || !preview || !this.syncBound || episodeId <= 0 || this.syncBusy ||
+        this.localBusy || this.cloudBusy || this.authBusy || this.setupBusy ||
+        !traktAuth.isCurrent(clientId, preview.account.generation)) { return; }
+    const session = traktAuth.session(clientId);
+    if (!session) { return; }
+    const watchedAt = new Date().toISOString();
+    this.syncBusy = true;
+    this.uploadSelectedId = 0;
+    this.uploadStatus = '正在重新校验账户、分集及云端记录…';
+    try {
+      const result = await uploadSelectedEpisode(store, session, preview, episodeId, watchedAt);
+      this.uploadStatus = result.message;
+    } catch (error) {
+      this.uploadStatus = '未能完成安全上传流程。可能已保留尝试凭证；请重新生成预览并在 Trakt 核对，不会自动重试。';
+    } finally {
+      this.syncPreview = undefined;
+      this.syncPage = 1;
+      this.syncStatus = '本次流程已结束。重新生成差异预览可查看最新状态。';
+      this.syncBusy = false;
+    }
   }
 
   private visibleSyncRows(): SyncDifference[] {
@@ -474,12 +507,13 @@ struct Index {
   syncPreviewView() {
     Column({ space: 10 }) {
       Text('分集同步预览').fontSize(22).fontWeight(FontWeight.Bold).width('100%')
-      Text('只读比较。绑定只用于校验账户；旧日志不会自动上传，也不会把本机未看默认值当作删除。')
+      Text('默认只读。仅手动确认的单集新增可上传；旧日志不会自动上传，不支持云端删除。')
         .fontSize(12).width('100%').fontColor($r('app.color.showly_secondary'))
       Button(this.syncBusy ? '处理中…' : '验证同步账户')
         .enabled(this.episodeReady && this.signedIn && !this.syncBusy && !this.localBusy && !this.cloudBusy && !this.authBusy && !this.setupBusy)
         .onClick(() => { this.verifySync(); })
       Text(this.syncStatus).fontSize(13).width('100%')
+      if (this.uploadStatus) { Text(this.uploadStatus).fontSize(14).width('100%') }
       if (this.syncAccount && this.signedIn && traktAuth.isCurrent(this.clientId, this.syncAccount.generation)) {
         Text('当前账户：' + this.syncAccount.username).fontSize(14).width('100%')
         if (!this.syncBound) {
@@ -512,6 +546,23 @@ struct Index {
               Text('本机 ' + (row.localWatched ? '已看' : '撤销') + ' / 云端 ' +
                 (row.cloudWatched ? '已看' : '无已看记录')).fontSize(12).width('100%')
                 .fontColor($r('app.color.showly_secondary'))
+              if (row.kind === 'addition') {
+                Button(this.uploadSelectedId === row.episodeId ? '取消选择' : '选择上传此集')
+                  .fontSize(12).enabled(!this.syncBusy && !this.localBusy && !this.cloudBusy)
+                  .onClick(() => { this.uploadSelectedId = this.uploadSelectedId === row.episodeId ? 0 : row.episodeId; })
+                if (this.uploadSelectedId === row.episodeId) {
+                  Text('确认将 ' + row.label + ' 的一次观看记录新增至当前已绑定 Trakt 账户？观看时间为确认时刻。')
+                    .fontSize(13).width('100%')
+                  Text('不会删除旧历史；Trakt 可能自动更新追剧进度或待看列表。其他设备同时写入仍可能产生重复。')
+                    .fontSize(12).width('100%')
+                  Row({ space: 8 }) {
+                    Button('取消').layoutWeight(1).enabled(!this.syncBusy)
+                      .onClick(() => { this.uploadSelectedId = 0; })
+                    Button('确认上传 1 集').layoutWeight(1).enabled(!this.syncBusy && !this.localBusy && !this.cloudBusy && !this.authBusy && !this.setupBusy)
+                      .onClick(() => { this.confirmEpisodeUpload(); })
+                  }.width('100%')
+                }
+              }
             }.width('100%').padding(10).borderRadius(8).backgroundColor($r('app.color.showly_muted_surface'))
           }, (row: SyncDifference) => row.episodeId.toString())
           Row({ space: 8 }) {
@@ -1416,7 +1467,7 @@ struct Index {
 
           } else if (this.tab === 'cloud') {
             Text('Trakt 云端').fontSize(23).fontWeight(FontWeight.Bold)
-            Text('只读预览和本地新增导入，不会修改云端。').fontSize(13)
+            Text('云端读取默认只读；仅确认上传单集时才新增观看记录。').fontSize(13)
             this.syncPreviewView()
             if (!this.signedIn && !this.cloudBusy) {
               Text('请先在账户页面登录 Trakt。').fontSize(14)
@@ -1448,7 +1499,7 @@ struct Index {
               this.themeButton('深色', 'dark')
             }.width('100%')
             Text(this.themeStatus).fontSize(12)
-            Text('版本 0.8.1').fontSize(12).fontColor($r('app.color.showly_secondary'))
+            Text('版本 0.8.2').fontSize(12).fontColor($r('app.color.showly_secondary'))
             Text('非官方应用，使用 Trakt，但未获 Trakt 认可或认证。')
               .fontSize(12).fontColor($r('app.color.showly_secondary'))
         Text('Trakt 账户').fontSize(20).fontWeight(FontWeight.Medium)
@@ -1505,7 +1556,7 @@ struct Index {
             Button('清除 Client ID 与本机授权').enabled(!this.setupBusy && !this.searching && !this.cloudBusy && !this.syncBusy)
               .onClick(() => { this.clearClient(); })
           }
-          Text('登录使用 Trakt 官方浏览器页面。云端仅只读，不会上传或删除记录。').fontSize(12)
+          Text('登录使用 Trakt 官方浏览器页面。云端新增需手动确认，不支持删除。').fontSize(12)
 
         }
 

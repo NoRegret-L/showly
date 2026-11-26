@@ -162,6 +162,7 @@ export class EpisodeStore {
     await db.executeSql('CREATE TABLE IF NOT EXISTS episode_event (seq INTEGER PRIMARY KEY AUTOINCREMENT, show_id TEXT NOT NULL, episode_ids TEXT NOT NULL, watched INTEGER NOT NULL CHECK(watched IN (0,1)), changed_at INTEGER NOT NULL)');
     await db.executeSql('CREATE INDEX IF NOT EXISTS episode_event_show_seq ON episode_event(show_id,seq)');
     await db.executeSql('CREATE TABLE IF NOT EXISTS sync_binding (slot INTEGER PRIMARY KEY CHECK(slot=1), account_uuid TEXT NOT NULL)');
+    await db.executeSql('CREATE TABLE IF NOT EXISTS sync_upload_guard (account_uuid TEXT NOT NULL, episode_id INTEGER NOT NULL, attempted_at INTEGER NOT NULL, confirmed INTEGER NOT NULL DEFAULT 0 CHECK(confirmed IN (0,1)), PRIMARY KEY(account_uuid,episode_id))');
     return new EpisodeStore(db);
   }
 
@@ -232,6 +233,22 @@ export class EpisodeStore {
     if (!uuid || uuid.trim() !== uuid) { throw new Error('Invalid account'); }
     await this.db.executeSql('INSERT OR IGNORE INTO sync_binding(slot,account_uuid) VALUES(1,?)', [uuid]);
     if (await this.boundAccount() !== uuid) { throw new Error('Account binding mismatch'); }
+  }
+
+  async hasUploadAttempt(uuid: string, episodeId: number): Promise<boolean> {
+    const rows = await this.db.querySql('SELECT episode_id FROM sync_upload_guard WHERE account_uuid=? AND episode_id=?', [uuid, episodeId]);
+    try { return rows.goToFirstRow(); } finally { rows.close(); }
+  }
+
+  async reserveUpload(uuid: string, episodeId: number): Promise<void> {
+    if (!validId(episodeId) || await this.boundAccount() !== uuid) { throw new Error('Invalid upload identity'); }
+    await this.db.executeSql('INSERT INTO sync_upload_guard(account_uuid,episode_id,attempted_at,confirmed) VALUES(?,?,?,0)',
+      [uuid, episodeId, Date.now()]);
+  }
+
+  async confirmUpload(uuid: string, episodeId: number): Promise<void> {
+    await this.db.executeSql('UPDATE sync_upload_guard SET confirmed=1 WHERE account_uuid=? AND episode_id=?',
+      [uuid, episodeId]);
   }
 
   async journalIntents(): Promise<JournalIntent[]> {
