@@ -1,4 +1,4 @@
-# Showly HarmonyOS Preview v0.9.3e.1b
+# Showly HarmonyOS Preview v0.9.3e.1b.1
 
 Unofficial native ArkTS prototype, not a complete Showly port. Your app uses Trakt but is not endorsed or certified by Trakt.
 
@@ -159,3 +159,7 @@ Cloud observation stores exact season/episode positions, play counts, latest wat
 ## v0.9.3e.1b — shared effective viewing state (package 0.9.3.7, build 31)
 
 Collection and detail use the same read-side resolver. A verified matching episode intent sequence is acknowledged in a new account-scoped read checkpoint, distinct from upload common baselines; a later remote-only change is visible without rewriting history. Existing manual write baselines are consulted when no read checkpoint exists. Unbound or differently bound cloud accounts are read-only and do not merge the device library. Foreground/auth/network-restored events coalesce into observation refresh; unchanged activity reuses the account snapshot. Explicit edit may verify missing eligible catalog metadata; bulk observation cannot grant eligibility. No new auto upload, deletion, consent or remote history operations. See docs/EFFECTIVE_STATE.md for scope and limitations.
+
+## v0.9.3e.1b.1 — feature-first presentation (package 0.9.3.8, build 32)
+
+One collection and episode display; next-episode candidates and counts derive from the same effective projection. Calendar membership uses personal library; weekly Trakt calendar and movie date acquisition remain incomplete upstream parity. Missing schedules fetched on detail entry as public metadata. Settings > Trakt sync > advanced sync management retains previews, manual imports and all existing write guards. Manual movie/watchlist uploads and removals still need confirmation. See docs/FEATURE_FIRST.md.

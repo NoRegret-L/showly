@@ -4,6 +4,7 @@ import { LibraryShowEvidence, PersonalLibraryRow, buildPersonalLibrary, hasTrack
 import { RemoteLibraryObservation, RemoteShowObservation, RemotePlayPosition } from '../model/RemoteObservation';
 import { FullEpisodeCatalog, scheduleEpisodes, showSections } from '../model/ShowCatalog';
 import { CommonEntry } from '../model/ThreeWay';
+import { NextShow, projectShow } from './NextShows';
 import { ReadCheckpoint, ReadDecision, EffectiveEpisodes, allowLocalScope, resolveEpisodes } from '../model/EffectiveState';
 import { EpisodeStore, EpisodeBackupState, JournalIntent, LocalSeriesState, eligibleCatalog, materializeEffective, fetchFullEpisodeCatalog } from './EpisodeStore';
 
@@ -13,6 +14,7 @@ export interface LibraryProjection {
   failed: number;
   localAllowed: boolean;
   matches: ReadCheckpoint[];
+  next: NextShow[];
 }
 export async function projectLibrary(store: EpisodeStore, records: MediaRecord[],
   cloud: RemoteLibraryObservation | undefined, uuid: string, clientId: string, fill: boolean,
@@ -46,6 +48,9 @@ export async function projectLibrary(store: EpisodeStore, records: MediaRecord[]
   }
   const result: LibraryShowEvidence[] = [];
   const matches: ReadCheckpoint[] = [];
+  const next: NextShow[] = [];
+  const latest: Map<string, number> = new Map<string, number>();
+  for (const intent of intents) { latest.set(intent.showId, Math.max(latest.get(intent.showId) ?? 0, intent.seq)); }
   let missing = 0;
   let failed = 0;
   let done = 0;
@@ -86,11 +91,18 @@ export async function projectLibrary(store: EpisodeStore, records: MediaRecord[]
       for (const match of effective.matches) { matches.push(match); }
     }
     const sections = full && effective?.complete ? showSections(full, effective.ids, now) : [];
+    const progressState: EpisodeBackupState | undefined = full && effective?.complete ?
+      { catalog: eligibleCatalog(full, now), watchedIds: effective.ids } : !cloud ? state : undefined;
+    const progressRow = progressState ? projectShow(progressState, latest.get(row.media.id) ?? 0) : undefined;
+    if (progressRow && hasTrackingEvidence(row)) {
+      progressRow.sections = sections;
+      next.push(progressRow);
+    }
     result.push({ media: row.media, watchedEpisodes: state ? ids.length : -1,
-      sections: sections, merged: !!cloud });
+      sections: sections, merged: !!cloud, effectiveWatched: progressRow?.completed, effectiveTotal: progressRow?.total });
     progress(++done, targets.length);
   }
-  return { evidence: result, missing: missing, failed: failed, localAllowed: localAllowed, matches: matches };
+  return { evidence: result, missing: missing, failed: failed, localAllowed: localAllowed, matches: matches, next: next };
 }
 
 export interface DetailProjection {

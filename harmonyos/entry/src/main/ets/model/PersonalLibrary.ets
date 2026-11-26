@@ -7,6 +7,8 @@ export interface LibraryShowEvidence {
   watchedEpisodes: number;
   sections?: string[];
   merged?: boolean;
+  effectiveWatched?: number;
+  effectiveTotal?: number;
 }
 export interface PersonalLibraryRow {
   media: Media;
@@ -17,6 +19,8 @@ export interface PersonalLibraryRow {
   cloudEpisodes: number;
   sections?: string[];
   merged?: boolean;
+  effectiveWatched?: number;
+  effectiveTotal?: number;
 }
 
 function addRow(rows: Map<string, PersonalLibraryRow>, media: Media): PersonalLibraryRow {
@@ -59,6 +63,8 @@ export function buildPersonalLibrary(records: MediaRecord[], cloudMovies: Media[
       row.localEpisodes = show.watchedEpisodes;
       row.sections = show.sections;
       row.merged = show.merged;
+      row.effectiveWatched = show.effectiveWatched;
+      row.effectiveTotal = show.effectiveTotal;
     }
   }
   return Array.from(rows.values());
@@ -102,4 +108,27 @@ export function personalLibraryLabel(row: PersonalLibraryRow): string {
   }
   if (!row.localRecord) { labels.push('仅浏览'); }
   return labels.join(' · ');
+}
+
+export function businessLibraryLabel(row: PersonalLibraryRow): string {
+  const labels: string[] = [];
+  if (row.queued) { labels.push('待看'); }
+  if (row.media.kind !== 'show' && row.watched) { labels.push('已看'); }
+  if (hasTrackingEvidence(row)) {
+    const sections = row.sections ?? [];
+    if (!sections.length || (!row.merged && row.cloudEpisodes > row.localEpisodes)) {
+      labels.push('追剧状态待核实');
+    } else {
+      if (sections.includes('watching')) { labels.push('正在追'); }
+      if (sections.includes('finished')) { labels.push('已完结'); }
+      if (sections.includes('upcoming')) { labels.push('等待更新'); }
+    }
+  }
+  if (row.media.kind === 'show' && row.effectiveWatched !== undefined && row.effectiveTotal !== undefined) {
+    labels.push('已看 ' + row.effectiveWatched + ' / ' + row.effectiveTotal + ' 集');
+  }
+  return labels.join(' · ');
+}
+export function isPersonalMember(row: PersonalLibraryRow): boolean {
+  return row.queued || row.watched || hasTrackingEvidence(row);
 }
