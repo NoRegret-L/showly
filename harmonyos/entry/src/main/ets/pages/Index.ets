@@ -4,6 +4,7 @@ import { LibraryStore } from '../data/LibraryStore';
 import { MediaStore } from '../data/MediaStore';
 import { MediaRecord, migrateLegacy, isTraktMedia, applyLegacyEdit, setMediaIntent, inLocalWatchlist } from '../model/MediaState';
 import { MediaPreview, MediaDifference, buildMediaPreview } from '../data/TraktMediaPreview';
+import { syncSelectedMedia } from '../data/TraktMediaSync';
 import { searchTrakt } from '../data/TraktSearch';
 import { TRAKT_APPS_URL, TRAKT_REDIRECT_URI } from '../config/TraktConfig';
 import { ClientSettings, validateClientId } from '../data/ClientSettings';
@@ -137,6 +138,11 @@ struct Index {
   @State mediaDomain: string = 'movie';
   @State mediaCategory: string = 'unknown';
   @State mediaPage: number = 1;
+  @State mediaSelected?: MediaDifference = undefined;
+  @State mediaWatchTime: string = '';
+  @State mediaSyncStatus: string = '';
+  @State mediaLogs: string[] = [];
+  @State showMediaLogs: boolean = false;
 
   aboutToAppear(): void {
     const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
@@ -482,9 +488,9 @@ struct Index {
   updateView() {
     Column({ space: 8 }) {
       Text('版本与更新').fontSize(19).fontWeight(FontWeight.Medium).width('100%')
-      Text('当前版本 ' + APP_VERSION + ' · 未签名个人预览版 · 0.9.2a').fontSize(13)
+      Text('当前版本 ' + APP_VERSION + ' · 未签名个人预览版 · 0.9.2b').fontSize(13)
         .fontColor($r('app.color.showly_secondary')).width('100%')
-      Text('v0.9.2a 数据迁移与只读预览版；电影及待看云端写入尚未开放。').fontSize(12).width('100%')
+      Text('v0.9.2b 电影及待看手动增量同步版；未知结果只读核对。').fontSize(12).width('100%')
       Button('查看功能审计与验收计划').onClick(() => { this.openFeatureAudit(); })
       Button(this.updateBusy ? '检查中…' : '检查更新').enabled(!this.updateBusy)
         .onClick(() => { this.checkAppUpdate(); })
@@ -591,6 +597,10 @@ struct Index {
   }
 
   private invalidateSync(): void {
+    this.mediaSelected = undefined;
+    this.mediaWatchTime = '';
+    this.mediaSyncStatus = '';
+    this.mediaLogs = [];
     this.mediaPreview = undefined;
     this.mediaPreviewStatus = '';
     this.mediaPage = 1;
@@ -1277,6 +1287,8 @@ struct Index {
     const store = this.mediaStore;
     if (!this.ready || this.saving || this.syncBusy || !store) { return false; }
     this.saving = true;
+    this.mediaSelected = undefined;
+    this.mediaWatchTime = '';
     this.mediaPreview = undefined;
     this.mediaPreviewStatus = '';
     this.mediaPage = 1;
@@ -1367,17 +1379,85 @@ struct Index {
     if (!session) { return; }
     this.syncBusy = true;
     this.mediaPreview = undefined;
+    this.mediaSelected = undefined;
+    this.mediaWatchTime = '';
     this.mediaPage = 1;
     this.mediaPreviewStatus = '读取电影与待看清单的完整云端快照…';
     try {
-      const result = await buildMediaPreview(store, session, this.mediaRecords, account.uuid);
+      const result = await buildMediaPreview(store, session, this.mediaRecords, account.uuid, this.mediaStore);
       if (this.clientId !== clientId || !traktAuth.isCurrent(clientId, session.generation) ||
           this.syncAccount?.uuid !== account.uuid || !this.syncBound) { throw new Error('Account changed'); }
       this.mediaPreview = result;
+      if (this.mediaStore) { this.mediaLogs = await this.mediaStore.operationLogs(account.uuid); }
       this.mediaPreviewStatus = '预览完成；未修改本机或云端观看记录。';
     } catch (error) {
       this.mediaPreviewStatus = '预览失败，账户或云端完整快照无法验证；未修改记录。';
     } finally { this.syncBusy = false; }
+  }
+
+  private mediaOperationLabel(row: MediaDifference): string {
+    if (row.operation === 'reconcile') { return '只读核对未确认操作'; }
+    if (row.domain === 'movie') { return row.operation === 'add' ? '上传电影已看' : '撤销单次电影历史'; }
+    return row.operation === 'add' ? '加入云端待看' : '移出云端待看';
+  }
+
+  private selectMediaOperation(row: MediaDifference): void {
+    if (this.syncBusy || this.saving || !this.mediaPreview || !row.operation) { return; }
+    this.mediaSelected = row;
+    this.mediaWatchTime = new Date().toISOString();
+    this.mediaSyncStatus = '';
+  }
+
+  private async confirmMediaOperation(): Promise<void> {
+    const store = this.mediaStore;
+    const binding = this.episodeStore;
+    const preview = this.mediaPreview;
+    const selected = this.mediaSelected;
+    const clientId = this.clientId;
+    const watchedAt = this.mediaWatchTime;
+    if (!store || !binding || !preview || !selected || !this.ready || !this.syncBound ||
+        this.syncAccount?.uuid !== preview.account.uuid || !this.pageVisible || this.syncBusy || this.saving ||
+        this.localBusy || this.cloudBusy || this.authBusy || this.setupBusy ||
+        !traktAuth.isCurrent(clientId, preview.account.generation)) { return; }
+    const session = traktAuth.session(clientId);
+    if (!session) { return; }
+    this.syncBusy = true;
+    this.mediaSelected = undefined;
+    this.mediaWatchTime = '';
+    this.mediaSyncStatus = '正在复核本机意图、账户及云端记录…';
+    try {
+      const result = await syncSelectedMedia(store, binding, session, preview, selected, watchedAt, (): boolean => {
+        return this.pageVisible && this.clientId === clientId &&
+          this.syncAccount?.uuid === preview.account.uuid && this.syncBound &&
+          traktAuth.isCurrent(clientId, session.generation);
+      });
+      this.mediaSyncStatus = result.message;
+      this.mediaLogs = await store.operationLogs(preview.account.uuid);
+      this.syncPreview = undefined;
+      this.cloud = undefined;
+      this.cloudStatus = '电影/待看操作已结束；云端清单请重新读取。';
+      if (this.collectionFilter === 'tracking') { this.resetCollection(); }
+      // Fresh GET only; no automatic follow-up write.
+      const fresh = await buildMediaPreview(binding, session, this.mediaRecords, preview.account.uuid, store);
+      if (traktAuth.isCurrent(clientId, session.generation) && this.syncAccount?.uuid === preview.account.uuid && this.syncBound) {
+        this.mediaPreview = fresh;
+        this.mediaPreviewStatus = '已刷新只读差异预览。';
+        this.mediaPage = 1;
+      } else { this.mediaPreview = undefined; }
+    } catch (error) {
+      this.mediaPreview = undefined;
+      this.mediaSyncStatus += '；流程中断，请重新生成预览核对。若已有保护凭证，不会重发。';
+      try { this.mediaLogs = await store.operationLogs(preview.account.uuid); } catch (failure) {}
+    } finally { this.syncBusy = false; }
+  }
+
+  private async refreshMediaLogs(): Promise<void> {
+    const store = this.mediaStore;
+    const account = this.syncAccount;
+    if (!store || !account || !this.syncBound || !traktAuth.isCurrent(this.clientId, account.generation)) { return; }
+    try { this.mediaLogs = await store.operationLogs(account.uuid); } catch (error) {
+      this.mediaSyncStatus = '电影与待看日志读取失败。';
+    }
   }
 
   private mediaRows(category: string = this.mediaCategory): MediaDifference[] {
@@ -1399,7 +1479,7 @@ struct Index {
     Button(label + ' ' + this.mediaRows(category).length).fontSize(12).layoutWeight(1)
       .backgroundColor(this.mediaCategory === category ? $r('app.color.showly_accent') : $r('app.color.showly_muted_surface'))
       .fontColor(this.mediaCategory === category ? $r('app.color.showly_on_accent') : $r('app.color.showly_text'))
-      .onClick(() => { this.mediaCategory = category; this.mediaPage = 1; })
+      .onClick(() => { this.mediaCategory = category; this.mediaPage = 1; this.mediaSelected = undefined; })
   }
 
   @Builder
@@ -1407,7 +1487,7 @@ struct Index {
     Column({ space: 10 }) {
       Text('电影与待看差异预览').fontSize(22).fontWeight(FontWeight.Bold).width('100%')
       Text(this.migrationStatus).fontSize(12).width('100%')
-      Text('仅比较明确本机操作与云端快照；旧记录未知、云端独有和撤销冲突均不视作删除。')
+      Text('只比较明确本机操作。电影与待看仅支持逐条手动确认；旧记录、云端独有记录不自动写入或删除。')
         .fontSize(12).width('100%')
       if (!this.syncBound || !this.syncAccount || !traktAuth.isCurrent(this.clientId, this.syncAccount.generation)) {
         Text('请先在上方验证并绑定同步账户。').fontSize(13).width('100%')
@@ -1416,6 +1496,16 @@ struct Index {
           .enabled(this.ready && !this.syncBusy && !this.saving && !this.localBusy && !this.cloudBusy && !this.authBusy && !this.setupBusy)
           .onClick(() => { this.loadMediaPreview(); })
         Text(this.mediaPreviewStatus).fontSize(13).width('100%')
+        if (this.mediaSyncStatus) { Text(this.mediaSyncStatus).fontSize(13).width('100%') }
+        Button(this.showMediaLogs ? '收起电影与待看日志' : '查看电影与待看日志')
+          .onClick(() => { this.showMediaLogs = !this.showMediaLogs; if (this.showMediaLogs) { this.refreshMediaLogs(); } })
+        if (this.showMediaLogs) {
+          Text('最近操作（最多 12 条）').fontSize(14).width('100%')
+          if (!this.mediaLogs.length) { Text('暂无操作').fontSize(12) }
+          ForEach(this.mediaLogs, (log: string, index: number) => {
+            Text(log).fontSize(12).width('100%')
+          }, (log: string, index: number) => index.toString() + log)
+        }
         if (this.mediaPreview && this.mediaPreview.account.uuid === this.syncAccount.uuid &&
             traktAuth.isCurrent(this.clientId, this.mediaPreview.account.generation)) {
           Text('云端电影已看 ' + this.mediaPreview.watchedCount + ' 部 · 待看电影/剧集 ' +
@@ -1425,11 +1515,11 @@ struct Index {
             Button('电影观看').layoutWeight(1)
               .backgroundColor(this.mediaDomain === 'movie' ? $r('app.color.showly_accent') : $r('app.color.showly_muted_surface'))
               .fontColor(this.mediaDomain === 'movie' ? $r('app.color.showly_on_accent') : $r('app.color.showly_text'))
-              .onClick(() => { this.mediaDomain = 'movie'; this.mediaPage = 1; })
+              .onClick(() => { this.mediaDomain = 'movie'; this.mediaPage = 1; this.mediaSelected = undefined; })
             Button('待看清单').layoutWeight(1)
               .backgroundColor(this.mediaDomain === 'watchlist' ? $r('app.color.showly_accent') : $r('app.color.showly_muted_surface'))
               .fontColor(this.mediaDomain === 'watchlist' ? $r('app.color.showly_on_accent') : $r('app.color.showly_text'))
-              .onClick(() => { this.mediaDomain = 'watchlist'; this.mediaPage = 1; })
+              .onClick(() => { this.mediaDomain = 'watchlist'; this.mediaPage = 1; this.mediaSelected = undefined; })
           }.width('100%')
           Row({ space: 4 }) {
             this.mediaCategoryButton('新增', 'addition')
@@ -1446,12 +1536,38 @@ struct Index {
               Text(row.title + ' · ' + row.id).fontSize(14).width('100%')
               Text('本机 ' + this.localIntentLabel(row.local) + ' / 云端 ' + (row.remote ? '存在' : '不存在'))
                 .fontSize(12).width('100%')
+              if (row.operationNote) { Text(row.operationNote).fontSize(12).width('100%') }
+              if (row.operation) {
+                Button(this.mediaOperationLabel(row)).fontSize(12)
+                  .enabled(!this.syncBusy && !this.saving && !this.cloudBusy && !this.authBusy && !this.setupBusy)
+                  .onClick(() => { this.selectMediaOperation(row); })
+              }
+              if (this.mediaSelected?.id === row.id && this.mediaSelected?.domain === row.domain) {
+                Text('确认：' + this.mediaOperationLabel(row) + ' · ' + row.title)
+                  .fontSize(14).width('100%')
+                Text('目标账户：上方已验证的 Trakt 账户。只处理此条记录。').fontSize(12).width('100%')
+                if (row.domain === 'movie' && row.operation === 'add') {
+                  Text('仅在确实已观看时确认。本次观看时间使用确认准备时间：' + new Date(this.mediaWatchTime).toLocaleString() +
+                    '。Trakt 可能自动移出云端待看；本机待看不改变，也不会自动补加。')
+                    .fontSize(12).width('100%')
+                }
+                if (row.operation === 'remove') {
+                  Text(row.domain === 'movie' ? '只删除本应用确认的单次历史 ID；多次观看或凭证不符时拒绝。' :
+                    '仅移出指定电影或剧集的云端待看，不删除观看历史。').fontSize(12).width('100%')
+                }
+                if (row.operation === 'reconcile') { Text('仅发送 GET 核对，不执行新增或删除。').fontSize(12).width('100%') }
+                Row({ space: 8 }) {
+                  Button('取消').layoutWeight(1).onClick(() => { this.mediaSelected = undefined; this.mediaWatchTime = ''; })
+                  Button('确认执行').layoutWeight(1).enabled(!this.syncBusy && !this.saving && !this.cloudBusy && !this.authBusy && !this.setupBusy)
+                    .onClick(() => { this.confirmMediaOperation(); })
+                }.width('100%')
+              }
             }.width('100%').padding(10).borderRadius(8).backgroundColor($r('app.color.showly_muted_surface'))
           }, (row: MediaDifference) => row.domain + ':' + row.id)
           Row({ space: 8 }) {
-            Button('上一页').layoutWeight(1).enabled(this.mediaPage > 1).onClick(() => { this.mediaPage--; })
+            Button('上一页').layoutWeight(1).enabled(this.mediaPage > 1).onClick(() => { this.mediaPage--; this.mediaSelected = undefined; })
             Text(this.mediaPage + ' / ' + this.mediaPages()).fontSize(13)
-            Button('下一页').layoutWeight(1).enabled(this.mediaPage < this.mediaPages()).onClick(() => { this.mediaPage++; })
+            Button('下一页').layoutWeight(1).enabled(this.mediaPage < this.mediaPages()).onClick(() => { this.mediaPage++; this.mediaSelected = undefined; })
           }.width('100%')
         }
       }
