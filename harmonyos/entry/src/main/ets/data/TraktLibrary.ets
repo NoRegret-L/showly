@@ -8,6 +8,7 @@ interface Ids {
 interface Title {
   title: string;
   year?: number;
+  released?: string;
   ids: Ids;
 }
 interface Episode {
@@ -236,4 +237,77 @@ export async function readCloudMedia(session: TraktSession): Promise<CloudMediaS
 export async function readWatchlistKind(session: TraktSession, kind: string): Promise<Media[]> {
   if (kind !== 'movie' && kind !== 'show') { throw new Error('Invalid watchlist kind'); }
   return uniqueTitles(await readAll(session, 'sync/watchlist/' + (kind === 'movie' ? 'movies' : 'shows')), kind, false);
+}
+
+export interface PersonalMovie {
+  media: Media;
+  released: string;
+  cloudWatched: boolean;
+  cloudWatchlist: boolean;
+  localOnly: boolean;
+}
+export interface PersonalMovieSnapshot {
+  generation: number;
+  activity: string;
+  movies: PersonalMovie[];
+}
+
+// Release dates are calendar dates, not UTC instants. Reject rollover dates.
+export function validReleaseDate(value?: string): string {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) { return ''; }
+  const ms = Date.parse(value + 'T00:00:00Z');
+  return Number.isFinite(ms) && new Date(ms).toISOString().substring(0, 10) === value ? value : '';
+}
+
+function appendPersonalMovies(target: Map<string, PersonalMovie>, rows: SyncItem[], watched: boolean): void {
+  const seen: Set<string> = new Set<string>();
+  for (const row of rows) {
+    const media = titleToMedia(row, 'movie', watched);
+    if (seen.has(media.id)) { throw new Error('Duplicate library item; retry'); }
+    seen.add(media.id);
+    const prior = target.get(media.id);
+    const date = validReleaseDate(row.movie?.released);
+    // Conflicting nonempty dates are not silently arbitrated.
+    const released = prior && prior.released && date && prior.released !== date ? '' : (date || prior?.released || '');
+    const item: PersonalMovie = { media: prior?.media ?? media, released: released,
+      cloudWatched: watched || (prior?.cloudWatched ?? false),
+      cloudWatchlist: !watched || (prior?.cloudWatchlist ?? false), localOnly: false };
+    target.set(media.id, item);
+  }
+}
+
+export async function readPersonalMovies(session: TraktSession): Promise<PersonalMovieSnapshot> {
+  const before = await readActivity(session);
+  const watched = await readAll(session, 'sync/watched/movies?extended=full');
+  const watchlist = await readAll(session, 'sync/watchlist/movies?extended=full');
+  const movies: Map<string, PersonalMovie> = new Map<string, PersonalMovie>();
+  appendPersonalMovies(movies, watched, true);
+  appendPersonalMovies(movies, watchlist, false);
+  const after = await readActivity(session);
+  ensureCurrent(session);
+  if (before !== after) { throw new Error('Library changed while reading; retry'); }
+  return { generation: session.generation, activity: after, movies: Array.from(movies.values()) };
+}
+
+// A single explicit lookup for metadata omitted by an embedded list object.
+export async function readPersonalMovieDate(session: TraktSession, media: Media): Promise<string> {
+  if (media.kind !== 'movie' || !/^movie:[1-9][0-9]*$/.test(media.id) ||
+      !Number.isSafeInteger(Number(media.id.substring(6)))) { throw new Error('Invalid movie identity'); }
+  ensureCurrent(session);
+  const req = http.createHttp();
+  try {
+    const res = await req.request('https://api.trakt.tv/movies/' + media.id.substring(6) + '?extended=full', {
+      method: http.RequestMethod.GET,
+      header: { 'Content-Type': 'application/json', 'trakt-api-version': '2',
+        'trakt-api-key': session.clientId, 'Authorization': 'Bearer ' + session.token },
+      expectDataType: http.HttpDataType.STRING
+    });
+    ensureCurrent(session);
+    if (res.responseCode !== 200 || typeof res.result !== 'string') {
+      throw new Error('Trakt summary HTTP ' + res.responseCode);
+    }
+    const title = JSON.parse(res.result) as Title;
+    if (!title.ids || title.ids.trakt !== Number(media.id.substring(6))) { throw new Error('Invalid movie identity'); }
+    return validReleaseDate(title.released);
+  } finally { req.destroy(); }
 }

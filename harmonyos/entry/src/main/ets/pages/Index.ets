@@ -10,6 +10,8 @@ import { checkpointEpisodes, checkpointMedia, adoptEpisodeCloud, adoptMediaCloud
 import { threeWayLabel } from '../model/ThreeWay';
 import { NextShow, readNextShows, sortNextShows } from '../data/NextShows';
 import { CalendarSnapshot, CalendarEntry, readCalendar, calendarWindow } from '../data/TraktCalendar';
+import { PersonalMovie, PersonalMovieSnapshot, readPersonalMovies, readPersonalMovieDate } from '../data/TraktLibrary';
+import { MovieCalendarItem, addLocalMovies, filterMovies, moviePage } from '../data/MovieCalendar';
 import { searchTrakt } from '../data/TraktSearch';
 import { TRAKT_APPS_URL, TRAKT_REDIRECT_URI } from '../config/TraktConfig';
 import { ClientSettings, validateClientId } from '../data/ClientSettings';
@@ -93,6 +95,9 @@ struct Index {
   @State calendarBusy: boolean = false;
   @State calendarStatus: string = '';
   @State calendarData?: CalendarSnapshot = undefined;
+  @State movieCalendarData?: PersonalMovieSnapshot = undefined;
+  @State movieCalendarMode: string = 'future';
+  @State movieCalendarQuery: string = '';
   private calendarRevision: number = 0;
   @State confirmSeason: number = -1;
   @State confirmWatched: boolean = true;
@@ -352,6 +357,7 @@ struct Index {
       const store = await MediaStore.open(context, legacy);
       const records = await store.load();
       this.mediaStore = store;
+      this.invalidateMovieCalendar();
       this.mediaRecords = records;
       this.items = records.map((record: MediaRecord) => record.media);
       this.resetCollection();
@@ -676,6 +682,7 @@ struct Index {
     } finally {
       try {
         const records = await media.load();
+        this.invalidateMovieCalendar();
         this.mediaRecords = records;
         this.items = records.map((record: MediaRecord) => record.media);
         this.migrationStatus = '收藏数据库已就绪 · ' + records.length + ' 部；旧版 Preferences 保留。';
@@ -720,9 +727,9 @@ struct Index {
   updateView() {
     Column({ space: 8 }) {
       Text('版本与更新').fontSize(19).fontWeight(FontWeight.Medium).width('100%')
-      Text('当前版本 ' + APP_VERSION + ' · 未签名个人预览版 · 0.9.3c').fontSize(13)
+      Text('当前版本 ' + APP_VERSION + ' · 未签名个人预览版 · 0.9.3c.1').fontSize(13)
         .fontColor($r('app.color.showly_secondary')).width('100%')
-      Text('v0.9.3c 本机追剧进度与个人日历版。').fontSize(12).width('100%')
+      Text('v0.9.3c.1 个人电影上映日历修复版。').fontSize(12).width('100%')
       Button('查看功能审计与验收计划').onClick(() => { this.openFeatureAudit(); })
       Button(this.updateBusy ? '检查中…' : '检查更新').enabled(!this.updateBusy)
         .onClick(() => { this.checkAppUpdate(); })
@@ -1365,6 +1372,7 @@ struct Index {
     this.threeWayStatus = '正在校验所选电影或待看条目的最新云端状态…';
     try {
       const records = await adoptMediaCloud(store, binding, session, preview, row);
+      this.invalidateMovieCalendar();
       this.mediaRecords = records;
       this.items = records.map((record: MediaRecord) => record.media);
       this.resetCollection();
@@ -1373,6 +1381,7 @@ struct Index {
       this.threeWayStatus = '采用云端状态未确认：' + safeSyncError(error as Error) + '；请重新生成预览。';
       try {
         const records = await store.load();
+        this.invalidateMovieCalendar();
         this.mediaRecords = records;
         this.items = records.map((record: MediaRecord) => record.media);
         this.resetCollection();
@@ -1696,6 +1705,7 @@ struct Index {
     this.mediaPage = 1;
     try {
       const verified = await store.save(records);
+      this.invalidateMovieCalendar();
       this.mediaRecords = verified;
       this.items = verified.map((record: MediaRecord) => record.media);
       this.resetCollection();
@@ -1845,6 +1855,7 @@ struct Index {
       });
       this.mediaSyncStatus = result.message;
       this.syncPreview = undefined;
+      this.invalidateMovieCalendar();
       this.cloud = undefined;
       this.cloudStatus = '电影/待看操作已结束；云端清单请重新读取。';
       if (this.collectionFilter === 'tracking') { this.resetCollection(); }
@@ -2273,8 +2284,19 @@ struct Index {
     return this.nextFiltered().slice((this.nextPage - 1) * this.collectionPageSize, this.nextPage * this.collectionPageSize);
   }
 
+  private invalidateMovieCalendar(): void {
+    this.movieCalendarData = undefined;
+    if (this.calendarKind === 'movie') {
+      ++this.calendarRevision;
+      this.calendarBusy = false;
+      this.calendarPage = 1;
+      this.calendarStatus = '个人电影库已变化，请刷新日历。';
+    }
+  }
+
   private resetCalendar(): void {
     ++this.calendarRevision;
+    this.movieCalendarData = undefined;
     this.calendarData = undefined;
     this.calendarBusy = false;
     this.calendarPage = 1;
@@ -2293,6 +2315,15 @@ struct Index {
     this.calendarPage = 1;
     this.calendarStatus = '正在读取 Trakt 个人日历…';
     try {
+      if (kind === 'movie') {
+        this.movieCalendarData = undefined;
+        const personal = await readPersonalMovies(session);
+        if (revision !== this.calendarRevision || this.calendarKind !== kind ||
+            !this.signedIn || !traktAuth.isCurrent(this.clientId, session.generation)) { return; }
+        this.movieCalendarData = addLocalMovies(personal, this.mediaRecords);
+        this.calendarStatus = '已读取个人电影库，共 ' + this.movieCalendarData.movies.length + ' 部。';
+        return;
+      }
       const result = await readCalendar(session, kind, week);
       if (revision !== this.calendarRevision || this.calendarKind !== kind || this.calendarWeek !== week ||
           !this.signedIn || !traktAuth.isCurrent(this.clientId, session.generation)) { return; }
@@ -2312,6 +2343,7 @@ struct Index {
   }
 
   private calendarCurrent(): boolean {
+    if (this.calendarKind === 'movie') { return this.movieCalendarCurrent(); }
     return !!this.calendarData && this.signedIn &&
       traktAuth.isCurrent(this.clientId, this.calendarData.generation) &&
       this.calendarData.window.from === calendarWindow(new Date(), this.calendarWeek).from &&
@@ -2330,10 +2362,15 @@ struct Index {
 
   private changeCalendar(kind: string, week: number): void {
     if (this.calendarBusy) { return; }
-    this.resetCalendar();
+    ++this.calendarRevision;
+    this.calendarData = undefined;
+    this.calendarPage = 1;
+    this.calendarStatus = '';
     this.calendarKind = kind;
     this.calendarWeek = week;
-    this.loadCalendar();
+    if (kind === 'movie' && this.movieCalendarCurrent()) {
+      this.calendarStatus = '已读取个人电影库，共 ' + (this.movieCalendarData?.movies.length ?? 0) + ' 部。';
+    } else { this.loadCalendar(); }
   }
 
   private chooseProgressMode(mode: string): void {
@@ -2413,11 +2450,115 @@ struct Index {
     }.width('100%')
   }
 
+  private movieCalendarCurrent(): boolean {
+    return !!this.movieCalendarData && this.signedIn &&
+      traktAuth.isCurrent(this.clientId, this.movieCalendarData.generation);
+  }
+
+  private movieRows(mode: string = this.movieCalendarMode, query: string = this.movieCalendarQuery): PersonalMovie[] {
+    if (!this.movieCalendarCurrent()) { return []; }
+    return filterMovies(this.movieCalendarData?.movies ?? [], mode, query, new Date());
+  }
+
+  private moviePages(): number {
+    return Math.max(1, Math.ceil(this.movieRows().length / this.collectionPageSize));
+  }
+
+  private movieSlice(): MovieCalendarItem[] {
+    return moviePage(this.movieRows(), (this.calendarPage - 1) * this.collectionPageSize, this.collectionPageSize, new Date());
+  }
+
+  private async lookupMovieDate(row: PersonalMovie): Promise<void> {
+    const snapshot = this.movieCalendarData;
+    const session = traktAuth.session(this.clientId);
+    if (!snapshot || !session || !this.movieCalendarCurrent() || this.calendarBusy || this.syncBusy ||
+        this.authBusy || this.setupBusy || row.released || !snapshot.movies.some((item: PersonalMovie) => item.media.id === row.media.id)) { return; }
+    const revision = ++this.calendarRevision;
+    this.calendarBusy = true;
+    this.calendarStatus = '正在补查电影上映日期…';
+    try {
+      const date = await readPersonalMovieDate(session, row.media);
+      if (revision !== this.calendarRevision || !this.movieCalendarCurrent() || this.movieCalendarData !== snapshot) { return; }
+      this.movieCalendarData = { generation: snapshot.generation, activity: snapshot.activity,
+        movies: snapshot.movies.map((item: PersonalMovie): PersonalMovie => item.media.id === row.media.id ?
+          { media: item.media, released: date, cloudWatched: item.cloudWatched, cloudWatchlist: item.cloudWatchlist,
+            localOnly: item.localOnly } : item) };
+      this.calendarPage = 1;
+      this.calendarStatus = date ? '已补查到 ' + row.media.title + ' 的上映日期：' + date + '。' :
+        'Trakt 仍未提供该电影的有效上映日期。';
+    } catch (error) {
+      if (revision === this.calendarRevision) { this.calendarStatus = '日期补查失败：' + safeSyncError(error as Error); }
+    } finally { if (revision === this.calendarRevision) { this.calendarBusy = false; } }
+  }
+
+  @Builder
+  movieModeButton(label: string, mode: string) {
+    Button(label + ' ' + this.movieRows(mode, '').length).layoutWeight(1).fontSize(12)
+      .backgroundColor(this.movieCalendarMode === mode ? $r('app.color.showly_accent') : $r('app.color.showly_muted_surface'))
+      .fontColor(this.movieCalendarMode === mode ? $r('app.color.showly_on_accent') : $r('app.color.showly_text'))
+      .onClick(() => { this.movieCalendarMode = mode; this.calendarPage = 1; })
+  }
+
+  @Builder
+  personalMovieCalendarView() {
+    Column({ space: 10 }) {
+      Text('个人已看及待看电影；不限制未来日期。另含本机明确标记的电影。仅展示 Trakt 上映日期，不代表当地影院排期。')
+        .fontSize(12).width('100%')
+      if (!this.signedIn) {
+        Text('登录 Trakt 后读取个人电影库。').fontSize(13).width('100%')
+        Button('连接 Trakt').onClick(() => { this.navigate('account'); })
+      } else {
+        Button(this.calendarBusy ? '读取中…' : '刷新个人电影日历')
+          .enabled(!this.calendarBusy && !this.authBusy && !this.syncBusy && !this.setupBusy)
+          .onClick(() => { this.loadCalendar(); })
+        if (this.calendarStatus) { Text(this.calendarStatus).fontSize(13).width('100%') }
+        if (this.movieCalendarCurrent()) {
+          Row({ space: 4 }) {
+            this.movieModeButton('即将上映', 'future')
+            this.movieModeButton('已上映', 'past')
+            this.movieModeButton('日期待确认', 'unknown')
+          }.width('100%')
+          TextInput({ placeholder: '筛选电影片名或上映日期', text: this.movieCalendarQuery })
+            .onChange((value: string) => { this.movieCalendarQuery = value; this.calendarPage = 1; })
+          if (!this.movieRows().length) {
+            Text('此分类暂无电影，可切换已上映或日期待确认。').fontSize(13).width('100%')
+          }
+          ForEach(this.movieSlice(), (row: MovieCalendarItem) => {
+            Column({ space: 6 }) {
+              if (row.heading) { Text(row.group).fontSize(18).fontWeight(FontWeight.Bold).width('100%') }
+              Column({ space: 6 }) {
+                Text(row.movie.released || '上映日期待确认').fontSize(13)
+                  .fontColor($r('app.color.showly_secondary')).width('100%')
+                Text(row.movie.media.title).fontSize(17).fontWeight(FontWeight.Medium).width('100%')
+                Text(row.movie.localOnly ? '仅本机明确标记' : row.movie.cloudWatched && row.movie.cloudWatchlist ?
+                  '云端已看 · 云端待看' : row.movie.cloudWatched ? '云端已看' : '云端待看')
+                  .fontSize(12).width('100%')
+                Row({ space: 8 }) {
+                  Button('查看详情').fontSize(12).layoutWeight(1).enabled(!this.detailBusy && !this.localBusy && !this.syncBusy)
+                    .onClick(() => { this.openDetail(row.movie.media); })
+                  if (!row.movie.released) {
+                    Button('补查日期').fontSize(12).layoutWeight(1).enabled(!this.calendarBusy && !this.syncBusy)
+                      .onClick(() => { this.lookupMovieDate(row.movie); })
+                  }
+                }.width('100%')
+              }.padding(12).width('100%').borderRadius(10).backgroundColor($r('app.color.showly_surface'))
+            }.width('100%')
+          }, (row: MovieCalendarItem) => row.movie.media.id + ':' + row.movie.released + ':' + row.group + ':' + row.heading)
+          Row({ space: 8 }) {
+            Button('上一页').layoutWeight(1).enabled(this.calendarPage > 1).onClick(() => { this.calendarPage--; })
+            Text(this.calendarPage + ' / ' + this.moviePages()).fontSize(13)
+            Button('下一页').layoutWeight(1).enabled(this.calendarPage < this.moviePages()).onClick(() => { this.calendarPage++; })
+          }.width('100%')
+        }
+      }
+    }.width('100%')
+  }
+
   @Builder
   calendarView() {
     Column({ space: 10 }) {
       Text('个人更新与上映日历').fontSize(21).fontWeight(FontWeight.Medium).width('100%')
-      Text('使用 Trakt 个人日历，不是全站上映表。剧集播出时间按设备时区显示；电影仅显示 Trakt 提供的上映日期，不代表本地影院排期。')
+      Text('剧集使用 Trakt 个人日历，电影使用个人已看与待看电影库的上映日期。均不是全站上映表。')
         .fontSize(12).width('100%')
       Row({ space: 6 }) {
         Button('剧集更新').layoutWeight(1).fontSize(13).enabled(!this.calendarBusy)
@@ -2429,43 +2570,47 @@ struct Index {
           .fontColor(this.calendarKind === 'movie' ? $r('app.color.showly_on_accent') : $r('app.color.showly_text'))
           .onClick(() => { this.changeCalendar('movie', this.calendarWeek); })
       }.width('100%')
-      Text(this.calendarRangeLabel()).fontSize(15).width('100%')
-      Row({ space: 4 }) {
-        Button('前七天').layoutWeight(1).fontSize(12).enabled(!this.calendarBusy && this.calendarWeek > -1)
-          .onClick(() => { this.changeCalendar(this.calendarKind, this.calendarWeek - 1); })
-        Button('今天起').layoutWeight(1).fontSize(12).enabled(!this.calendarBusy)
-          .onClick(() => { this.changeCalendar(this.calendarKind, 0); })
-        Button('后七天').layoutWeight(1).fontSize(12).enabled(!this.calendarBusy && this.calendarWeek < 1)
-          .onClick(() => { this.changeCalendar(this.calendarKind, this.calendarWeek + 1); })
-      }.width('100%')
-      if (!this.signedIn) {
-        Text('登录 Trakt 后读取个人日历。').fontSize(13).width('100%')
-        Button('连接 Trakt').onClick(() => { this.navigate('account'); })
+      if (this.calendarKind === 'movie') {
+        this.personalMovieCalendarView()
       } else {
-        Button(this.calendarBusy ? '读取中…' : '刷新日历').enabled(!this.calendarBusy && !this.authBusy && !this.syncBusy && !this.setupBusy)
-          .onClick(() => { this.loadCalendar(); })
-        if (this.calendarStatus) { Text(this.calendarStatus).fontSize(13).width('100%') }
-        if (this.calendarCurrent()) {
-          ForEach(this.calendarSlice(), (row: CalendarEntry) => {
-            Column({ space: 6 }) {
-              Text(row.day + (row.time ? ' · ' + row.time : ' · 上映日期')).fontSize(13)
-                .fontColor($r('app.color.showly_secondary')).width('100%')
-              Text(row.media.title).fontSize(17).fontWeight(FontWeight.Medium).width('100%')
-              if (row.media.kind === 'show') {
-                Text('S' + row.season + 'E' + row.number + (row.episodeTitle ? ' · ' + row.episodeTitle : ''))
-                  .fontSize(14).width('100%')
-              }
-              Button('查看详情').fontSize(12).enabled(!this.detailBusy && !this.localBusy && !this.syncBusy)
-                .onClick(() => { this.openDetail(row.media, false, row.season); })
-            }.padding(12).width('100%').borderRadius(10).backgroundColor($r('app.color.showly_surface'))
-          }, (row: CalendarEntry) => row.key)
-          Row({ space: 8 }) {
-            Button('上一页').layoutWeight(1).enabled(this.calendarPage > 1).onClick(() => { this.calendarPage--; })
-            Text(this.calendarPage + ' / ' + this.calendarPages()).fontSize(13)
-            Button('下一页').layoutWeight(1).enabled(this.calendarPage < this.calendarPages()).onClick(() => { this.calendarPage++; })
-          }.width('100%')
-        } else if (this.calendarData) {
-          Text('会话或当地日期已变化，请刷新日历。').fontSize(12).width('100%')
+        Text(this.calendarRangeLabel()).fontSize(15).width('100%')
+        Row({ space: 4 }) {
+          Button('前七天').layoutWeight(1).fontSize(12).enabled(!this.calendarBusy && this.calendarWeek > -1)
+            .onClick(() => { this.changeCalendar(this.calendarKind, this.calendarWeek - 1); })
+          Button('今天起').layoutWeight(1).fontSize(12).enabled(!this.calendarBusy)
+            .onClick(() => { this.changeCalendar(this.calendarKind, 0); })
+          Button('后七天').layoutWeight(1).fontSize(12).enabled(!this.calendarBusy && this.calendarWeek < 1)
+            .onClick(() => { this.changeCalendar(this.calendarKind, this.calendarWeek + 1); })
+        }.width('100%')
+        if (!this.signedIn) {
+          Text('登录 Trakt 后读取个人日历。').fontSize(13).width('100%')
+          Button('连接 Trakt').onClick(() => { this.navigate('account'); })
+        } else {
+          Button(this.calendarBusy ? '读取中…' : '刷新日历').enabled(!this.calendarBusy && !this.authBusy && !this.syncBusy && !this.setupBusy)
+            .onClick(() => { this.loadCalendar(); })
+          if (this.calendarStatus) { Text(this.calendarStatus).fontSize(13).width('100%') }
+          if (this.calendarCurrent()) {
+            ForEach(this.calendarSlice(), (row: CalendarEntry) => {
+              Column({ space: 6 }) {
+                Text(row.day + (row.time ? ' · ' + row.time : ' · 上映日期')).fontSize(13)
+                  .fontColor($r('app.color.showly_secondary')).width('100%')
+                Text(row.media.title).fontSize(17).fontWeight(FontWeight.Medium).width('100%')
+                if (row.media.kind === 'show') {
+                  Text('S' + row.season + 'E' + row.number + (row.episodeTitle ? ' · ' + row.episodeTitle : ''))
+                    .fontSize(14).width('100%')
+                }
+                Button('查看详情').fontSize(12).enabled(!this.detailBusy && !this.localBusy && !this.syncBusy)
+                  .onClick(() => { this.openDetail(row.media, false, row.season); })
+              }.padding(12).width('100%').borderRadius(10).backgroundColor($r('app.color.showly_surface'))
+            }, (row: CalendarEntry) => row.key)
+            Row({ space: 8 }) {
+              Button('上一页').layoutWeight(1).enabled(this.calendarPage > 1).onClick(() => { this.calendarPage--; })
+              Text(this.calendarPage + ' / ' + this.calendarPages()).fontSize(13)
+              Button('下一页').layoutWeight(1).enabled(this.calendarPage < this.calendarPages()).onClick(() => { this.calendarPage++; })
+            }.width('100%')
+          } else if (this.calendarData) {
+            Text('会话或当地日期已变化，请刷新日历。').fontSize(12).width('100%')
+          }
         }
       }
     }.width('100%')
