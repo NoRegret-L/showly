@@ -11,12 +11,23 @@ import { MediaDetail, canReadDetails, readDetails, cachePoster, clearDetailMemor
 import { DiscoverItem, readDiscover } from '../data/TraktDiscover';
 import { EpisodeProgress, SeasonProgress, SeriesProgress, ChineseText, readSeriesProgress, readChinese } from '../data/TraktProgress';
 import { AppearanceStore, applyAppearance } from '../data/AppearanceStore';
+import { EpisodeStore, LocalSeriesState, LocalSeasonState, LocalEpisodeState, fetchEpisodeCatalog } from '../data/EpisodeStore';
 
 @Entry
 @Component
 struct Index {
   @State title: string = '';
   @State tab: string = 'progress';
+  private episodeStore?: EpisodeStore;
+  @State episodeReady: boolean = false;
+  @State episodeInitStatus: string = '';
+  @State localSeries?: LocalSeriesState = undefined;
+  @State localSeason: number = -1;
+  @State localBusy: boolean = false;
+  @State localStatus: string = '';
+  @State localRecent: Media[] = [];
+  @State confirmSeason: number = -1;
+  @State confirmWatched: boolean = true;
   @State themeMode: string = 'system';
   @State themeStatus: string = '';
   @State themeBusy: boolean = false;
@@ -106,12 +117,151 @@ struct Index {
     } catch (error) {
       this.libraryStatus = '本地记录读取失败，已停止写入以保护原数据。';
     }
+    this.initializeEpisodes(context);
   }
 
   onPageShow(): void {
     if (this.clientId && !this.setupBusy && !this.cloudBusy) {
       traktAuth.restore(this.clientId);
     }
+  }
+
+  private async initializeEpisodes(context: common.UIAbilityContext): Promise<void> {
+    try {
+      this.episodeStore = await EpisodeStore.open(context);
+      this.localRecent = await this.episodeStore.recent();
+      this.episodeReady = true;
+    } catch (error) {
+      this.episodeInitStatus = '分集数据库打开失败，已停止分集写入；旧收藏不受影响。';
+    }
+  }
+
+  private async loadLocalEpisodes(item: Media, refresh: boolean = false): Promise<void> {
+    const store = this.episodeStore;
+    if (!store || !this.episodeReady || this.localBusy || item.kind !== 'show') { return; }
+    const revision = this.detailRevision;
+    const clientId = this.clientId;
+    this.localBusy = true;
+    this.localStatus = '读取本机分集记录…';
+    try {
+      let state = await store.read(item.id);
+      if (revision !== this.detailRevision) { return; }
+      if (state) {
+        this.localSeries = state;
+        if (this.localSeason < 0 && state.seasons.length > 0) { this.localSeason = state.seasons[0].number; }
+      }
+      if (refresh && clientId) {
+        const catalog = await fetchEpisodeCatalog(item, clientId);
+        if (revision !== this.detailRevision || this.clientId !== clientId) { return; }
+        await store.saveCatalog(catalog);
+        state = await store.read(item.id);
+      }
+      if (revision === this.detailRevision) {
+        this.localSeries = state;
+        if (state && state.seasons.length > 0 && !state.seasons.some((season: LocalSeasonState) => season.number === this.localSeason)) {
+          this.localSeason = state.seasons[0].number;
+        }
+        this.localStatus = state ? '本机独立记录 · 不会上传 Trakt' : '首次使用请联网下载分集目录';
+      }
+    } catch (error) {
+      if (revision === this.detailRevision) {
+        this.localStatus = '读取或更新失败，保留已有本机记录。';
+      }
+    } finally {
+      this.localBusy = false;
+    }
+  }
+
+  private async markLocal(item: Media, ids: number[], watched: boolean): Promise<void> {
+    const store = this.episodeStore;
+    if (!store || !this.episodeReady || this.localBusy || ids.length === 0) { return; }
+    const revision = this.detailRevision;
+    this.localBusy = true;
+    this.confirmSeason = -1;
+    try {
+      await store.mark(item.id, ids, watched);
+      const state = await store.read(item.id);
+      this.localRecent = await store.recent();
+      if (revision === this.detailRevision) {
+        this.localSeries = state;
+        this.localStatus = '已保存到本机 · 未上传 Trakt';
+      }
+    } catch (error) {
+      if (revision === this.detailRevision) {
+        this.localStatus = '保存或回读失败，请重新读取本机记录确认结果。';
+      }
+    } finally {
+      this.localBusy = false;
+    }
+  }
+
+  @Builder
+  localEpisodesView(item: Media) {
+    Column({ space: 10 }) {
+      Text('本机分集管理').fontSize(20).fontWeight(FontWeight.Medium).width('100%')
+      Text('与下方 Trakt 云端观看状态独立。仅统计已确认播出的普通集；不会自动上传或导入云端记录。')
+        .fontSize(12).fontColor($r('app.color.showly_secondary')).width('100%')
+      if (!this.episodeReady) {
+        Text(this.episodeInitStatus || '正在打开分集数据库…').fontSize(13).width('100%')
+      } else {
+        Row({ space: 8 }) {
+          Button('读取本机').layoutWeight(1).enabled(!this.localBusy)
+            .onClick(() => { this.loadLocalEpisodes(item); })
+          Button('更新分集目录').layoutWeight(1).enabled(!this.localBusy && !!this.clientId)
+            .onClick(() => { this.loadLocalEpisodes(item, true); })
+        }.width('100%')
+        Text(this.localStatus).fontSize(12).width('100%')
+        if (this.localSeries) {
+          Text('本机已看 ' + this.localSeries.completed + ' / ' + this.localSeries.catalog.episodes.length + ' 集')
+            .fontSize(16).width('100%')
+          if (this.localSeries.catalog.episodes.length > 0) {
+            Progress({ value: this.localSeries.completed, total: this.localSeries.catalog.episodes.length,
+              type: ProgressType.Linear }).width('100%').color($r('app.color.showly_accent'))
+            Text(this.localSeries.next ? '下一集：' + this.localSeries.next : '当前目录已看完')
+              .fontSize(14).width('100%')
+          }
+          ForEach(this.localSeries.seasons, (season: LocalSeasonState) => {
+            Column({ space: 8 }) {
+              Button('第 ' + season.number + ' 季 · ' + season.completed + '/' + season.episodes.length +
+                (this.localSeason === season.number ? '  收起' : '  展开')).width('100%').fontSize(14)
+                .onClick(() => { this.localSeason = this.localSeason === season.number ? -1 : season.number; this.confirmSeason = -1; })
+              if (this.localSeason === season.number) {
+                Row({ space: 8 }) {
+                  Button('整季已看').layoutWeight(1).enabled(!this.localBusy && season.completed < season.episodes.length)
+                    .onClick(() => { this.confirmSeason = season.number; this.confirmWatched = true; })
+                  Button('整季撤销').layoutWeight(1).enabled(!this.localBusy && season.completed > 0)
+                    .onClick(() => { this.confirmSeason = season.number; this.confirmWatched = false; })
+                }.width('100%')
+                if (this.confirmSeason === season.number) {
+                  Text(this.confirmWatched ? '确认将本季已播集全部标记已看？' : '确认撤销本季全部本机已看标记？').fontSize(13)
+                  Row({ space: 8 }) {
+                    Button('取消').layoutWeight(1).onClick(() => { this.confirmSeason = -1; })
+                    Button('确认').layoutWeight(1).enabled(!this.localBusy)
+                      .onClick(() => {
+                        this.markLocal(item, season.episodes.filter((ep: LocalEpisodeState) =>
+                          ep.watched !== this.confirmWatched).map((ep: LocalEpisodeState) => ep.episode.id), this.confirmWatched);
+                      })
+                  }.width('100%')
+                }
+                ForEach(season.episodes, (entry: LocalEpisodeState) => {
+                  Row({ space: 8 }) {
+                    Column({ space: 3 }) {
+                      Text('第 ' + entry.episode.number + ' 集').fontSize(14).width('100%')
+                      if (entry.episode.title) {
+                        Text(entry.episode.title).fontSize(12).maxLines(2).width('100%')
+                          .fontColor($r('app.color.showly_secondary'))
+                      }
+                    }.layoutWeight(1)
+                    Button(entry.watched ? '撤销已看' : '标记已看').fontSize(12).enabled(!this.localBusy)
+                      .onClick(() => { this.markLocal(item, [entry.episode.id], !entry.watched); })
+                  }.width('100%')
+                }, (entry: LocalEpisodeState) => entry.episode.id + ':' + entry.watched)
+              }
+            }.width('100%').padding(10).borderRadius(10).backgroundColor($r('app.color.showly_surface'))
+          }, (season: LocalSeasonState) => season.number + ':' + season.completed)
+        }
+      }
+    }.width('100%')
   }
 
   private context(): common.UIAbilityContext {
@@ -511,6 +661,16 @@ struct Index {
   progressView() {
     Column({ space: 12 }) {
       Text('观看进度').fontSize(25).fontWeight(FontWeight.Bold).width('100%')
+      if (this.localRecent.length > 0) {
+        Text('最近本机分集记录').fontSize(18).fontWeight(FontWeight.Medium).width('100%')
+        ForEach(this.localRecent, (item: Media) => {
+          Row() {
+            Text(item.title).layoutWeight(1).fontSize(16)
+            Text('查看 ›').fontSize(13).fontColor($r('app.color.showly_secondary'))
+          }.width('100%').padding(12).backgroundColor($r('app.color.showly_surface')).borderRadius(10)
+            .onClick(() => { this.openDetail(item); })
+        }, (item: Media) => item.id)
+      }
       Text('Trakt 观看记录').fontSize(14).fontColor($r('app.color.showly_secondary')).width('100%')
       if (!this.signedIn && !this.cloudBusy) {
         Text('登录 Trakt 后查看已看剧集与分集进度。').width('100%')
@@ -819,7 +979,7 @@ struct Index {
   @Builder
   seriesProgressView(item: Media) {
     Column({ space: 8 }) {
-      Text('追剧进度').fontSize(20).fontWeight(FontWeight.Medium).width('100%')
+      Text('Trakt 云端分集进度（只读）').fontSize(20).fontWeight(FontWeight.Medium).width('100%')
       Button(this.progressBusy ? '读取中…' : '读取分季分集进度')
         .enabled(this.signedIn && !this.progressBusy && !this.authBusy)
         .onClick(() => { this.loadProgress(item); })
@@ -853,6 +1013,10 @@ struct Index {
 
   private closeDetail(): void {
     this.detailRevision++;
+    this.localSeries = undefined;
+    this.localSeason = -1;
+    this.localStatus = '';
+    this.confirmSeason = -1;
     this.progress = undefined;
     this.progressStatus = '';
     this.seasonNumber = -1;
@@ -879,7 +1043,7 @@ struct Index {
   }
 
   private async openDetail(item: Media, reload: boolean = false): Promise<void> {
-    if (this.detailBusy || this.setupBusy || !this.clientId || !canReadDetails(item)) {
+    if (this.detailBusy || this.localBusy || this.setupBusy || !canReadDetails(item) || (!this.clientId && item.kind !== 'show')) {
       return;
     }
     this.closeDetail();
@@ -890,6 +1054,12 @@ struct Index {
     this.posterUri = '';
     this.detailBusy = true;
     this.detailStatus = '正在读取影视详情…';
+    if (item.kind === 'show') { this.loadLocalEpisodes(item); }
+    if (!clientId) {
+      this.detailStatus = '离线本机详情';
+      this.detailBusy = false;
+      return;
+    }
     try {
       const data = await readDetails(item, clientId, reload);
       if (revision !== this.detailRevision || this.clientId !== clientId) {
@@ -992,7 +1162,11 @@ struct Index {
           .onClick(() => { this.translateDetail(item); })
         Text(this.translationStatus).fontSize(12)
       }
-      if (item.kind === 'show') { this.seriesProgressView(item) }
+      if (item.kind === 'show') {
+        this.localEpisodesView(item)
+        Divider()
+        this.seriesProgressView(item)
+      }
       Text(this.detailStatus).fontSize(13).width('100%')
       if (this.detailStatus) {
         Button('复制海报诊断信息').fontSize(13)
@@ -1106,7 +1280,7 @@ struct Index {
               this.themeButton('深色', 'dark')
             }.width('100%')
             Text(this.themeStatus).fontSize(12)
-            Text('版本 0.7.2').fontSize(12).fontColor($r('app.color.showly_secondary'))
+            Text('版本 0.7.3').fontSize(12).fontColor($r('app.color.showly_secondary'))
             Text('非官方应用，使用 Trakt，但未获 Trakt 认可或认证。')
               .fontSize(12).fontColor($r('app.color.showly_secondary'))
         Text('Trakt 账户').fontSize(20).fontWeight(FontWeight.Medium)
