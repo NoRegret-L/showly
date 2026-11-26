@@ -19,6 +19,7 @@ interface Season {
   episodes: Episode[];
 }
 interface SyncItem {
+  plays?: number;
   movie?: Title;
   show?: Title;
   seasons?: Season[];
@@ -206,4 +207,27 @@ export function mergeNewTitles(local: Media[], cloud: CloudLibrary): Media[] {
     }
   }
   return result;
+}
+
+export interface CloudMediaSnapshot {
+  generation: number;
+  activity: string;
+  watchedMovies: Media[];
+  watchlist: Media[];
+}
+
+// No show history fetch: the title-level preview needs just three collections.
+export async function readCloudMedia(session: TraktSession): Promise<CloudMediaSnapshot> {
+  const before = await readActivity(session);
+  const watched = await readAll(session, 'sync/watched/movies');
+  if (watched.some((row: SyncItem) => typeof row.plays !== 'number' ||
+    !Number.isSafeInteger(row.plays) || row.plays <= 0)) { throw new Error('Invalid movie plays'); }
+  const movies = uniqueTitles(watched, 'movie', true);
+  const queueMovies = uniqueTitles(await readAll(session, 'sync/watchlist/movies'), 'movie', false);
+  const queueShows = uniqueTitles(await readAll(session, 'sync/watchlist/shows'), 'show', false);
+  const after = await readActivity(session);
+  ensureCurrent(session);
+  if (before !== after) { throw new Error('Cloud changed during media preview'); }
+  return { generation: session.generation, activity: after, watchedMovies: movies,
+    watchlist: [...queueMovies, ...queueShows] };
 }
