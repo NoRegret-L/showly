@@ -32,6 +32,7 @@ export interface MediaDetail {
   airedEpisodes: number;
   posterUrls: string[];
 }
+let posterWriteSequence: number = 0;
 const summaries: Map<string, MediaDetail> = new Map<string, MediaDetail>();
 
 export function canReadDetails(item: Media): boolean {
@@ -54,7 +55,7 @@ export async function readDetails(item: Media, clientId: string, reload: boolean
     const response = await request.request('https://api.trakt.tv/' +
       (item.kind === 'show' ? 'shows/' : 'movies/') + id + '?extended=full', {
       method: http.RequestMethod.GET,
-      header: { 'Content-Type': 'application/json', 'trakt-api-version': '2', 'trakt-api-key': clientId, 'User-Agent': 'Showly-HarmonyOS-Personal/0.6.2' },
+      header: { 'Content-Type': 'application/json', 'trakt-api-version': '2', 'trakt-api-key': clientId, 'User-Agent': 'Showly-HarmonyOS-Personal/0.7.0' },
       expectDataType: http.HttpDataType.STRING
     });
     if (response.responseCode !== 200 || typeof response.result !== 'string') {
@@ -177,12 +178,12 @@ export async function cachePoster(cacheDir: string, item: Media, candidates: str
     // Cache miss; download below.
   }
   const request = http.createHttp();
-  const temp = path + '.part';
+  const temp = path + '.' + Date.now() + '.' + (++posterWriteSequence) + '.part';
   let response: http.HttpResponse;
   try {
     response = await request.request(url, {
       method: http.RequestMethod.GET,
-      header: { 'User-Agent': 'Showly-HarmonyOS-Personal/0.6.2', 'Accept': 'image/webp' },
+      header: { 'User-Agent': 'Showly-HarmonyOS-Personal/0.7.0', 'Accept': 'image/webp' },
       expectDataType: http.HttpDataType.ARRAY_BUFFER
     });
   } catch (error) {

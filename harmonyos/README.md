@@ -1,4 +1,4 @@
-# Showly HarmonyOS Preview v0.6.2
+# Showly HarmonyOS Preview v0.7.0
 
 Unofficial native ArkTS prototype, not a complete Showly port. Your app uses Trakt but is not endorsed or certified by Trakt.
 
@@ -46,3 +46,9 @@ The app distinguishes absent API artwork, rejected URL shape, DNS/connect/timeou
 
 Device diagnostics from v0.6.1 confirmed rejection before any CDN request. The URL validator now accepts HTTPS (including protocol-relative and bare host variants), case-insensitive Trakt subdomains, safe variable paths under /images/, and ordinary image paths on known Trakt media/walter CDN hosts. Optional query parameters are preserved on download but excluded from cache filenames and diagnostics. Host boundaries, traversal rejection, actual WebP signature checks, and local caching remain. If rejected, diagnostics show a sanitized address without query, fragment, or embedded credentials. No external hosts, proxy, HTTP downgrade or TLS bypass. The exact rejected URL from the original device is not yet known. Evaluated 16 URL examples (including malformed hosts, traversal, old and new CDN formats) against the equivalent JavaScript validator; ArkTS build and live device check pending.
 References: https://developer.trakt.tv/docs/images ; https://docs.cantinarr.com/reference/generated/api/discover-media-user/ .
+
+## v0.7.0 discovery grid (first UI migration)
+
+References upstream bottom_navigation_menu.xml, fragment_discover.xml, TraktMoviesService.kt and TraktShowsService.kt. Native discovery tab supports movie/show trending, popular and anticipated charts; the existing four destinations remain available. Uses the Standard Trakt API, extended=full and explicit pages of 12 (two columns × six rows). No per-card summary call. Download sequentially into the existing local WebP cache, only on requested pages. Revision/client checks discard obsolete responses; local records and auth schema unchanged. Concurrent detail/discovery downloads have separate temporary filenames. Grid is bounded rather than a full lazy collection; no new image library dependency. Missing images leave usable title cards. No personalized recommendations, full library poster grid, episode management, system theme overhaul or cloud writes yet.
+Device tests: movie/show modes, all three charts, previous/next page, quick mode changes, opening detail while posters load, back navigation, offline behavior, and upgrading with previous credentials/library.
+References: https://developer.trakt.tv/docs/images ; https://developer.trakt.tv/docs/pagination ; https://github.com/trakt/showly .

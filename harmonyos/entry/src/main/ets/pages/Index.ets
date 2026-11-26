@@ -8,12 +8,21 @@ import { pasteboard } from '@kit.BasicServicesKit';
 import { traktAuth } from '../data/TraktAuth';
 import { CloudLibrary, ShowProgress, readCloudLibrary, mergeNewTitles } from '../data/TraktLibrary';
 import { MediaDetail, canReadDetails, readDetails, cachePoster, clearDetailMemory } from '../data/TraktDetails';
+import { DiscoverItem, readDiscover } from '../data/TraktDiscover';
 
 @Entry
 @Component
 struct Index {
   @State title: string = '';
   @State tab: string = 'library';
+  @State discoverKind: string = 'movie';
+  @State discoverMode: string = 'trending';
+  @State discoverItems: DiscoverItem[] = [];
+  @State discoverPage: number = 1;
+  @State discoverPages: number = 0;
+  @State discoverBusy: boolean = false;
+  @State discoverStatus: string = '';
+  private discoverRevision: number = 0;
   @State selectedMedia?: Media = undefined;
   @State detail?: MediaDetail = undefined;
   @State detailBusy: boolean = false;
@@ -118,6 +127,7 @@ struct Index {
         }
         await this.settings.save(next);
         this.clientId = next;
+        this.resetDiscover();
         clearDetailMemory();
         this.closeDetail();
         this.results = [];
@@ -147,6 +157,7 @@ struct Index {
       }
       await this.settings.save('');
       this.clientId = '';
+      this.resetDiscover();
       clearDetailMemory();
       this.closeDetail();
       this.clearCloud();
@@ -262,6 +273,155 @@ struct Index {
     }
   }
 
+  private resetDiscover(): void {
+    ++this.discoverRevision;
+    this.discoverItems = [];
+    this.discoverPage = 1;
+    this.discoverPages = 0;
+    this.discoverBusy = false;
+    this.discoverStatus = '';
+  }
+
+  private async loadDiscover(page: number = 1): Promise<void> {
+    if (this.discoverBusy || this.setupBusy || !this.clientId || page < 1) {
+      return;
+    }
+    const revision = ++this.discoverRevision;
+    const clientId = this.clientId;
+    this.discoverBusy = true;
+    this.discoverStatus = '正在读取影视榜单…';
+    try {
+      const result = await readDiscover(clientId, this.discoverKind, this.discoverMode, page);
+      if (revision !== this.discoverRevision || clientId !== this.clientId) {
+        return;
+      }
+      this.discoverItems = result.items;
+      this.discoverPage = result.page;
+      this.discoverPages = result.pages;
+      this.discoverStatus = result.items.length === 0 ? '没有影视结果' : '正在加载本页海报…';
+      const dir = this.context().cacheDir;
+      // The list already carries artwork: no per-title summary API fan-out.
+      // Download one image at a time, only for the requested page.
+      let missing = 0;
+      for (const item of result.items) {
+        if (revision !== this.discoverRevision || clientId !== this.clientId || this.tab !== 'discover') {
+          return;
+        }
+        let uri = '';
+        try {
+          const poster = await cachePoster(dir, item.media, item.posterUrls);
+          uri = poster.uri;
+        } catch (error) {
+          // One missing image must not remove the media card.
+        }
+        if (revision !== this.discoverRevision || clientId !== this.clientId) {
+          return;
+        }
+        if (!uri) {
+          missing++;
+        }
+        const loaded: DiscoverItem = { media: item.media, posterUrls: item.posterUrls,
+          posterUri: uri, rating: item.rating };
+        this.discoverItems = this.discoverItems.map((old: DiscoverItem) =>
+          old.media.id === item.media.id ? loaded : old);
+      }
+      this.discoverStatus = result.items.length === 0 ? '没有影视结果' :
+        (missing > 0 ? '已加载本页；' + missing + ' 张海报暂不可用' : '已加载本页海报');
+    } catch (error) {
+      if (revision === this.discoverRevision) {
+        this.discoverStatus = '榜单读取失败，请检查网络、API 权限或调用限额后重试。';
+      }
+    } finally {
+      if (revision === this.discoverRevision) {
+        this.discoverBusy = false;
+      }
+    }
+  }
+
+  private changeDiscover(kind: string, mode: string): void {
+    if (kind === this.discoverKind && mode === this.discoverMode) {
+      return;
+    }
+    this.resetDiscover();
+    this.discoverKind = kind;
+    this.discoverMode = mode;
+    this.loadDiscover();
+  }
+
+  @Builder
+  discoverCard(item: DiscoverItem) {
+    Column({ space: 6 }) {
+      if (item.posterUri) {
+        Image(item.posterUri).width('100%').aspectRatio(0.667)
+          .objectFit(ImageFit.Cover).borderRadius(10)
+      } else {
+        Column() {
+          Text('海报').fontColor('#687887').fontSize(14)
+        }.width('100%').aspectRatio(0.667)
+          .justifyContent(FlexAlign.Center).backgroundColor('#E8EDF4').borderRadius(10)
+      }
+      Text(item.media.title).fontSize(15).fontWeight(FontWeight.Medium)
+        .maxLines(2).textOverflow({ overflow: TextOverflow.Ellipsis }).width('100%')
+      Text((item.media.year > 0 ? item.media.year.toString() : '年份未知') +
+        (item.rating > 0 ? ' · ★ ' + item.rating.toFixed(1) : ''))
+        .fontSize(12).fontColor('#687887').width('100%')
+    }.width('48%').padding({ bottom: 12 })
+      .onClick(() => { this.openDetail(item.media); })
+  }
+
+  @Builder
+  discoverView() {
+    Column({ space: 12 }) {
+      Text('发现').fontSize(25).fontWeight(FontWeight.Bold).width('100%')
+      if (!this.clientId) {
+        Text('请先在账户页配置自己的 Trakt Client ID。').fontSize(14)
+        Button('前往账户').onClick(() => { this.tab = 'account'; })
+      } else {
+        Row({ space: 8 }) {
+          Button('电影').layoutWeight(1)
+            .backgroundColor(this.discoverKind === 'movie' ? '#2267D9' : '#F0F2F5')
+            .fontColor(this.discoverKind === 'movie' ? '#FFFFFF' : '#263446')
+            .onClick(() => { this.changeDiscover('movie', this.discoverMode); })
+          Button('剧集').layoutWeight(1)
+            .backgroundColor(this.discoverKind === 'show' ? '#2267D9' : '#F0F2F5')
+            .fontColor(this.discoverKind === 'show' ? '#FFFFFF' : '#263446')
+            .onClick(() => { this.changeDiscover('show', this.discoverMode); })
+        }.width('100%')
+        Row({ space: 6 }) {
+          this.discoverModeButton('趋势', 'trending')
+          this.discoverModeButton('热门', 'popular')
+          this.discoverModeButton('即将上映', 'anticipated')
+        }.width('100%')
+        Text(this.discoverStatus).fontSize(12).width('100%')
+        Button(this.discoverBusy ? '加载中…' : '刷新本页')
+          .enabled(!this.discoverBusy && !this.setupBusy)
+          .onClick(() => { this.loadDiscover(this.discoverPage); })
+        Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.SpaceBetween }) {
+          ForEach(this.discoverItems, (item: DiscoverItem) => {
+            this.discoverCard(item)
+          }, (item: DiscoverItem) => item.media.id + ':' + item.posterUri)
+        }.width('100%')
+        Row({ space: 8 }) {
+          Button('上一页').layoutWeight(1)
+            .enabled(!this.discoverBusy && this.discoverPage > 1)
+            .onClick(() => { this.loadDiscover(this.discoverPage - 1); })
+          Text(this.discoverPage + ' / ' + (this.discoverPages || 1)).fontSize(13)
+          Button('下一页').layoutWeight(1)
+            .enabled(!this.discoverBusy && this.discoverPage < this.discoverPages)
+            .onClick(() => { this.loadDiscover(this.discoverPage + 1); })
+        }.width('100%')
+      }
+    }.width('100%')
+  }
+
+  @Builder
+  discoverModeButton(label: string, mode: string) {
+    Button(label).layoutWeight(1).fontSize(13)
+      .backgroundColor(this.discoverMode === mode ? '#2267D9' : '#F0F2F5')
+      .fontColor(this.discoverMode === mode ? '#FFFFFF' : '#263446')
+      .onClick(() => { this.changeDiscover(this.discoverKind, mode); })
+  }
+
   private closeDetail(): void {
     this.detailRevision++;
     this.selectedMedia = undefined;
@@ -326,6 +486,9 @@ struct Index {
       .onClick(() => {
         this.closeDetail();
         this.tab = value;
+        if (value === 'discover' && this.discoverItems.length === 0 && !this.discoverBusy) {
+          this.loadDiscover();
+        }
       })
   }
 
@@ -400,13 +563,15 @@ struct Index {
     Column({ space: 0 }) {
       Row() {
         Text('Showly').fontSize(27).fontWeight(FontWeight.Bold).layoutWeight(1)
-        Text('Preview 0.6.2').fontSize(12).fontColor('#687887')
+        Text('Preview 0.7').fontSize(12).fontColor('#687887')
       }.width('100%').padding(16)
       Divider()
       Scroll() {
         Column({ space: 14 }) {
           if (this.selectedMedia) {
             this.detailPage(this.selectedMedia)
+          } else if (this.tab === 'discover') {
+            this.discoverView()
           } else if (this.tab === 'library') {
             Text('我的清单').fontSize(23).fontWeight(FontWeight.Bold)
         Text(this.libraryStatus).fontSize(13)
@@ -549,6 +714,7 @@ struct Index {
       }.width('100%').layoutWeight(1).align(Alignment.TopStart)
       Divider()
       Row({ space: 6 }) {
+        this.navigationTab('发现', 'discover')
         this.navigationTab('清单', 'library')
         this.navigationTab('搜索', 'search')
         this.navigationTab('云端', 'cloud')
