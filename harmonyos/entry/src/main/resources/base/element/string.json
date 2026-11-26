@@ -1,0 +1,16 @@
+{
+  "string": [
+    {
+      "name": "module_desc",
+      "value": "Unofficial native build preview"
+    },
+    {
+      "name": "EntryAbility_desc",
+      "value": "Native preview"
+    },
+    {
+      "name": "EntryAbility_label",
+      "value": "Showly Preview"
+    }
+  ]
+}

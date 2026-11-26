@@ -1,0 +1,10 @@
+{
+  "name": "showly-harmonyos",
+  "version": "0.1.0",
+  "ohos": {
+    "org": "noregrete",
+    "buildTool": "hvigor",
+    "directoryLevel": "project"
+  },
+  "dependencies": {}
+}

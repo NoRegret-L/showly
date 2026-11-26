@@ -75,7 +75,9 @@ jobs:
       - name: Build native HAP
         if: ${{ inputs.mode == 'build' || hashFiles('harmonyos/build-profile.json5') != '' }}
         working-directory: harmonyos
-        run: hvigorw assembleHap --mode module -p product=default -p buildMode=debug --no-daemon
+        run: |
+          export DEVECO_SDK_HOME="$HOS_SDK_HOME"
+          hvigorw assembleHap --mode module -p module=entry@default -p product=default -p buildMode=debug --no-daemon
 
       - name: Upload experimental HAP
         if: ${{ inputs.mode == 'build' || hashFiles('harmonyos/build-profile.json5') != '' }}
