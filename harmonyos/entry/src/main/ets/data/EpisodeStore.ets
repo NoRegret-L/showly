@@ -29,6 +29,13 @@ interface EpisodeEvent {
   ids: number[];
   watched: boolean;
 }
+export interface JournalIntent {
+  episodeId: number;
+  showId: string;
+  label: string;
+  watched: boolean;
+  catalogKnown: boolean;
+}
 export interface LocalEpisodeState {
   episode: LocalEpisode;
   watched: boolean;
@@ -154,6 +161,7 @@ export class EpisodeStore {
     // commits that row atomically: no partially marked seasons or split state/log.
     await db.executeSql('CREATE TABLE IF NOT EXISTS episode_event (seq INTEGER PRIMARY KEY AUTOINCREMENT, show_id TEXT NOT NULL, episode_ids TEXT NOT NULL, watched INTEGER NOT NULL CHECK(watched IN (0,1)), changed_at INTEGER NOT NULL)');
     await db.executeSql('CREATE INDEX IF NOT EXISTS episode_event_show_seq ON episode_event(show_id,seq)');
+    await db.executeSql('CREATE TABLE IF NOT EXISTS sync_binding (slot INTEGER PRIMARY KEY CHECK(slot=1), account_uuid TEXT NOT NULL)');
     return new EpisodeStore(db);
   }
 
@@ -207,6 +215,55 @@ export class EpisodeStore {
     if (ids.some((id: number) => !allowed.has(id))) { throw new Error('Episode no longer available'); }
     await this.db.executeSql('INSERT INTO episode_event(show_id,episode_ids,watched,changed_at) VALUES(?,?,?,?)',
       [showId, JSON.stringify(Array.from(unique)), watched ? 1 : 0, Date.now()]);
+  }
+
+  async boundAccount(): Promise<string> {
+    const rows = await this.db.querySql('SELECT account_uuid FROM sync_binding WHERE slot=1');
+    try {
+      if (!rows.goToFirstRow()) { return ''; }
+      const uuid = rows.getString(0);
+      if (!uuid || uuid.trim() !== uuid) { throw new Error('Invalid binding'); }
+      return uuid;
+    } finally { rows.close(); }
+  }
+
+  // One explicit, durable binding; never silently replace an existing account.
+  async bindAccount(uuid: string): Promise<void> {
+    if (!uuid || uuid.trim() !== uuid) { throw new Error('Invalid account'); }
+    await this.db.executeSql('INSERT OR IGNORE INTO sync_binding(slot,account_uuid) VALUES(1,?)', [uuid]);
+    if (await this.boundAccount() !== uuid) { throw new Error('Account binding mismatch'); }
+  }
+
+  async journalIntents(): Promise<JournalIntent[]> {
+    const rows = await this.db.querySql('SELECT e.show_id,e.episode_ids,e.watched,c.catalog FROM episode_event e LEFT JOIN episode_catalog c ON c.show_id=e.show_id ORDER BY e.seq');
+    const latest: Map<number, JournalIntent> = new Map<number, JournalIntent>();
+    const catalogs: Map<string, EpisodeCatalog> = new Map<string, EpisodeCatalog>();
+    try {
+      while (rows.goToNextRow()) {
+        const showId = rows.getString(0);
+        if (!/^show:[1-9][0-9]*$/.test(showId)) { throw new Error('Invalid journal show'); }
+        const ids = JSON.parse(rows.getString(1)) as number[];
+        const watched = rows.getLong(2);
+        if (!Array.isArray(ids) || ids.length === 0 || ids.some((id: number) => !validId(id)) ||
+            (watched !== 0 && watched !== 1)) { throw new Error('Invalid journal event'); }
+        let catalog = catalogs.get(showId);
+        if (!catalog && !rows.isColumnNull(3)) {
+          catalog = JSON.parse(rows.getString(3)) as EpisodeCatalog;
+          validateCatalog(catalog, showId);
+          catalogs.set(showId, catalog);
+        }
+        for (const id of ids) {
+          const prior = latest.get(id);
+          if (prior && prior.showId !== showId) { throw new Error('Conflicting episode identity'); }
+          const episode = catalog?.episodes.find((ep: LocalEpisode) => ep.id === id);
+          latest.set(id, { episodeId: id, showId: showId, watched: watched === 1,
+            catalogKnown: !!episode, label: episode ?
+              (catalog?.title ?? showId) + ' · S' + episode.season + 'E' + episode.number :
+              showId + ' · Trakt episode ' + id });
+        }
+      }
+    } finally { rows.close(); }
+    return Array.from(latest.values());
   }
 
   async recent(): Promise<Media[]> {

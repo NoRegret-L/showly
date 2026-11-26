@@ -50,7 +50,7 @@ function ensureCurrent(session: TraktSession): void {
   }
 }
 
-async function readActivity(session: TraktSession): Promise<string> {
+export async function readActivity(session: TraktSession): Promise<string> {
   ensureCurrent(session);
   const req = http.createHttp();
   try {

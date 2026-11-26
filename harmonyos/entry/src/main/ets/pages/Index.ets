@@ -12,6 +12,7 @@ import { DiscoverItem, readDiscover } from '../data/TraktDiscover';
 import { EpisodeProgress, SeasonProgress, SeriesProgress, ChineseText, readSeriesProgress, readChinese } from '../data/TraktProgress';
 import { AppearanceStore, applyAppearance } from '../data/AppearanceStore';
 import { EpisodeStore, LocalSeriesState, LocalSeasonState, LocalEpisodeState, fetchEpisodeCatalog } from '../data/EpisodeStore';
+import { SyncAccount, SyncPreview, SyncDifference, readSyncAccount, buildSyncPreview } from '../data/TraktSyncPreview';
 
 @Entry
 @Component
@@ -19,6 +20,13 @@ struct Index {
   @State title: string = '';
   @State tab: string = 'progress';
   private episodeStore?: EpisodeStore;
+  @State syncBusy: boolean = false;
+  @State syncStatus: string = '';
+  @State syncAccount?: SyncAccount = undefined;
+  @State syncBound: boolean = false;
+  @State syncPreview?: SyncPreview = undefined;
+  @State syncFilter: string = 'addition';
+  @State syncPage: number = 1;
   @State episodeReady: boolean = false;
   @State episodeInitStatus: string = '';
   @State localSeries?: LocalSeriesState = undefined;
@@ -121,7 +129,7 @@ struct Index {
   }
 
   onPageShow(): void {
-    if (this.clientId && !this.setupBusy && !this.cloudBusy) {
+    if (this.clientId && !this.setupBusy && !this.cloudBusy && !this.syncBusy) {
       traktAuth.restore(this.clientId);
     }
   }
@@ -138,7 +146,7 @@ struct Index {
 
   private async loadLocalEpisodes(item: Media, refresh: boolean = false): Promise<void> {
     const store = this.episodeStore;
-    if (!store || !this.episodeReady || this.localBusy || item.kind !== 'show') { return; }
+    if (!store || !this.episodeReady || this.localBusy || this.syncBusy || item.kind !== 'show') { return; }
     const revision = this.detailRevision;
     const clientId = this.clientId;
     this.localBusy = true;
@@ -153,6 +161,7 @@ struct Index {
       if (refresh && clientId) {
         const catalog = await fetchEpisodeCatalog(item, clientId);
         if (revision !== this.detailRevision || this.clientId !== clientId) { return; }
+        this.invalidateSync();
         await store.saveCatalog(catalog);
         state = await store.read(item.id);
       }
@@ -174,11 +183,12 @@ struct Index {
 
   private async markLocal(item: Media, ids: number[], watched: boolean): Promise<void> {
     const store = this.episodeStore;
-    if (!store || !this.episodeReady || this.localBusy || ids.length === 0) { return; }
+    if (!store || !this.episodeReady || this.localBusy || this.syncBusy || ids.length === 0) { return; }
     const revision = this.detailRevision;
     this.localBusy = true;
     this.confirmSeason = -1;
     try {
+      this.invalidateSync();
       await store.mark(item.id, ids, watched);
       const state = await store.read(item.id);
       this.localRecent = await store.recent();
@@ -205,9 +215,9 @@ struct Index {
         Text(this.episodeInitStatus || '正在打开分集数据库…').fontSize(13).width('100%')
       } else {
         Row({ space: 8 }) {
-          Button('读取本机').layoutWeight(1).enabled(!this.localBusy)
+          Button('读取本机').layoutWeight(1).enabled(!this.localBusy && !this.syncBusy)
             .onClick(() => { this.loadLocalEpisodes(item); })
-          Button('更新分集目录').layoutWeight(1).enabled(!this.localBusy && !!this.clientId)
+          Button('更新分集目录').layoutWeight(1).enabled(!this.localBusy && !this.syncBusy && !!this.clientId)
             .onClick(() => { this.loadLocalEpisodes(item, true); })
         }.width('100%')
         Text(this.localStatus).fontSize(12).width('100%')
@@ -227,16 +237,16 @@ struct Index {
                 .onClick(() => { this.localSeason = this.localSeason === season.number ? -1 : season.number; this.confirmSeason = -1; })
               if (this.localSeason === season.number) {
                 Row({ space: 8 }) {
-                  Button('整季已看').layoutWeight(1).enabled(!this.localBusy && season.completed < season.episodes.length)
+                  Button('整季已看').layoutWeight(1).enabled(!this.localBusy && !this.syncBusy && season.completed < season.episodes.length)
                     .onClick(() => { this.confirmSeason = season.number; this.confirmWatched = true; })
-                  Button('整季撤销').layoutWeight(1).enabled(!this.localBusy && season.completed > 0)
+                  Button('整季撤销').layoutWeight(1).enabled(!this.localBusy && !this.syncBusy && season.completed > 0)
                     .onClick(() => { this.confirmSeason = season.number; this.confirmWatched = false; })
                 }.width('100%')
                 if (this.confirmSeason === season.number) {
                   Text(this.confirmWatched ? '确认将本季已播集全部标记已看？' : '确认撤销本季全部本机已看标记？').fontSize(13)
                   Row({ space: 8 }) {
                     Button('取消').layoutWeight(1).onClick(() => { this.confirmSeason = -1; })
-                    Button('确认').layoutWeight(1).enabled(!this.localBusy)
+                    Button('确认').layoutWeight(1).enabled(!this.localBusy && !this.syncBusy)
                       .onClick(() => {
                         this.markLocal(item, season.episodes.filter((ep: LocalEpisodeState) =>
                           ep.watched !== this.confirmWatched).map((ep: LocalEpisodeState) => ep.episode.id), this.confirmWatched);
@@ -252,7 +262,7 @@ struct Index {
                           .fontColor($r('app.color.showly_secondary'))
                       }
                     }.layoutWeight(1)
-                    Button(entry.watched ? '撤销已看' : '标记已看').fontSize(12).enabled(!this.localBusy)
+                    Button(entry.watched ? '撤销已看' : '标记已看').fontSize(12).enabled(!this.localBusy && !this.syncBusy)
                       .onClick(() => { this.markLocal(item, [entry.episode.id], !entry.watched); })
                   }.width('100%')
                 }, (entry: LocalEpisodeState) => entry.episode.id + ':' + entry.watched)
@@ -287,7 +297,7 @@ struct Index {
   }
 
   private async applyClient(login: boolean): Promise<void> {
-    if (!this.settings || this.setupBusy || this.authBusy || this.searching || this.cloudBusy) {
+    if (!this.settings || this.setupBusy || this.authBusy || this.searching || this.cloudBusy || this.syncBusy) {
       return;
     }
     const next = this.draftId.trim();
@@ -331,7 +341,7 @@ struct Index {
   }
 
   private async clearClient(): Promise<void> {
-    if (!this.settings || this.setupBusy || this.authBusy || this.searching || this.cloudBusy) {
+    if (!this.settings || this.setupBusy || this.authBusy || this.searching || this.cloudBusy || this.syncBusy) {
       return;
     }
     this.setupBusy = true;
@@ -359,7 +369,164 @@ struct Index {
     }
   }
 
+  private invalidateSync(): void {
+    this.syncPreview = undefined;
+    this.syncAccount = undefined;
+    this.syncBound = false;
+    this.syncStatus = '';
+    this.syncPage = 1;
+  }
+
+  private async verifySync(): Promise<void> {
+    const store = this.episodeStore;
+    if (!store || !this.episodeReady || this.syncBusy || this.localBusy ||
+        this.cloudBusy || this.authBusy || this.setupBusy || !this.clientId) { return; }
+    this.invalidateSync();
+    this.syncBusy = true;
+    this.syncStatus = '正在验证当前 Trakt 账户…';
+    const clientId = this.clientId;
+    try {
+      await traktAuth.restore(clientId, true);
+      const session = traktAuth.session(clientId);
+      if (!session) { throw new Error('Sign in required'); }
+      const account = await readSyncAccount(session);
+      const bound = await store.boundAccount();
+      if (this.clientId !== clientId || !traktAuth.isCurrent(clientId, session.generation)) {
+        throw new Error('Session changed');
+      }
+      this.syncAccount = account;
+      this.syncBound = bound === account.uuid;
+      this.syncStatus = this.syncBound ? '账户已验证，可以生成差异预览。' :
+        bound ? '本机已绑定另一 Trakt 账户，禁止生成预览或重新绑定。' : '请核对账户并确认绑定；不会上传记录。';
+      if (bound && bound !== account.uuid) { this.syncAccount = undefined; }
+    } catch (error) {
+      this.syncStatus = '账户验证失败，请检查登录或网络。';
+    } finally { this.syncBusy = false; }
+  }
+
+  private async confirmSyncAccount(): Promise<void> {
+    const store = this.episodeStore;
+    const expected = this.syncAccount;
+    const clientId = this.clientId;
+    if (!store || !expected || this.syncBusy || this.localBusy || this.cloudBusy || this.setupBusy ||
+        !traktAuth.isCurrent(clientId, expected.generation)) { return; }
+    this.syncBusy = true;
+    try {
+      const session = traktAuth.session(clientId);
+      if (!session) { throw new Error('Session changed'); }
+      const verified = await readSyncAccount(session);
+      if (verified.uuid !== expected.uuid || this.clientId !== clientId ||
+          !traktAuth.isCurrent(clientId, session.generation)) { throw new Error('Account changed'); }
+      await store.bindAccount(verified.uuid);
+      this.syncBound = true;
+      this.syncStatus = '账户绑定成功；尚未同步任何记录。';
+    } catch (error) {
+      this.invalidateSync();
+      this.syncStatus = '账户绑定失败或身份变化，请重新验证。';
+    } finally { this.syncBusy = false; }
+  }
+
+  private async generateSyncPreview(): Promise<void> {
+    const store = this.episodeStore;
+    const expected = this.syncAccount;
+    const clientId = this.clientId;
+    if (!store || !expected || !this.syncBound || this.syncBusy || this.localBusy || this.cloudBusy ||
+        this.setupBusy || !traktAuth.isCurrent(clientId, expected.generation)) { return; }
+    this.syncBusy = true;
+    this.syncPreview = undefined;
+    this.syncPage = 1;
+    this.syncStatus = '正在读取完整云端分集记录并比较…';
+    try {
+      const session = traktAuth.session(clientId);
+      if (!session) { throw new Error('Session changed'); }
+      const preview = await buildSyncPreview(store, session);
+      if (preview.account.uuid !== expected.uuid || this.clientId !== clientId ||
+          !traktAuth.isCurrent(clientId, session.generation)) { throw new Error('Account changed'); }
+      this.syncPreview = preview;
+      this.syncStatus = '预览完成；本机与云端观看记录均未改动。';
+    } catch (error) {
+      this.syncStatus = '预览失败：账户、分页或活动快照无法验证。请检查网络并重试。';
+    } finally { this.syncBusy = false; }
+  }
+
+  private visibleSyncRows(): SyncDifference[] {
+    return this.syncPreview?.rows.filter((row: SyncDifference) => row.kind === this.syncFilter) ?? [];
+  }
+
+  private syncSlice(): SyncDifference[] {
+    const start = (this.syncPage - 1) * this.collectionPageSize;
+    return this.visibleSyncRows().slice(start, start + this.collectionPageSize);
+  }
+
+  private syncPages(): number {
+    return Math.max(1, Math.ceil(this.visibleSyncRows().length / this.collectionPageSize));
+  }
+
+  @Builder
+  syncFilterButton(label: string, value: string) {
+    Button(label).layoutWeight(1).fontSize(12)
+      .backgroundColor(this.syncFilter === value ? $r('app.color.showly_accent') : $r('app.color.showly_muted_surface'))
+      .fontColor(this.syncFilter === value ? $r('app.color.showly_on_accent') : $r('app.color.showly_text'))
+      .onClick(() => { this.syncFilter = value; this.syncPage = 1; })
+  }
+
+  @Builder
+  syncPreviewView() {
+    Column({ space: 10 }) {
+      Text('分集同步预览').fontSize(22).fontWeight(FontWeight.Bold).width('100%')
+      Text('只读比较。绑定只用于校验账户；旧日志不会自动上传，也不会把本机未看默认值当作删除。')
+        .fontSize(12).width('100%').fontColor($r('app.color.showly_secondary'))
+      Button(this.syncBusy ? '处理中…' : '验证同步账户')
+        .enabled(this.episodeReady && this.signedIn && !this.syncBusy && !this.localBusy && !this.cloudBusy && !this.authBusy && !this.setupBusy)
+        .onClick(() => { this.verifySync(); })
+      Text(this.syncStatus).fontSize(13).width('100%')
+      if (this.syncAccount && this.signedIn && traktAuth.isCurrent(this.clientId, this.syncAccount.generation)) {
+        Text('当前账户：' + this.syncAccount.username).fontSize(14).width('100%')
+        if (!this.syncBound) {
+          Text('首次绑定不会修改观看记录。本机分集日志此前没有账户归属，确认后仅对此账户开放预览；暂不支持换绑。')
+            .fontSize(12).width('100%')
+          Button('确认绑定此账户').enabled(!this.syncBusy && !this.localBusy)
+            .onClick(() => { this.confirmSyncAccount(); })
+        } else {
+          Button('生成同步差异预览').enabled(!this.syncBusy && !this.localBusy && !this.cloudBusy && !this.authBusy)
+            .onClick(() => { this.generateSyncPreview(); })
+        }
+        if (this.syncPreview && this.syncBound) {
+          Text('本机明确操作 ' + this.syncPreview.localCount + ' 集 · 云端已看 ' + this.syncPreview.cloudCount + ' 集')
+            .fontSize(14).width('100%')
+          Text('待核对新增 ' + this.syncPreview.additions + ' · 一致 ' + this.syncPreview.matches +
+            ' · 撤销冲突 ' + this.syncPreview.conflicts + ' · 目录异常 ' + this.syncPreview.unknown)
+            .fontSize(14).width('100%')
+          Text('仅云端存在 ' + this.syncPreview.cloudOnly + ' 集（含可能的特别篇），保留原记录。')
+            .fontSize(13).width('100%')
+          Row({ space: 4 }) {
+            this.syncFilterButton('新增', 'addition')
+            this.syncFilterButton('一致', 'match')
+            this.syncFilterButton('冲突', 'conflict')
+            this.syncFilterButton('异常', 'unknown')
+          }.width('100%')
+          if (this.visibleSyncRows().length === 0) { Text('本分类没有记录').fontSize(13).width('100%') }
+          ForEach(this.syncSlice(), (row: SyncDifference) => {
+            Column({ space: 4 }) {
+              Text(row.label).fontSize(14).width('100%')
+              Text('本机 ' + (row.localWatched ? '已看' : '撤销') + ' / 云端 ' +
+                (row.cloudWatched ? '已看' : '无已看记录')).fontSize(12).width('100%')
+                .fontColor($r('app.color.showly_secondary'))
+            }.width('100%').padding(10).borderRadius(8).backgroundColor($r('app.color.showly_muted_surface'))
+          }, (row: SyncDifference) => row.episodeId.toString())
+          Row({ space: 8 }) {
+            Button('上一页').layoutWeight(1).enabled(this.syncPage > 1).onClick(() => { this.syncPage--; })
+            Text(this.syncPage + ' / ' + this.syncPages()).fontSize(13)
+            Button('下一页').layoutWeight(1).enabled(this.syncPage < this.syncPages()).onClick(() => { this.syncPage++; })
+          }.width('100%')
+        }
+      }
+      Divider()
+    }.width('100%')
+  }
+
   private clearCloud(): void {
+    this.invalidateSync();
     this.cloud = undefined;
     this.cloudStatus = '';
     this.trackingPage = 1;
@@ -368,7 +535,7 @@ struct Index {
   }
 
   private async loadCloud(): Promise<void> {
-    if (this.cloudBusy || this.setupBusy || this.authBusy || !this.clientId) {
+    if (this.cloudBusy || this.syncBusy || this.setupBusy || this.authBusy || !this.clientId) {
       return;
     }
     this.cloudBusy = true;
@@ -1250,6 +1417,7 @@ struct Index {
           } else if (this.tab === 'cloud') {
             Text('Trakt 云端').fontSize(23).fontWeight(FontWeight.Bold)
             Text('只读预览和本地新增导入，不会修改云端。').fontSize(13)
+            this.syncPreviewView()
             if (!this.signedIn && !this.cloudBusy) {
               Text('请先在账户页面登录 Trakt。').fontSize(14)
               Button('前往账户').onClick(() => { this.tab = 'account'; })
@@ -1280,7 +1448,7 @@ struct Index {
               this.themeButton('深色', 'dark')
             }.width('100%')
             Text(this.themeStatus).fontSize(12)
-            Text('版本 0.7.3').fontSize(12).fontColor($r('app.color.showly_secondary'))
+            Text('版本 0.8.1').fontSize(12).fontColor($r('app.color.showly_secondary'))
             Text('非官方应用，使用 Trakt，但未获 Trakt 认可或认证。')
               .fontSize(12).fontColor($r('app.color.showly_secondary'))
         Text('Trakt 账户').fontSize(20).fontWeight(FontWeight.Medium)
@@ -1306,7 +1474,7 @@ struct Index {
               .enabled(this.settingsReady && !this.setupBusy && !this.authBusy && !this.searching && this.draftId.trim().length > 0)
               .onClick(() => { this.applyClient(false); })
             if (this.clientId) {
-              Button('取消编辑').enabled(!this.setupBusy && !this.cloudBusy)
+              Button('取消编辑').enabled(!this.setupBusy && !this.cloudBusy && !this.syncBusy)
                 .onClick(() => { this.draftId = this.clientId; this.configuring = false; })
             }
             Text('也可暂不配置，继续使用下方离线清单。').fontSize(12)
@@ -1316,25 +1484,25 @@ struct Index {
         if (this.clientId && !this.configuring) {
           Text(this.authStatus).fontSize(14)
           if (!this.signedIn && !this.authBusy) {
-            Button('登录 Trakt').enabled(!this.setupBusy && !this.cloudBusy).onClick(() => {
+            Button('登录 Trakt').enabled(!this.setupBusy && !this.cloudBusy && !this.syncBusy).onClick(() => {
               this.clearCloud();
               traktAuth.begin(this.context(), this.clientId);
             })
-            Button('重试恢复登录').enabled(!this.setupBusy && !this.cloudBusy).onClick(() => {
+            Button('重试恢复登录').enabled(!this.setupBusy && !this.cloudBusy && !this.syncBusy).onClick(() => {
               traktAuth.restore(this.clientId, true);
             })
           }
           if (this.authBusy) {
-            Button('取消当前操作').enabled(!this.setupBusy && !this.cloudBusy).onClick(() => { traktAuth.cancel(); })
+            Button('取消当前操作').enabled(!this.setupBusy && !this.cloudBusy && !this.syncBusy).onClick(() => { traktAuth.cancel(); })
           } else {
             if (this.signedIn) {
-              Button('断开本机登录').enabled(!this.setupBusy && !this.cloudBusy).onClick(() => { if (traktAuth.disconnect()) { this.clearCloud(); } })
+              Button('断开本机登录').enabled(!this.setupBusy && !this.cloudBusy && !this.syncBusy).onClick(() => { if (traktAuth.disconnect()) { this.clearCloud(); } })
             }
-            Button('修改 Client ID').enabled(!this.setupBusy && !this.searching && !this.cloudBusy).onClick(() => {
+            Button('修改 Client ID').enabled(!this.setupBusy && !this.searching && !this.cloudBusy && !this.syncBusy).onClick(() => {
               this.draftId = this.clientId;
               this.configuring = true;
             })
-            Button('清除 Client ID 与本机授权').enabled(!this.setupBusy && !this.searching && !this.cloudBusy)
+            Button('清除 Client ID 与本机授权').enabled(!this.setupBusy && !this.searching && !this.cloudBusy && !this.syncBusy)
               .onClick(() => { this.clearClient(); })
           }
           Text('登录使用 Trakt 官方浏览器页面。云端仅只读，不会上传或删除记录。').fontSize(12)
