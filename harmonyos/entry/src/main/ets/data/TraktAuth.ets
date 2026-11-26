@@ -66,6 +66,12 @@ function queryParameters(uri: string): Map<string, string> {
   return values;
 }
 
+export interface TraktSession {
+  clientId: string;
+  token: string;
+  generation: number;
+}
+
 class TraktAuth {
   private pending?: PendingLogin;
   private generation: number = 0;
@@ -74,6 +80,17 @@ class TraktAuth {
   private busy: boolean = false;
   private clientId: string = '';
   private attemptedRestore: boolean = false;
+
+  session(clientId: string): TraktSession | undefined {
+    if (this.busy || this.clientId !== clientId || !this.accessToken || Date.now() >= this.expiresAt) {
+      return undefined;
+    }
+    return { clientId: clientId, token: this.accessToken, generation: this.generation };
+  }
+
+  isCurrent(clientId: string, generation: number): boolean {
+    return this.session(clientId)?.generation === generation;
+  }
 
   private status(message: string): void {
     AppStorage.setOrCreate<string>('traktAuthStatus', message);
