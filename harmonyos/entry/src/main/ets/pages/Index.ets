@@ -2,6 +2,8 @@ import { common } from '@kit.AbilityKit';
 import { Media, mediaLabel, setWatched } from '../model/Media';
 import { LibraryStore } from '../data/LibraryStore';
 import { MediaStore } from '../data/MediaStore';
+import { TitleConsent, TitleChange, TitleIntent, titleEdit } from '../model/TitleQuickState';
+import { runTitleQuick, reconcileTitleObservation } from '../data/TitleQuickSync';
 import { BackupData, RestorePlan, createBackup, exportBackup, selectBackup, planRestore, restoreBackup } from '../data/LocalBackup';
 import { MediaRecord, migrateLegacy, isTraktMedia, applyLegacyEdit, setMediaIntent, inLocalWatchlist, followShow } from '../model/MediaState';
 import { PersonalLibraryRow, LibraryShowEvidence, buildPersonalLibrary, filterPersonalLibrary, businessLibraryLabel, isPersonalMember } from '../model/PersonalLibrary';
@@ -71,6 +73,12 @@ struct Index {
   private pageVisible: boolean = false;
   private recoveryPending: boolean = false;
   private mediaRecoveryPending: boolean = false;
+  private titleQuickPending: boolean = false;
+  @State titleConsent?: TitleConsent = undefined;
+  @State titleQuickStatus: string = '';
+  @State titleConfirm: boolean = false;
+  @State movieUndo?: Media = undefined;
+  @State movieUndoStatus: string = '';
   private netListener?: connection.NetConnection;
   private netId: number = -1;
   private netValidated: boolean = false;
@@ -238,6 +246,7 @@ struct Index {
     this.pageVisible = false;
     this.recoveryPending = false;
     this.mediaRecoveryPending = false;
+    this.titleQuickPending = false;
     this.observationPending = false;
     this.projectionPending = false;
   }
@@ -246,6 +255,7 @@ struct Index {
     this.pageVisible = false;
     this.recoveryPending = false;
     this.mediaRecoveryPending = false;
+    this.titleQuickPending = false;
     const listener = this.netListener;
     this.netListener = undefined;
     if (listener) {
@@ -312,6 +322,11 @@ struct Index {
   // A busy auth/DB/sync operation no longer drops the network-resume event.
   // Coalesce to a single pending event, not a periodic retry loop.
   private onObservationAuthChanged(): void {
+    this.titleConsent = undefined;
+    this.titleQuickPending = false;
+    this.titleConfirm = false;
+    this.movieUndo = undefined;
+    this.movieUndoStatus = '';
     if (!this.signedIn) {
       this.cloudLocalAllowed = false;
       this.libraryEvidence = [];
@@ -342,7 +357,7 @@ struct Index {
   }
 
   private onRecoveryGateChanged(): void {
-    if (this.backupBusy || !this.pageVisible || this.syncBusy || this.localBusy || this.cloudBusy ||
+    if (this.backupBusy || !this.pageVisible || this.syncBusy || this.localBusy || this.cloudBusy || this.saving ||
         this.authBusy || this.setupBusy) { return; }
     if (this.recoveryPending && this.autoActive() && this.episodeReady) {
       this.recoveryPending = false;
@@ -361,10 +376,75 @@ struct Index {
       this.loadCloud();
       return;
     }
+    if (this.titleQuickPending && this.titleQuickActive()) {
+      this.titleQuickPending = false;
+      this.resumeTitleQuick();
+      return;
+    }
     if (this.projectionPending) {
       this.projectionPending = false;
       this.loadNextShows();
     }
+  }
+
+  private titleQuickActive(): boolean {
+    const consent = this.titleConsent;
+    return !!consent && this.signedIn && this.cloudLocalAllowed && !!this.activeCloud() &&
+      consent.uuid === this.cloudUuid && consent.clientId === this.clientId;
+  }
+
+  private async setTitleQuick(enabled: boolean): Promise<void> {
+    const media = this.mediaStore;
+    const binding = this.episodeStore;
+    const session = traktAuth.session(this.clientId);
+    const uuid = this.cloudUuid;
+    if (!media || !binding || this.syncBusy || this.saving || this.cloudBusy || this.localBusy ||
+        this.authBusy || this.setupBusy || this.backupBusy) { return; }
+    this.syncBusy = true;
+    this.titleConfirm = false;
+    try {
+      if (!enabled) {
+        this.titleQuickPending = false;
+        this.titleConsent = undefined;
+        await media.setTitleConsent('', '', false);
+        this.titleQuickStatus = '电影及待看快捷同步已关闭，未发送记录保留。';
+      } else {
+        if (!session || !this.cloudLocalAllowed || !uuid || await binding.boundAccount() !== uuid ||
+            (await readSyncAccount(session)).uuid !== uuid ||
+            !traktAuth.isCurrent(this.clientId, session.generation)) { throw new Error('Account changed'); }
+        this.titleConsent = await media.setTitleConsent(uuid, this.clientId, true);
+        this.titleQuickStatus = '已开启，仅处理此后明确执行的电影新增及待看操作。';
+      }
+    } catch (error) { this.titleQuickStatus = '同步授权保存失败，请重试。'; }
+    finally { this.syncBusy = false; }
+  }
+
+  private async resumeTitleQuick(): Promise<void> {
+    const media = this.mediaStore;
+    const binding = this.episodeStore;
+    const consent = this.titleConsent;
+    const clientId = this.clientId;
+    const session = traktAuth.session(clientId);
+    if (!media || !binding || !consent || !session || !this.titleQuickActive() ||
+        !this.pageVisible || this.syncBusy || this.saving || this.localBusy || this.cloudBusy ||
+        this.authBusy || this.setupBusy || this.backupBusy) { return; }
+    this.syncBusy = true;
+    this.titleQuickStatus = '正在同步影视操作…';
+    try {
+      const current = (): boolean => this.pageVisible && this.titleQuickActive() &&
+        this.titleConsent?.epoch === consent.epoch && this.clientId === clientId &&
+        traktAuth.isCurrent(clientId, session.generation);
+      const result = await runTitleQuick(media, binding, session, consent, current);
+      this.titleQuickStatus = result.message;
+      if (result.review || result.remaining) { this.libraryNotice = '部分操作尚未同步，可在设置中核对。'; }
+      if (result.attempted && current()) {
+        this.invalidateMovieCalendar();
+        this.observationPending = true;
+      }
+    } catch (error) {
+      this.titleQuickStatus = '快捷同步暂未完成，已保留操作。' + safeSyncError(error as Error);
+      this.libraryNotice = '同步暂未完成，观看记录已保留。';
+    } finally { this.syncBusy = false; }
   }
 
   private requestMediaRecovery(): void {
@@ -395,6 +475,7 @@ struct Index {
       if (this.syncAccount?.uuid === account.uuid && traktAuth.isCurrent(clientId, session.generation)) {
         this.mediaSyncStatus = result.message;
         this.mediaPreviewStatus = '操作凭证已核对；需要时重新生成差异预览。';
+        if (result.confirmed > 0) { this.observationPending = true; }
       }
     } catch (error) {
       this.mediaSyncStatus = '自动只读核对中断：' + safeSyncError(error as Error) + '；不会重发。';
@@ -751,6 +832,8 @@ struct Index {
     // as a side effect of a local-only backup operation.
     this.recoveryPending = false;
     this.mediaRecoveryPending = false;
+    this.titleQuickPending = false;
+    this.observationPending = false;
     this.syncBusy = false;
     this.backupBusy = false;
   }
@@ -1154,6 +1237,11 @@ struct Index {
   private async revokeAuto(): Promise<void> {
     this.recoveryPending = false;
     this.autoConsent = undefined;
+    this.titleConsent = undefined;
+    this.titleQuickPending = false;
+    this.titleConfirm = false;
+    if (this.mediaStore) { await this.mediaStore.setTitleConsent('', '', false); }
+    else if (this.signedIn) { throw new Error('Media store unavailable'); }
     if (this.episodeStore) { await this.episodeStore.clearAutoConsent(); }
     this.autoStatus = '自动新增已关闭；旧队列仍保留。';
   }
@@ -1787,6 +1875,11 @@ struct Index {
     this.cloud = undefined;
     this.cloudUuid = '';
     this.cloudFresh = false;
+    this.titleConsent = undefined;
+    this.titleQuickPending = false;
+    this.titleConfirm = false;
+    this.movieUndo = undefined;
+    this.movieUndoStatus = '';
     this.cloudLocalAllowed = false;
     this.localSeries = undefined;
     this.effectiveEditable = false;
@@ -1852,6 +1945,34 @@ struct Index {
         snapshot = this.cloud;
       }
       if (!snapshot || !current()) { throw new Error('Observation unavailable'); }
+      const mediaStore = this.mediaStore;
+      if (this.cloudFresh && this.cloudLocalAllowed && mediaStore) {
+        try {
+          const records = await reconcileTitleObservation(mediaStore, store, session, account.uuid, snapshot, current);
+          if (!current()) { throw new Error('Session changed'); }
+          this.mediaRecords = records;
+          this.items = records.map((record: MediaRecord) => record.media);
+          const consent = await mediaStore.titleConsent();
+          if (!current()) { throw new Error('Session changed'); }
+          this.titleConsent = consent?.uuid === account.uuid && consent.clientId === clientId ? consent : undefined;
+          this.syncAccount = account;
+          this.syncBound = true;
+          if ((await mediaStore.pendingTargets(account.uuid)).length > 0) { this.mediaRecoveryPending = true; }
+          if (this.titleQuickActive()) {
+            const intents = await mediaStore.titleIntents(account.uuid);
+            this.titleQuickPending = intents.some((intent: TitleIntent) => intent.state === 'open' && intent.epoch === this.titleConsent?.epoch);
+          }
+        } catch (error) {
+          if (!current()) { throw new Error('Session changed'); }
+          // Partial read coordination must not publish stale title records.
+          const retained = await mediaStore.load();
+          if (!current()) { throw new Error('Session changed'); }
+          this.mediaRecords = retained;
+          this.items = this.mediaRecords.map((record: MediaRecord) => record.media);
+          this.titleQuickPending = false;
+          this.titleQuickStatus = '影视状态协调未完成，请刷新。';
+        }
+      }
       const result = await projectLibrary(store, this.mediaRecords, snapshot, account.uuid, clientId,
         this.cloudFresh, current, (done: number, total: number): void => {
           this.cloudStatus = '计算个人库及补齐目录 ' + done + '/' + total;
@@ -1907,7 +2028,7 @@ struct Index {
     }
   }
 
-  private async persistMedia(records: MediaRecord[]): Promise<boolean> {
+  private async persistMedia(records: MediaRecord[], changes: TitleChange[] = []): Promise<boolean> {
     const store = this.mediaStore;
     if (!this.ready || this.saving || this.syncBusy || !store || !this.canEditLibrary()) { return false; }
     this.saving = true;
@@ -1918,7 +2039,13 @@ struct Index {
     this.mediaPreviewStatus = '';
     this.mediaPage = 1;
     try {
-      const verified = await store.save(records);
+      const snapshot = this.activeCloud();
+      const uuid = this.cloudUuid;
+      const scoped = changes.length > 0 && !!snapshot && this.cloudLocalAllowed && !!uuid;
+      if (scoped && await this.episodeStore?.boundAccount() !== uuid) { throw new Error('Account mismatch'); }
+      if (!this.canEditLibrary() || snapshot !== this.activeCloud() || uuid !== this.cloudUuid) { throw new Error('Session changed'); }
+      const verified = scoped ? await store.saveTitleEdit(records, changes, uuid, this.clientId,
+        new Date().toISOString(), this.titleQuickActive()) : await store.save(records);
       this.invalidateMovieCalendar();
       this.mediaRecords = verified;
       this.items = verified.map((record: MediaRecord) => record.media);
@@ -1927,6 +2054,7 @@ struct Index {
       this.libraryStatus = '已保存到本机；未修改 Trakt';
       this.libraryNotice = '';
       this.requestProjection();
+      if (scoped && this.titleQuickActive()) { this.titleQuickPending = true; }
       this.migrationStatus = '收藏数据库已就绪 · ' + verified.length + ' 部；旧版 Preferences 保留。';
       return true;
     } catch (error) {
@@ -1975,7 +2103,13 @@ struct Index {
   private async changeMediaIntent(item: Media, domain: string, value: string): Promise<void> {
     if (!this.ready || this.saving || this.cloudBusy || this.syncBusy || !this.canEditLibrary()) { return; }
     try {
-      await this.persistMedia(setMediaIntent(this.mediaRecords, item, domain, value));
+      const edit = titleEdit(this.mediaRecords, item, domain, value);
+      const saved = await this.persistMedia(edit.records, edit.changes);
+      if (saved && domain === 'movie') {
+        this.movieUndo = value === 'no' && this.signedIn ? item : undefined;
+        this.movieUndoStatus = '';
+        if (this.movieUndo) { this.libraryNotice = '观看标记已撤销；同步历史移除需单独核对。'; }
+      }
     } catch (error) {
       this.libraryStatus = '本机状态校验失败，未保存。';
     }
@@ -1983,8 +2117,73 @@ struct Index {
 
   private async joinFollowed(item: Media): Promise<void> {
     if (!this.ready || this.saving || this.cloudBusy || this.syncBusy || !this.canEditLibrary()) { return; }
-    try { await this.persistMedia(followShow(this.mediaRecords, item)); }
+    try {
+      const edit = titleEdit(this.mediaRecords, item, 'follow', 'yes');
+      await this.persistMedia(edit.records, edit.changes);
+    }
     catch (error) { this.libraryStatus = '追剧状态保存失败。'; }
+  }
+
+  private async reviewMovieUndo(): Promise<void> {
+    const item = this.movieUndo;
+    const media = this.mediaStore;
+    const binding = this.episodeStore;
+    const clientId = this.clientId;
+    const session = traktAuth.session(clientId);
+    const uuid = this.cloudUuid;
+    if (!item || !media || !binding || !session || !this.canEditLibrary() || !this.pageVisible ||
+        this.syncBusy || this.saving || this.localBusy || this.cloudBusy || this.authBusy || this.setupBusy ||
+        this.backupBusy) { return; }
+    this.syncBusy = true;
+    this.mediaSelected = undefined;
+    this.mediaPreview = undefined;
+    this.movieUndoStatus = '正在核对单次观看历史…';
+    try {
+      const preview = await buildMediaPreview(binding, session, await media.load(), uuid, media);
+      if (this.movieUndo?.id !== item.id || this.cloudUuid !== uuid || !this.canEditLibrary() ||
+          !traktAuth.isCurrent(clientId, session.generation)) { throw new Error('Account changed'); }
+      const row = preview.rows.find((value: MediaDifference) => value.id === item.id && value.domain === 'movie');
+      if (!row?.remote) {
+        this.movieUndoStatus = '无需移除历史。';
+        return;
+      }
+      if (row.operation !== 'remove') {
+        this.movieUndoStatus = '无法确认属于本应用的单次历史，未删除。';
+        return;
+      }
+      this.syncAccount = preview.account;
+      this.syncBound = true;
+      this.mediaPreview = preview;
+      this.selectMediaOperationForUndo(row);
+      this.movieUndoStatus = '确认后仅移除已核实的单次观看历史。';
+    } catch (error) { this.movieUndoStatus = '核对失败，未删除任何历史。'; }
+    finally { this.syncBusy = false; }
+  }
+
+  private selectMediaOperationForUndo(row: MediaDifference): void {
+    this.mediaSelected = row;
+    this.mediaWatchTime = new Date().toISOString();
+  }
+
+  @Builder
+  movieUndoView() {
+    if (this.movieUndo && this.canEditLibrary() && this.signedIn) {
+      Column({ space: 6 }) {
+        Text('撤销观看 · ' + this.movieUndo.title).fontSize(14).width('100%')
+        if (this.movieUndoStatus) { Text(this.movieUndoStatus).fontSize(12).width('100%') }
+        if (this.mediaSelected?.id === this.movieUndo.id && this.mediaSelected?.domain === 'movie' &&
+            this.mediaSelected?.operation === 'remove' && this.mediaPreview) {
+          Button('确认移除单次观看历史').enabled(!this.syncBusy && !this.saving && !this.cloudBusy && !this.localBusy)
+            .onClick(() => { this.confirmMediaOperation(); this.movieUndo = undefined; })
+        } else {
+          Button('核对是否可同步撤销').enabled(!this.syncBusy && !this.saving && !this.cloudBusy && !this.localBusy)
+            .onClick(() => { this.reviewMovieUndo(); })
+        }
+        Button('关闭').enabled(!this.syncBusy).onClick(() => {
+          this.movieUndo = undefined; this.movieUndoStatus = ''; this.mediaSelected = undefined;
+        })
+      }.width('100%').padding(8)
+    }
   }
 
   @Builder
@@ -1992,6 +2191,7 @@ struct Index {
     Column({ space: 8 }) {
       Text('收藏与观看状态').fontSize(20).fontWeight(FontWeight.Medium).width('100%')
       this.librarySyncNotice()
+      if (this.movieUndo?.id === item.id) { this.movieUndoView() }
       if (item.kind === 'movie') {
         Text(this.personalLibrary().find((row: PersonalLibraryRow) => row.media.id === item.id)?.watched ? '已看' : '未看或未确认').fontSize(14).width('100%')
         Button(this.personalLibrary().find((row: PersonalLibraryRow) => row.media.id === item.id)?.watched ? '撤销已看' : '标记已看')
@@ -2014,6 +2214,7 @@ struct Index {
           this.personalLibrary().find((row: PersonalLibraryRow) => row.media.id === item.id)?.queued ? 'no' : 'yes'); })
       if (!this.ready) { Text('收藏暂不可编辑，请检查设置。').fontSize(12).width('100%') }
       if (this.libraryStatus.includes('失败')) { Text('操作未完成，请检查设置后重试。').fontSize(12).width('100%') }
+      if (this.libraryNotice) { Text(this.libraryNotice).fontSize(12).width('100%') }
     }.width('100%').padding(10).backgroundColor($r('app.color.showly_surface')).borderRadius(10)
   }
 
@@ -2179,7 +2380,7 @@ struct Index {
     Column({ space: 10 }) {
       Text('电影与待看差异预览').fontSize(22).fontWeight(FontWeight.Bold).width('100%')
       Text(this.migrationStatus).fontSize(12).width('100%')
-      Text('只比较明确本机操作。新增/删除仍须逐条手动确认；已有保护凭证会自动只读核对，不会重发。')
+      Text('高级管理用于未授权操作、异常及历史撤销。已有保护凭证只读核对，不会重发。')
         .fontSize(12).width('100%')
       if (!this.syncBound || !this.syncAccount || !traktAuth.isCurrent(this.clientId, this.syncAccount.generation)) {
         Text('请先在上方验证并绑定同步账户。').fontSize(13).width('100%')
@@ -3114,6 +3315,7 @@ struct Index {
     Column({ space: 12 }) {
       Text('我的收藏').fontSize(25).fontWeight(FontWeight.Bold).width('100%')
       this.librarySyncNotice()
+      this.movieUndoView()
       if (this.cloudBusy || this.localBusy) { Text('正在更新收藏…').fontSize(12).width('100%') }
       else if (this.libraryNotice) { Text(this.libraryNotice).fontSize(12).width('100%') }
       Row({ space: 6 }) {
@@ -3507,11 +3709,32 @@ struct Index {
           Button(this.autoActive() ? '关闭快捷同步' : '开启快捷同步')
             .enabled(!this.syncBusy && !this.cloudBusy && !this.localBusy && !this.authBusy)
             .onClick(() => { this.setAuto(!this.autoActive()); })
-          Text('快捷同步仅自动上传已授权的新观看标记。其他操作仍需确认。').fontSize(12).width('100%')
+          Text('分集快捷同步仅上传已授权的新观看标记。电影及待看使用下方独立授权。').fontSize(12).width('100%')
         } else {
           Button('同步设置').enabled(!this.cloudBusy && !this.syncBusy && !this.authBusy && !this.localBusy)
             .onClick(() => { this.advancedSync = true; this.verifySync(); })
         }
+      }
+      if (this.signedIn && this.cloudLocalAllowed) {
+        Text('电影及待看快捷同步').fontSize(16).width('100%')
+        Button(this.titleQuickActive() ? '关闭电影及待看快捷同步' : '开启电影及待看快捷同步')
+          .enabled(!this.syncBusy && !this.cloudBusy && !this.localBusy && !this.authBusy && !this.saving)
+          .onClick(() => {
+            if (this.titleQuickActive()) { this.setTitleQuick(false); }
+            else { this.titleConfirm = true; }
+          })
+        if (this.titleConfirm) {
+          Text('授权此后标记电影已看（可能移出待看）以及加入／移出待看自动同步。不会自动删除观看历史，不会上传旧记录。')
+            .fontSize(12).width('100%')
+          Row({ space: 8 }) {
+            Button('取消').layoutWeight(1).onClick(() => { this.titleConfirm = false; })
+            Button('确认授权').layoutWeight(1).enabled(!this.syncBusy && !this.cloudBusy && !this.localBusy && !this.saving)
+              .onClick(() => { this.setTitleQuick(true); })
+          }.width('100%')
+        }
+        if (this.titleQuickStatus) { Text(this.titleQuickStatus).fontSize(12).width('100%') }
+        Button('核对待处理操作').enabled(this.titleQuickActive() && !this.syncBusy && !this.cloudBusy && !this.localBusy && !this.saving)
+          .onClick(() => { this.titleQuickPending = true; this.onRecoveryGateChanged(); })
       }
       Button(this.advancedSync ? '收起高级同步管理' : '高级同步管理')
         .onClick(() => { this.advancedSync = !this.advancedSync; })

@@ -79,7 +79,7 @@ async function confirmPending(store: MediaStore, binding: EpisodeStore, session:
   }
   if (domain === 'watchlist') { message += ' 仅核对待看清单。'; }
   if (evidence) { message += ' HTTP ' + evidence.httpStatus + '。'; }
-  await store.finishOperation(uuid, op.seq, 'verified', receiptId, receiptAt, message);
+  await store.confirmTitleOperation(uuid, domain, id, op, before, receiptId, receiptAt, message);
   const stored = await store.latestOperation(uuid, domain, id);
   if (!stored || stored.seq !== op.seq || stored.state !== 'verified' || stored.historyId !== receiptId) {
     throw new Error('Operation confirmation not persisted');

@@ -3,6 +3,7 @@ import { common } from '@kit.AbilityKit';
 import { Media } from '../model/Media';
 import { CommonEntry, CommonUpdate, commonId } from '../model/ThreeWay';
 import { MediaRecord, MediaSnapshot, migrateLegacy, validateMediaRecords, setMediaIntent } from '../model/MediaState';
+import { TitleChange, TitleIntent, TitleConsent, autoEligible, titleValue } from '../model/TitleQuickState';
 
 // A single atomic row stores the ordered catalog and the two independent
 // intent domains. The original Preferences store is never modified.
@@ -45,6 +46,8 @@ export class MediaStore {
     await db.executeSql('CREATE INDEX IF NOT EXISTS media_operation_lookup ON media_operation(account_uuid,domain,media_id,seq)');
     await db.executeSql('CREATE TABLE IF NOT EXISTS media_response_evidence (seq INTEGER PRIMARY KEY, account_uuid TEXT NOT NULL, requested_at TEXT NOT NULL, http_status INTEGER NOT NULL, accepted INTEGER NOT NULL CHECK(accepted IN (0,1)))');
     await db.executeSql("CREATE TABLE IF NOT EXISTS sync_common_state (account_uuid TEXT NOT NULL, domain TEXT NOT NULL CHECK(domain IN ('movie','watchlist')), payload TEXT NOT NULL, PRIMARY KEY(account_uuid,domain))");
+    await db.executeSql('CREATE TABLE IF NOT EXISTS title_quick_consent (slot INTEGER PRIMARY KEY CHECK(slot=1), account_uuid TEXT NOT NULL, client_id TEXT NOT NULL, epoch INTEGER NOT NULL, enabled INTEGER NOT NULL)');
+    await db.executeSql("CREATE TABLE IF NOT EXISTS title_intent (seq INTEGER PRIMARY KEY AUTOINCREMENT, account_uuid TEXT NOT NULL, domain TEXT NOT NULL CHECK(domain IN ('movie','watchlist')), media_id TEXT NOT NULL, value TEXT NOT NULL CHECK(value IN ('yes','no')), epoch INTEGER NOT NULL, operation_seq INTEGER NOT NULL, watched_at TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('open','review','settled')), UNIQUE(account_uuid,domain,media_id))");
     const store = new MediaStore(db);
     const existing = await store.readOptional();
     if (existing !== undefined) { return store; }
@@ -144,6 +147,109 @@ export class MediaStore {
     if (JSON.stringify(verified) !== JSON.stringify(records)) { throw new Error('Media write verification failed'); }
     return verified;
   }
+  async titleConsent(): Promise<TitleConsent | undefined> {
+    const rows = await this.db.querySql('SELECT account_uuid,client_id,epoch FROM title_quick_consent WHERE slot=1 AND enabled=1');
+    try {
+      if (!rows.goToFirstRow()) { return undefined; }
+      const uuid = rows.getString(0), clientId = rows.getString(1), epoch = rows.getLong(2);
+      if (!uuid || !clientId || !Number.isSafeInteger(epoch) || epoch <= 0) { throw new Error('Invalid title consent'); }
+      return { uuid: uuid, clientId: clientId, epoch: epoch };
+    } finally { rows.close(); }
+  }
+
+  async setTitleConsent(uuid: string, clientId: string, enabled: boolean): Promise<TitleConsent | undefined> {
+    if (!enabled) {
+      await this.db.executeSql('UPDATE title_quick_consent SET enabled=0 WHERE slot=1');
+      return undefined;
+    }
+    if (!uuid || !clientId) { throw new Error('Invalid consent scope'); }
+    const previous = await this.db.querySql('SELECT epoch FROM title_quick_consent WHERE slot=1');
+    let epoch = 1;
+    try { if (previous.goToFirstRow()) { epoch = previous.getLong(0) + 1; } } finally { previous.close(); }
+    if (!Number.isSafeInteger(epoch) || epoch <= 0) { throw new Error('Invalid consent epoch'); }
+    await this.db.executeSql('INSERT OR REPLACE INTO title_quick_consent(slot,account_uuid,client_id,epoch,enabled) VALUES(1,?,?,?,1)',
+      [uuid, clientId, epoch]);
+    return await this.titleConsent();
+  }
+
+  async titleIntents(uuid: string): Promise<TitleIntent[]> {
+    if (!uuid) { throw new Error('Invalid title intent scope'); }
+    const rows = await this.db.querySql('SELECT seq,media_id,domain,value,epoch,operation_seq,watched_at,state FROM title_intent WHERE account_uuid=? ORDER BY seq', [uuid]);
+    const result: TitleIntent[] = [];
+    try {
+      while (rows.goToNextRow()) {
+        const item: TitleIntent = { seq: rows.getLong(0), id: rows.getString(1), domain: rows.getString(2),
+          value: rows.getString(3), epoch: rows.getLong(4), operationSeq: rows.getLong(5), watchedAt: rows.getString(6), state: rows.getString(7) };
+        if (!commonId(item.domain, item.id) || item.domain === 'episode' || !Number.isSafeInteger(item.seq) ||
+            item.seq <= 0 || !Number.isSafeInteger(item.epoch) || item.epoch < 0 ||
+            !Number.isSafeInteger(item.operationSeq) || item.operationSeq < 0 ||
+            !['yes','no'].includes(item.value) || !['open','review','settled'].includes(item.state) ||
+            !Number.isFinite(Date.parse(item.watchedAt))) { throw new Error('Invalid title intent'); }
+        result.push(item);
+      }
+      return result;
+    } finally { rows.close(); }
+  }
+
+  // Explicit feature action and its authorization provenance commit together.
+  // No implicit queue from imports, restore, legacy records or enabling consent.
+  async saveTitleEdit(records: MediaRecord[], changes: TitleChange[], uuid: string, clientId: string,
+    watchedAt: string, allowAuto: boolean): Promise<MediaRecord[]> {
+    if (!uuid || !changes.length || !Number.isFinite(Date.parse(watchedAt))) { throw new Error('Invalid title edit'); }
+    const consent = allowAuto ? await this.titleConsent() : undefined;
+    const epoch = consent?.uuid === uuid && consent.clientId === clientId ? consent.epoch : 0;
+    this.db.beginTransaction();
+    try {
+      for (const change of changes) {
+        const record = records.find((row: MediaRecord) => row.media.id === change.id);
+        if (!record || !commonId(change.domain, change.id) || change.domain === 'episode' ||
+            !['yes','no'].includes(change.value) || titleValue(record, change.domain) !== change.value) {
+          throw new Error('Invalid title intent');
+        }
+        const prior = await this.latestOperation(uuid, change.domain, change.id);
+        const permitted = epoch > 0 && autoEligible(change.domain, change.value) && prior?.state !== 'pending';
+        await this.db.executeSql('INSERT OR REPLACE INTO title_intent(account_uuid,domain,media_id,value,epoch,operation_seq,watched_at,state) VALUES(?,?,?,?,?,?,?,?)',
+          [uuid, change.domain, change.id, change.value, permitted ? epoch : 0, prior?.seq ?? 0, watchedAt, permitted ? 'open' : 'review']);
+      }
+      const saved = await this.save(records);
+      this.db.commit();
+      return saved;
+    } catch (error) { this.db.rollBack(); throw new Error('Title edit transaction failed'); }
+  }
+
+  async finishTitleIntent(uuid: string, seq: number, state: string): Promise<void> {
+    if (!uuid || !Number.isSafeInteger(seq) || seq <= 0 || !['settled','review'].includes(state)) {
+      throw new Error('Invalid title intent result');
+    }
+    await this.db.executeSql("UPDATE title_intent SET state=? WHERE account_uuid=? AND seq=? AND state<>'settled'",
+      [state, uuid, seq]);
+  }
+
+  // Confirm the existing operation and its actual verified common value in
+  // one transaction. Receipt ownership rules are entirely unchanged.
+  async confirmTitleOperation(uuid: string, domain: string, id: string, op: MediaOperation,
+    activity: string, receiptId: number, receiptAt: string, message: string): Promise<void> {
+    const target = op.action === 'add';
+    this.db.beginTransaction();
+    try {
+      await this.finishOperation(uuid, op.seq, 'verified', receiptId, receiptAt, message);
+      const verified = await this.latestOperation(uuid, domain, id);
+      if (!verified || verified.seq !== op.seq || verified.state !== 'verified' || verified.historyId !== receiptId) {
+        throw new Error('Operation confirmation not persisted');
+      }
+      const record = (await this.load()).find((row: MediaRecord) => row.media.id === id);
+      if (record && titleValue(record, domain) === (target ? 'yes' : 'no')) {
+        await this.saveCommonStates(uuid, domain, activity, [{ id: id, value: target }]);
+        const intents = await this.titleIntents(uuid);
+        const intent = intents.find((row: TitleIntent) => row.domain === domain && row.id === id);
+        if (intent && intent.operationSeq < op.seq && intent.value === (target ? 'yes' : 'no')) {
+          await this.finishTitleIntent(uuid, intent.seq, 'settled');
+        }
+      }
+      this.db.commit();
+    } catch (error) { this.db.rollBack(); throw new Error('Operation confirmation transaction failed'); }
+  }
+
   async latestOperation(uuid: string, domain: string, id: string): Promise<MediaOperation | undefined> {
     const rows = await this.db.querySql("SELECT seq,action,state,history_id,watched_at,message FROM media_operation WHERE account_uuid=? AND domain=? AND media_id=? AND state<>'unsent' ORDER BY seq DESC LIMIT 1", [uuid, domain, id]);
     try {

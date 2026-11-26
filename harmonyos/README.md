@@ -1,4 +1,4 @@
-# Showly HarmonyOS Preview v0.9.3e.1b.1
+# Showly HarmonyOS Preview v0.9.3e.1c
 
 Unofficial native ArkTS prototype, not a complete Showly port. Your app uses Trakt but is not endorsed or certified by Trakt.
 
@@ -163,3 +163,7 @@ Collection and detail use the same read-side resolver. A verified matching episo
 ## v0.9.3e.1b.1 — feature-first presentation (package 0.9.3.8, build 32)
 
 One collection and episode display; next-episode candidates and counts derive from the same effective projection. Calendar membership uses personal library; weekly Trakt calendar and movie date acquisition remain incomplete upstream parity. Missing schedules fetched on detail entry as public metadata. Settings > Trakt sync > advanced sync management retains previews, manual imports and all existing write guards. Manual movie/watchlist uploads and removals still need confirmation. See docs/FEATURE_FIRST.md.
+
+## v0.9.3e.1c — scoped title quick sync (0.9.3.9, build 33)
+
+Separate explicit consent for new movie watched and watchlist add/remove actions, with an epoch-bound durable intent saved atomically with the title snapshot. Reuses reviewed single-title writer and readback/receipt checks; no automatic history deletion or replay of uncertain requests. Verified common membership allows safe remote-only adoption; outstanding explicit intent stays protected. Marking movie watched moves it out of watchlist as in Android. See docs/TITLE_QUICK_SYNC.md.
