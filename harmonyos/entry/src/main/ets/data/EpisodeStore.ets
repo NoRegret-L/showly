@@ -44,6 +44,7 @@ export interface QueueEntry {
   label: string;
   watchedAt: string;
   blocked: boolean;
+  protection: string;
 }
 export interface JournalIntent {
   seq: number;
@@ -305,9 +306,11 @@ export class EpisodeStore {
     const result: QueueEntry[] = [];
     for (const intent of intents) {
       if (!intent.watched || intent.autoUuid !== uuid || completed.has(intent.seq + ':' + intent.episodeId)) { continue; }
+      const guard = await this.hasUploadAttempt(uuid, intent.episodeId);
       result.push({ episodeId: intent.episodeId, seq: intent.seq, label: intent.label,
         watchedAt: new Date(intent.changedAt).toISOString(),
-        blocked: !intent.catalogKnown || await this.hasUploadAttempt(uuid, intent.episodeId) });
+        blocked: !intent.catalogKnown || guard,
+        protection: !intent.catalogKnown ? '目录异常' : guard ? '已有上传凭证，仅核对，不重发' : '' });
     }
     return result;
   }

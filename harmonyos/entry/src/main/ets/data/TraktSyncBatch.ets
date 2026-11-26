@@ -4,6 +4,7 @@ import { EpisodeStore, QueueEntry } from './EpisodeStore';
 import { SyncPreview, SyncDifference, buildSyncPreview, readSyncAccount, invalidateWatchedCache } from './TraktSyncPreview';
 import { readEpisodeHistory, sameMinute } from './TraktPlayHistory';
 import { readActivity } from './TraktLibrary';
+import { safeSyncError } from './SyncDiagnostics';
 
 interface BatchIds { trakt: number; }
 interface BatchEpisode { ids: BatchIds; watched_at: string; }
@@ -21,7 +22,7 @@ function current(session: TraktSession): void {
 // Do not upload an implicit default or an imported baseline record.
 export async function uploadBatch(store: EpisodeStore, session: TraktSession,
   uuid: string, selectedIds: number[], watchedAt: string, mode: string,
-  preview?: SyncPreview, queued: QueueEntry[] = []): Promise<BatchResult> {
+  preview?: SyncPreview, queued: QueueEntry[] = [], canSend?: () => boolean): Promise<BatchResult> {
   if (!selectedIds.length || new Set<number>(selectedIds).size !== selectedIds.length ||
       selectedIds.some((id: number) => !Number.isSafeInteger(id) || id <= 0) ||
       !Number.isFinite(Date.parse(watchedAt)) ||
@@ -66,13 +67,19 @@ export async function uploadBatch(store: EpisodeStore, session: TraktSession,
   if (await readActivity(session) !== fresh.activity) { throw new Error('Cloud changed before batch'); }
   const reserved: number[] = [];
   let sent = false;
+  let stage = '保留上传凭证';
+  let postStatus = '未发送';
+  let readErrors = 0;
+  let firstReadError = '';
   try {
+    if (canSend && !canSend()) { throw new Error('Foreground ended'); }
     for (const id of send) {
       current(session);
       await store.reserveUpload(uuid, id);
       reserved.push(id);
     }
     await store.logSync(uuid, mode, send, '已保留凭证，准备发送；若中断需核对');
+    stage = '发送前活动及账户复核';
     if (await readActivity(session) !== fresh.activity) { throw new Error('Cloud changed'); }
     current(session);
     const verified = await readSyncAccount(session);
@@ -85,7 +92,9 @@ export async function uploadBatch(store: EpisodeStore, session: TraktSession,
     let accepted = false;
     try {
       // Any failure after entering request() is ambiguous, even an HTTP error.
+      if (canSend && !canSend()) { throw new Error('Foreground ended'); }
       invalidateWatchedCache();
+      stage = '发送历史新增';
       sent = true;
       const response = await request.request('https://api.trakt.tv/sync/history', {
         method: http.RequestMethod.POST,
@@ -93,18 +102,23 @@ export async function uploadBatch(store: EpisodeStore, session: TraktSession,
           'trakt-api-key': session.clientId, 'Authorization': 'Bearer ' + session.token },
         extraData: JSON.stringify(body), expectDataType: http.HttpDataType.STRING
       });
+      postStatus = 'HTTP ' + response.responseCode;
       if ((response.responseCode === 200 || response.responseCode === 201) && typeof response.result === 'string') {
         const result = JSON.parse(response.result) as BatchResponse;
         accepted = result.added?.episodes === send.length && (result.added?.movies ?? 0) === 0 &&
           Array.isArray(result.not_found?.episodes) && result.not_found?.episodes?.length === 0;
       }
     } catch (error) {
+      if (!sent) { throw new Error('Foreground ended'); }
+      postStatus = '响应未确认：' + safeSyncError(error as Error);
       // No retransmission; verify readback below.
     } finally { request.destroy(); }
     let present = 0;
     let receipts = 0;
+    stage = '上传后账户复核';
     const readback = await readSyncAccount(session);
     if (readback.uuid !== uuid) { throw new Error('Account changed after POST'); }
+    stage = '逐集历史回读及本机保存';
     for (const id of send) {
       current(session);
       try {
@@ -120,23 +134,27 @@ export async function uploadBatch(store: EpisodeStore, session: TraktSession,
           }
         }
       } catch (error) {
+        readErrors++;
+        if (!firstReadError) { firstReadError = safeSyncError(error as Error); }
         // Each unverifiable episode stays protected; no retry.
       }
     }
     const message = '请求 ' + send.length + ' 集，回读存在 ' + present + ' 集，未确认 ' +
       (send.length - present) + ' 集，撤销凭证 ' + receipts + ' 集，跳过 ' + skipped +
-      ' 集，受保护 ' + blocked + ' 集。' + (accepted ? '' : ' 服务端新增数量未完整确认。');
+      ' 集，受保护 ' + blocked + ' 集。' + (accepted ? '' : ' 服务端新增数量未完整确认。') +
+      ' 发送结果：' + postStatus + (readErrors ? '；回读/保存异常 ' + readErrors + ' 次：' + firstReadError : '');
+    stage = '保存批量结果日志';
     await store.logSync(uuid, mode, send, message);
     return { message: message, completedIds: completedIds };
   } catch (error) {
     if (!sent) {
       // Only this live invocation knows no POST was issued.
       for (const id of reserved) { await store.releaseUnsentUpload(uuid, id); }
-      const message = '发送前校验失败，未上传；已释放本次未发送凭证，可手动重新预览。';
+      const message = '发送前失败，未上传；已释放本次未发送凭证。阶段：' + stage + '；' + safeSyncError(error as Error);
       await store.logSync(uuid, mode, selectedIds, message);
       return { message: message, completedIds: completedIds };
     }
-    const message = '请求可能已发送，结果未确认；保留全部凭证，禁止盲目重试。';
+    const message = '请求可能已发送，保留全部凭证，禁止盲目重试。阶段：' + stage + '；' + postStatus + '；' + safeSyncError(error as Error);
     await store.logSync(uuid, mode, send, message);
     return { message: message, completedIds: completedIds };
   }

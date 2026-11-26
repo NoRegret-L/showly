@@ -16,6 +16,10 @@ import { SyncAccount, SyncPreview, SyncDifference, readSyncAccount, buildSyncPre
 import { uploadSelectedEpisode } from '../data/TraktSyncUpload';
 import { removeSelectedPlay } from '../data/TraktSyncRemove';
 import { uploadBatch } from '../data/TraktSyncBatch';
+import { connection } from '@kit.NetworkKit';
+import { BusinessError } from '@kit.BasicServicesKit';
+import { reconcileQueue } from '../data/TraktQueueReconcile';
+import { safeSyncError } from '../data/SyncDiagnostics';
 
 @Entry
 @Component
@@ -23,7 +27,7 @@ struct Index {
   @State title: string = '';
   @State tab: string = 'progress';
   private episodeStore?: EpisodeStore;
-  @State syncBusy: boolean = false;
+  @State @Watch('onRecoveryGateChanged') syncBusy: boolean = false;
   @State syncStatus: string = '';
   @State syncAccount?: SyncAccount = undefined;
   @State syncBound: boolean = false;
@@ -37,6 +41,12 @@ struct Index {
   @State importConfirm: boolean = false;
   @State autoConsent?: AutoConsent = undefined;
   @State queueRows: QueueEntry[] = [];
+  private pageVisible: boolean = false;
+  private recoveryPending: boolean = false;
+  private netListener?: connection.NetConnection;
+  private netId: number = -1;
+  private netValidated: boolean = false;
+  @State networkStatus: string = '';
   @State showSyncLogs: boolean = false;
   @State queueConfirm: boolean = false;
   @State autoStatus: string = '';
@@ -46,7 +56,7 @@ struct Index {
   @State episodeInitStatus: string = '';
   @State localSeries?: LocalSeriesState = undefined;
   @State localSeason: number = -1;
-  @State localBusy: boolean = false;
+  @State @Watch('onRecoveryGateChanged') localBusy: boolean = false;
   @State localStatus: string = '';
   @State localRecent: Media[] = [];
   @State confirmSeason: number = -1;
@@ -92,15 +102,15 @@ struct Index {
   @State clientId: string = '';
   @State draftId: string = '';
   @State configuring: boolean = false;
-  @State setupBusy: boolean = false;
+  @State @Watch('onRecoveryGateChanged') setupBusy: boolean = false;
   @State settingsReady: boolean = false;
   @State setupStatus: string = '';
   @State cloud?: CloudLibrary = undefined;
-  @State cloudBusy: boolean = false;
+  @State @Watch('onRecoveryGateChanged') cloudBusy: boolean = false;
   @State cloudStatus: string = '';
   private settings?: ClientSettings;
   @StorageLink('traktAuthStatus') authStatus: string = '尚未登录 Trakt';
-  @StorageLink('traktAuthBusy') authBusy: boolean = false;
+  @StorageLink('traktAuthBusy') @Watch('onRecoveryGateChanged') authBusy: boolean = false;
   @StorageLink('traktSignedIn') signedIn: boolean = false;
   @State items: Media[] = [];
   @State results: Media[] = [];
@@ -144,10 +154,90 @@ struct Index {
   }
 
   onPageShow(): void {
-    if (this.clientId && !this.setupBusy && !this.cloudBusy && !this.syncBusy) {
-      if (this.episodeReady && this.autoActive()) { this.resumeQueued(); }
-      else { traktAuth.restore(this.clientId); }
+    this.pageVisible = true;
+    this.startNetworkListener();
+    if (this.autoActive()) { this.requestRecovery(); }
+    else if (this.clientId && !this.setupBusy && !this.cloudBusy && !this.syncBusy) {
+      traktAuth.restore(this.clientId);
     }
+  }
+
+  onPageHide(): void {
+    this.pageVisible = false;
+    this.recoveryPending = false;
+  }
+
+  aboutToDisappear(): void {
+    this.pageVisible = false;
+    this.recoveryPending = false;
+    const listener = this.netListener;
+    this.netListener = undefined;
+    if (listener) {
+      try { listener.unregister((error: BusinessError) => {}); } catch (error) {}
+    }
+  }
+
+  private startNetworkListener(): void {
+    if (this.netListener) { return; }
+    try {
+      const listener = connection.createNetConnection();
+      this.netListener = listener;
+      listener.on('netAvailable', (handle: connection.NetHandle) => {
+        if (this.netListener !== listener) { return; }
+        if (this.netId !== handle.netId) {
+          this.netId = handle.netId;
+          this.netValidated = false;
+          this.networkStatus = '网络已连接，等待 Trakt 核验';
+          this.requestRecovery();
+        }
+      });
+      listener.on('netCapabilitiesChange', (info: connection.NetCapabilityInfo) => {
+        if (this.netListener !== listener) { return; }
+        const validated = info.netCap.networkCap?.includes(connection.NetCap.NET_CAPABILITY_VALIDATED) === true;
+        const changed = this.netId !== info.netHandle.netId || (!this.netValidated && validated);
+        this.netId = info.netHandle.netId;
+        this.netValidated = validated;
+        if (changed && validated) {
+          this.networkStatus = '系统网络已验证，正在核对待同步记录';
+          this.requestRecovery();
+        }
+      });
+      listener.on('netLost', (handle: connection.NetHandle) => {
+        if (this.netListener !== listener || this.netId !== handle.netId) { return; }
+        this.netId = -1;
+        this.netValidated = false;
+        this.networkStatus = '网络断开；本机记录保留';
+      });
+      listener.register((error: BusinessError) => {
+        if (this.netListener !== listener) {
+          if (!error) { try { listener.unregister((failure: BusinessError) => {}); } catch (failure) {} }
+          return;
+        }
+        if (error) {
+          this.netListener = undefined;
+          this.networkStatus = '网络监听注册失败：SDK 错误码 ' + error.code + '；仍可手动处理队列';
+        }
+      });
+    } catch (error) {
+      this.netListener = undefined;
+      this.networkStatus = '网络监听不可用；仍可手动处理队列';
+    }
+  }
+
+  private requestRecovery(): void {
+    if (!this.pageVisible || !this.autoActive() || !this.episodeReady) { return; }
+    this.recoveryPending = true;
+    this.onRecoveryGateChanged();
+  }
+
+  // A busy auth/DB/sync operation no longer drops the network-resume event.
+  // Coalesce to a single pending event, not a periodic retry loop.
+  private onRecoveryGateChanged(): void {
+    if (!this.recoveryPending || !this.pageVisible || !this.autoActive() ||
+        !this.episodeReady || this.syncBusy || this.localBusy || this.cloudBusy ||
+        this.authBusy || this.setupBusy) { return; }
+    this.recoveryPending = false;
+    this.resumeQueued();
   }
 
   private async initializeEpisodes(context: common.UIAbilityContext): Promise<void> {
@@ -158,7 +248,7 @@ struct Index {
       const consent = await this.episodeStore.autoConsent();
       if (consent && consent.clientId === this.clientId) { this.autoConsent = consent; }
       await this.reloadQueue();
-      this.resumeQueued();
+      this.requestRecovery();
     } catch (error) {
       this.episodeInitStatus = '分集数据库打开失败，已停止分集写入；旧收藏不受影响。';
     }
@@ -227,7 +317,7 @@ struct Index {
     } finally {
       this.localBusy = false;
     }
-    if (saved && watched && auto && this.autoActive()) { await this.resumeQueued(); }
+    if (saved && watched && auto && this.autoActive()) { this.requestRecovery(); }
   }
 
   @Builder
@@ -499,6 +589,16 @@ struct Index {
     return !!this.autoConsent && !!this.clientId && this.autoConsent.clientId === this.clientId;
   }
 
+  private async refreshSyncLogs(): Promise<void> {
+    const store = this.episodeStore;
+    const account = this.syncAccount;
+    if (!store || !account || !this.syncBound ||
+        !traktAuth.isCurrent(this.clientId, account.generation)) { return; }
+    try { this.syncLogs = await store.syncLogs(account.uuid); } catch (error) {
+      this.autoStatus = '日志读取失败：' + safeSyncError(error as Error);
+    }
+  }
+
   private async reloadQueue(): Promise<void> {
     const store = this.episodeStore;
     if (!store) { return; }
@@ -514,6 +614,7 @@ struct Index {
     try {
       if (!enabled) {
         await store.clearAutoConsent();
+        this.recoveryPending = false;
         this.autoConsent = undefined;
         this.autoStatus = '自动新增已关闭；待同步记录保留，须手动确认处理。';
       } else {
@@ -533,11 +634,13 @@ struct Index {
     } catch (error) {
       this.autoStatus = '同步模式保存失败，请重试。';
     } finally { this.syncBusy = false; }
+    if (enabled && this.autoActive()) { this.requestRecovery(); }
   }
 
   // Before an explicit credential change, disable persisted authorization.
   // Keep queued events; they remain bound to the original UUID.
   private async revokeAuto(): Promise<void> {
+    this.recoveryPending = false;
     this.autoConsent = undefined;
     if (this.episodeStore) { await this.episodeStore.clearAutoConsent(); }
     this.autoStatus = '自动新增已关闭；旧队列仍保留。';
@@ -547,7 +650,7 @@ struct Index {
     const store = this.episodeStore;
     const clientId = this.clientId;
     const consent = this.autoConsent;
-    if (!store || !this.episodeReady || !clientId || this.syncBusy || this.localBusy ||
+    if (!store || !this.episodeReady || !clientId || !this.pageVisible || this.syncBusy || this.localBusy ||
         this.cloudBusy || this.authBusy || this.setupBusy || (!manual && !this.autoActive())) { return; }
     if (manual && (!this.syncAccount || !this.syncBound || !this.queueConfirm)) { return; }
     const expected = manual ? this.syncAccount?.uuid : consent?.uuid;
@@ -555,35 +658,86 @@ struct Index {
     this.syncBusy = true;
     this.queueConfirm = false;
     this.autoStatus = '正在读取待同步队列…';
+    let stage = '读取本机队列';
+    let ids: number[] = [];
     try {
-      const pending = await store.queueEntries(expected);
+      let pending = await store.queueEntries(expected);
+      ids = pending.map((entry: QueueEntry) => entry.episodeId);
       if (!pending.length) {
         this.queueRows = [];
         this.autoStatus = '没有待同步新增。';
         return;
       }
+      stage = '恢复登录';
       await traktAuth.restore(clientId, true);
       const session = traktAuth.session(clientId);
       if (!session) { throw new Error('Offline or sign-in required'); }
+      stage = '核对账户';
       const account = await readSyncAccount(session);
       if (account.uuid !== expected || this.clientId !== clientId || await store.boundAccount() !== expected) {
         if (!manual) { await this.revokeAuto(); }
         throw new Error('Account mismatch');
       }
-      if (!manual && (!this.autoActive() || this.autoConsent?.uuid !== expected)) {
-        throw new Error('Auto disabled');
+      this.syncAccount = account;
+      this.syncBound = true;
+      const canSend = (): boolean => {
+        return this.pageVisible && this.clientId === clientId &&
+          traktAuth.isCurrent(clientId, session.generation) &&
+          (manual || (this.autoActive() && this.autoConsent?.uuid === expected));
+      };
+      let reconciled = 0;
+      if (pending.some((entry: QueueEntry) => entry.blocked)) {
+        stage = '只读核对受保护队列';
+        this.autoStatus = '正在只读核对已有凭证，不会重复上传…';
+        const checked = await reconcileQueue(store, session, expected, pending);
+        reconciled += checked.completed.length;
+        pending = checked.remaining;
+        if (checked.completed.length) {
+          await store.logSync(expected, 'reconcile', checked.completed,
+            '只读核对确认云端存在 ' + checked.completed.length + ' 集，已清理队列；未重发。');
+        }
       }
-      const ids = pending.map((entry: QueueEntry) => entry.episodeId);
-      const result = await uploadBatch(store, session, expected, ids, new Date().toISOString(), 'queue', undefined, pending);
-      for (const entry of pending) {
+      const eligible = pending.filter((entry: QueueEntry) => !entry.blocked);
+      if (!eligible.length) {
+        this.autoStatus = '只读核对完成：已清理 ' + reconciled + ' 集；剩余 ' + pending.length +
+          ' 集受保护或目录异常，未发送新增请求。';
+        return;
+      }
+      stage = '上传未发送的新增分集';
+      if (!canSend()) { throw new Error('Foreground ended'); }
+      this.autoStatus = '正在校验并处理 ' + eligible.length + ' 集未发送记录…';
+      const result = await uploadBatch(store, session, expected,
+        eligible.map((entry: QueueEntry) => entry.episodeId), new Date().toISOString(),
+        'queue', undefined, eligible, canSend);
+      stage = '保存已完成队列';
+      for (const entry of eligible) {
         if (result.completedIds.includes(entry.episodeId)) { await store.finishQueue(expected, entry); }
       }
       this.autoStatus = result.message;
-      this.syncLogs = await store.syncLogs(expected);
+      // Only one additional fresh READ, never a second POST. If the app exits
+      // or this read fails, the next foreground/network event can reconcile.
+      const remaining = await store.queueEntries(expected);
+      const attempted = remaining.filter((entry: QueueEntry) => entry.blocked &&
+        eligible.some((old: QueueEntry) => old.episodeId === entry.episodeId && old.seq === entry.seq));
+      if (attempted.length > 0 && this.pageVisible) {
+        stage = '上传后补充只读核对';
+        const checked = await reconcileQueue(store, session, expected, attempted);
+        reconciled += checked.completed.length;
+        await store.logSync(expected, 'reconcile', checked.completed,
+          '上传后只读核对：确认 ' + checked.completed.length + ' 集，未重发；剩余队列 ' + checked.remaining.length + ' 集。');
+      }
+      if (reconciled) { this.autoStatus += ' 只读补充核对清理 ' + reconciled + ' 集。'; }
     } catch (error) {
-      this.autoStatus = '队列未完成，已保留本机操作；联网后可再次处理未发送项，受保护项不会盲目重试。';
+      this.autoStatus = '队列未完成 · 阶段：' + stage + ' · ' + safeSyncError(error as Error) +
+        '。本机记录保留，受保护项不会重发。';
+      try { await store.logSync(expected, 'queue', ids, this.autoStatus); } catch (failure) {}
     } finally {
-      try { await this.reloadQueue(); } catch (error) {}
+      try {
+        await this.reloadQueue();
+        this.syncLogs = await store.syncLogs(expected);
+      } catch (error) {
+        this.autoStatus += '；本机队列或日志刷新失败：' + safeSyncError(error as Error);
+      }
       this.syncPreview = undefined;
       this.syncBusy = false;
     }
@@ -800,10 +954,11 @@ struct Index {
           Button(this.autoActive() ? '关闭自动新增' : '授权开启持久自动新增')
             .enabled(!this.syncBusy && !this.localBusy && !this.cloudBusy && !this.authBusy)
             .onClick(() => { this.setAuto(!this.autoActive()); })
+          if (this.networkStatus) { Text(this.networkStatus).fontSize(12).width('100%') }
           if (this.autoStatus) { Text(this.autoStatus).fontSize(13).width('100%') }
           Text('待同步队列：' + this.queueRows.length + ' 集（含受保护项）').fontSize(15).width('100%')
           ForEach(this.queueRows.slice(0, this.collectionPageSize), (entry: QueueEntry) => {
-            Text(entry.label + ' · ' + (entry.blocked ? '受保护，禁止重发/目录异常' : '等待核验'))
+            Text(entry.label + ' · ' + (entry.blocked ? entry.protection : '等待核验'))
               .fontSize(12).width('100%')
           }, (entry: QueueEntry) => entry.seq + ':' + entry.episodeId)
           if (this.queueRows.length > this.collectionPageSize) {
@@ -822,7 +977,7 @@ struct Index {
             }.width('100%')
           }
           Button(this.showSyncLogs ? '收起同步日志' : '查看同步日志')
-            .onClick(() => { this.showSyncLogs = !this.showSyncLogs; })
+            .onClick(() => { this.showSyncLogs = !this.showSyncLogs; if (this.showSyncLogs) { this.refreshSyncLogs(); } })
           if (this.showSyncLogs) {
             Text('最近同步日志（最多 12 条）').fontSize(15).fontWeight(FontWeight.Medium).width('100%')
             if (!this.syncLogs.length) { Text('暂无记录').fontSize(12) }
@@ -1873,7 +2028,7 @@ struct Index {
               this.themeButton('深色', 'dark')
             }.width('100%')
             Text(this.themeStatus).fontSize(12)
-            Text('版本 0.8.5').fontSize(12).fontColor($r('app.color.showly_secondary'))
+            Text('版本 0.8.5.1').fontSize(12).fontColor($r('app.color.showly_secondary'))
             Text('非官方应用，使用 Trakt，但未获 Trakt 认可或认证。')
               .fontSize(12).fontColor($r('app.color.showly_secondary'))
         Text('Trakt 账户').fontSize(20).fontWeight(FontWeight.Medium)

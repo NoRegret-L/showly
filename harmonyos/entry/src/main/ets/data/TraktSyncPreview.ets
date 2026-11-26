@@ -54,7 +54,7 @@ export async function readSyncAccount(session: TraktSession): Promise<SyncAccoun
     });
     ensureCurrent(session);
     if (response.responseCode !== 200 || typeof response.result !== 'string') {
-      throw new Error('Account verification failed');
+      throw new Error('Account verification HTTP ' + response.responseCode);
     }
     const settings = JSON.parse(response.result) as UserSettings;
     const user = settings.user;
