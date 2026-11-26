@@ -4,6 +4,7 @@ import { LibraryStore } from '../data/LibraryStore';
 import { MediaStore } from '../data/MediaStore';
 import { BackupData, RestorePlan, createBackup, exportBackup, selectBackup, planRestore, restoreBackup } from '../data/LocalBackup';
 import { MediaRecord, migrateLegacy, isTraktMedia, applyLegacyEdit, setMediaIntent, inLocalWatchlist } from '../model/MediaState';
+import { PersonalLibraryRow, LibraryShowEvidence, buildPersonalLibrary, filterPersonalLibrary, personalLibraryLabel } from '../model/PersonalLibrary';
 import { MediaPreview, MediaDifference, buildMediaPreview } from '../data/TraktMediaPreview';
 import { syncSelectedMedia, reconcilePendingMedia } from '../data/TraktMediaSync';
 import { checkpointEpisodes, checkpointMedia, adoptEpisodeCloud, adoptMediaCloud } from '../data/ThreeWaySync';
@@ -377,7 +378,7 @@ struct Index {
       const consent = await this.episodeStore.autoConsent();
       if (consent && consent.clientId === this.clientId) { this.autoConsent = consent; }
       await this.reloadQueue();
-      if (this.tab === 'progress' && this.progressMode === 'next') { await this.loadNextShows(); }
+      if (this.tab === 'library' || (this.tab === 'progress' && this.progressMode === 'next')) { await this.loadNextShows(); }
       this.requestRecovery();
     } catch (error) {
       this.episodeInitStatus = '分集数据库打开失败，已停止分集写入；旧收藏不受影响。';
@@ -1636,7 +1637,7 @@ struct Index {
     this.cloudStatus = '';
     this.trackingPage = 1;
     this.trackingQuery = '';
-    if (this.collectionFilter === 'tracking') { this.resetCollection(); }
+    this.resetCollection();
   }
 
   private async loadCloud(): Promise<void> {
@@ -1656,7 +1657,8 @@ struct Index {
       const snapshot = await readCloudLibrary(session);
       if (traktAuth.isCurrent(this.clientId, snapshot.generation)) {
         this.cloud = snapshot;
-        if (this.collectionFilter === 'tracking') { this.resetCollection(); }
+        this.resetCollection();
+        if (this.tab === 'library' && this.collectionGrid && !this.selectedMedia) { this.loadCollectionPosters(); }
         this.cloudStatus = '云端读取完成；尚未修改本机或云端记录。';
       }
     } catch (error) {
@@ -1858,7 +1860,7 @@ struct Index {
       this.invalidateMovieCalendar();
       this.cloud = undefined;
       this.cloudStatus = '电影/待看操作已结束；云端清单请重新读取。';
-      if (this.collectionFilter === 'tracking') { this.resetCollection(); }
+      this.resetCollection();
       this.mediaPreview = undefined;
       // Supplemental read only after a not-yet-visible result or a revision
       // race, not repeated network/429 errors. Never resubmit a mutation.
@@ -2251,6 +2253,7 @@ struct Index {
 
   private invalidateNextShows(): void {
     this.nextShows = [];
+    this.resetCollection();
     this.nextPage = 1;
     this.nextStatus = '本机记录已变化，请刷新追剧进度。';
   }
@@ -2262,6 +2265,8 @@ struct Index {
     this.nextStatus = '正在计算本机已缓存剧集进度…';
     try {
       this.nextShows = await readNextShows(store);
+      this.resetCollection();
+      if (this.tab === 'library' && this.collectionGrid && !this.selectedMedia) { this.loadCollectionPosters(); }
       this.nextPage = 1;
       this.nextStatus = this.nextShows.length ? '已读取 ' + this.nextShows.length + ' 部本机缓存目录；不代表全部云端剧集。' :
         '没有缓存分集目录。请打开剧集详情并更新分集目录。';
@@ -2699,6 +2704,8 @@ struct Index {
       } else if (this.tab === 'discover') {
         await this.loadDiscover(this.discoverPage);
       } else if (this.tab === 'library') {
+        await this.loadNextShows();
+        if (this.signedIn) { await this.loadCloud(); }
         if (this.collectionGrid) { await this.loadCollectionPosters(); }
       } else if (this.tab === 'progress') {
         if (this.progressMode === 'next') { await this.loadNextShows(); }
@@ -2722,27 +2729,33 @@ struct Index {
     this.collectionStatus = '';
   }
 
-  private collectionItems(): Media[] {
-    if (this.collectionFilter === 'tracking') {
-      const snapshot = this.cloud;
-      if (!snapshot || !this.signedIn || !traktAuth.isCurrent(this.clientId, snapshot.generation)) {
-        return [];
-      }
-      return snapshot.shows.map((show: ShowProgress): Media => {
-        return { id: show.id, title: show.title, kind: 'show', year: 0, watched: false };
-      });
-    }
-    if (this.collectionFilter === 'all') { return this.items; }
-    if (this.collectionFilter === 'queue') {
-      return this.mediaRecords.filter((record: MediaRecord) => inLocalWatchlist(record))
-        .map((record: MediaRecord) => record.media);
-    }
-    return this.items.filter((item: Media) => item.watched);
+  private personalLibrary(): PersonalLibraryRow[] {
+    const snapshot = this.cloud;
+    const cloud = snapshot && this.signedIn && traktAuth.isCurrent(this.clientId, snapshot.generation) ?
+      snapshot : undefined;
+    const cloudShows = (cloud?.shows ?? []).map((show: ShowProgress): LibraryShowEvidence => {
+      const media: Media = { id: show.id, title: show.title, kind: 'show', year: show.year ?? 0, watched: false };
+      return { media: media, watchedEpisodes: show.watchedEpisodes };
+    });
+    const localShows = this.nextShows.map((show: NextShow): LibraryShowEvidence =>
+      ({ media: show.media, watchedEpisodes: show.completed }));
+    return buildPersonalLibrary(this.mediaRecords, cloud?.watchedMovies ?? [], cloud?.watchlist ?? [],
+      cloudShows, localShows);
   }
 
-  private collectionSlice(): Media[] {
+  private collectionItems(): PersonalLibraryRow[] {
+    return filterPersonalLibrary(this.personalLibrary(), this.collectionFilter);
+  }
+
+  private collectionSlice(): PersonalLibraryRow[] {
     const start = (this.collectionPage - 1) * this.collectionPageSize;
     return this.collectionItems().slice(start, start + this.collectionPageSize);
+  }
+
+  private toggleCollectionLocal(id: string): void {
+    const local = this.items.find((item: Media) => item.id === id);
+    if (!local || !this.ready || this.saving || this.cloudBusy || this.syncBusy) { return; }
+    this.save(setWatched(this.items, id, !local.watched));
   }
 
   private collectionPages(): number {
@@ -2772,7 +2785,7 @@ struct Index {
     }
     const revision = ++this.collectionRevision;
     const clientId = this.clientId;
-    const items = this.collectionSlice();
+    const items = this.collectionSlice().map((row: PersonalLibraryRow): Media => row.media);
     this.collectionBusy = true;
     this.collectionStatus = '正在读取本页海报…';
     this.collectionCards = items.map((media: Media): DiscoverItem => {
@@ -2827,7 +2840,12 @@ struct Index {
       Text('我的收藏').fontSize(25).fontWeight(FontWeight.Bold).width('100%')
       Text(this.libraryStatus).fontSize(13)
       Text(this.migrationStatus).fontSize(12).width('100%')
-      Text('旧收藏分类保留；明确设置的待看状态独立于已看。').fontSize(12).width('100%')
+      Text('本机收藏、分集观看证据与当前账户云端清单合并浏览；明确本机意图优先，不自动写入。').fontSize(12).width('100%')
+      Text('本机与云端集数分别显示；缓存看完不代表剧集已完结。').fontSize(12).width('100%')
+      Button(this.cloudBusy ? '读取中…' : '读取／刷新个人云端清单')
+        .enabled(this.signedIn && !this.cloudBusy && !this.syncBusy && !this.authBusy && !this.setupBusy)
+        .onClick(() => { this.loadCloud(); })
+      Text(this.cloudStatus || '云端清单未读取时，仅显示本机证据。').fontSize(12).width('100%')
       Row({ space: 6 }) {
         this.collectionFilterButton('全部', 'all')
         this.collectionFilterButton('待看', 'queue')
@@ -2835,9 +2853,9 @@ struct Index {
         this.collectionFilterButton('已看', 'watched')
       }.width('100%')
       if (this.collectionFilter === 'tracking') {
-        Text('Trakt 看过的剧集（含可能已追完的剧集），只读。').fontSize(12)
-        if (!this.cloud || !this.signedIn) {
-          Button('前往云端读取记录').onClick(() => { this.tab = 'cloud'; })
+        Text('有本机或云端观看证据的剧集；播出状态及完整进度尚待核实。').fontSize(12)
+        if (!this.signedIn) {
+          Button('前往云端登录').onClick(() => { this.navigate('cloud'); })
         }
       }
       Text('共 ' + this.collectionItems().length + ' 部').fontSize(14)
@@ -2856,10 +2874,10 @@ struct Index {
       if (this.collectionGrid) {
         Text(this.collectionStatus).fontSize(12)
         Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.SpaceBetween }) {
-          ForEach(this.collectionSlice(), (item: Media) => {
+          ForEach(this.collectionSlice(), (row: PersonalLibraryRow) => {
             Column({ space: 6 }) {
-              if (this.collectionCards.find((card: DiscoverItem) => card.media.id === item.id)?.posterUri) {
-                Image(this.collectionCards.find((card: DiscoverItem) => card.media.id === item.id)?.posterUri)
+              if (this.collectionCards.find((card: DiscoverItem) => card.media.id === row.media.id)?.posterUri) {
+                Image(this.collectionCards.find((card: DiscoverItem) => card.media.id === row.media.id)?.posterUri)
                   .width('100%').aspectRatio(0.667).objectFit(ImageFit.Cover).borderRadius(10)
               } else {
                 Column() {
@@ -2867,31 +2885,35 @@ struct Index {
                 }.width('100%').aspectRatio(0.667).justifyContent(FlexAlign.Center)
                   .backgroundColor($r('app.color.showly_placeholder')).borderRadius(10)
               }
-              Text(mediaLabel(item)).fontSize(14).maxLines(2)
+              Text(mediaLabel(row.media)).fontSize(14).maxLines(2)
                 .textOverflow({ overflow: TextOverflow.Ellipsis }).width('100%')
-              if (this.collectionFilter !== 'tracking') {
-                Button(item.watched ? '撤销' : '已看').fontSize(12)
-                  .enabled(this.ready && !this.saving && !this.cloudBusy)
-                  .onClick(() => { this.save(setWatched(this.items, item.id, !item.watched)); })
+              Text(personalLibraryLabel(row)).fontSize(11).width('100%')
+              if (row.localRecord && this.collectionFilter !== 'tracking') {
+                Button(row.localRecord?.media.watched ? '撤销本机已看' : '标记本机已看').fontSize(12)
+                  .enabled(this.ready && !this.saving && !this.cloudBusy && !this.syncBusy)
+                  .onClick(() => { this.toggleCollectionLocal(row.media.id); })
               }
             }.width('48%').padding({ bottom: 12 })
-              .onClick(() => { this.openDetail(item); })
-          }, (item: Media) => item.id + ':' +
-            (this.collectionCards.find((card: DiscoverItem) => card.media.id === item.id)?.posterUri ?? ''))
+              .onClick(() => { this.openDetail(row.media); })
+          }, (row: PersonalLibraryRow) => row.media.id + ':' + personalLibraryLabel(row) + ':' +
+            (this.collectionCards.find((card: DiscoverItem) => card.media.id === row.media.id)?.posterUri ?? ''))
         }.width('100%')
       } else {
-        ForEach(this.collectionSlice(), (item: Media) => {
-          if (this.collectionFilter === 'tracking') {
-            Row({ space: 8 }) {
-              Text(item.title).layoutWeight(1)
-              Text('已看 ' + (this.cloud?.shows.find((show: ShowProgress) => show.id === item.id)?.watchedEpisodes ?? 0) + ' 集')
-                .fontSize(13)
-              Button('详情').fontSize(12).onClick(() => { this.openDetail(item); })
-            }.width('100%')
-          } else {
-            this.libraryRow(item)
-          }
-        }, (item: Media) => item.id)
+        ForEach(this.collectionSlice(), (row: PersonalLibraryRow) => {
+          Row({ space: 8 }) {
+            Column({ space: 4 }) {
+              Text(mediaLabel(row.media)).width('100%')
+              Text(personalLibraryLabel(row)).fontSize(12).width('100%')
+            }.layoutWeight(1).onClick(() => { this.openDetail(row.media); })
+            Button('详情').fontSize(12).onClick(() => { this.openDetail(row.media); })
+            if (row.localRecord && this.collectionFilter !== 'tracking') {
+              Button(row.localRecord?.media.watched ? '撤销本机已看' : '标记本机已看').fontSize(12)
+                .enabled(this.ready && !this.saving && !this.cloudBusy && !this.syncBusy)
+                .onClick(() => { this.toggleCollectionLocal(row.media.id); })
+            }
+          }.width('100%')
+        }, (row: PersonalLibraryRow) => row.media.id + ':' + personalLibraryLabel(row) + ':' +
+          (row.localRecord?.media.watched ? 'yes' : 'no'))
       }
       Row({ space: 8 }) {
         Button('上一页').layoutWeight(1).enabled(!this.collectionBusy && this.collectionPage > 1)
@@ -3019,7 +3041,7 @@ struct Index {
   onBackPress(): boolean {
     if (this.selectedMedia) {
       this.closeDetail();
-      if (this.tab === 'progress' && this.progressMode === 'next' && !this.nextShows.length) { this.loadNextShows(); }
+      if ((this.tab === 'library' || (this.tab === 'progress' && this.progressMode === 'next')) && !this.nextShows.length) { this.loadNextShows(); }
       return true;
     }
     if (this.tab === 'search' || this.tab === 'cloud' || this.tab === 'account') {
@@ -3085,6 +3107,7 @@ struct Index {
     if (value === 'discover' && this.discoverItems.length === 0 && !this.discoverBusy) {
       this.loadDiscover();
     }
+    if (value === 'library' && this.episodeReady && !this.nextShows.length) { this.loadNextShows(); }
     if (value === 'library' && this.collectionGrid && this.collectionCards.length === 0 && !this.collectionBusy) {
       this.loadCollectionPosters();
     }
@@ -3113,7 +3136,7 @@ struct Index {
   @Builder
   detailPage(item: Media) {
     Column({ space: 12 }) {
-      Button('返回').onClick(() => { this.closeDetail(); if (this.tab === 'progress' && this.progressMode === 'next' && !this.nextShows.length) { this.loadNextShows(); } })
+      Button('返回').onClick(() => { this.closeDetail(); if ((this.tab === 'library' || (this.tab === 'progress' && this.progressMode === 'next')) && !this.nextShows.length) { this.loadNextShows(); } })
       Text(this.chineseTitle || (this.detail ? this.detail.title : item.title))
         .fontSize(26).fontWeight(FontWeight.Bold).width('100%')
       if (this.posterUri) {

@@ -38,6 +38,7 @@ export interface ShowProgress {
   id: string;
   title: string;
   watchedEpisodes: number;
+  year?: number;
 }
 export interface CloudLibrary {
   generation: number;
@@ -176,7 +177,7 @@ function showProgress(rows: SyncItem[]): ShowProgress[] {
         }
       }
     }
-    result.push({ id: show.id, title: show.title, watchedEpisodes: episodes.size });
+    result.push({ id: show.id, title: show.title, year: show.year, watchedEpisodes: episodes.size });
   }
   return result;
 }
