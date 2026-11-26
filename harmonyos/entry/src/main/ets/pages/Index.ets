@@ -6,6 +6,8 @@ import { BackupData, RestorePlan, createBackup, exportBackup, selectBackup, plan
 import { MediaRecord, migrateLegacy, isTraktMedia, applyLegacyEdit, setMediaIntent, inLocalWatchlist } from '../model/MediaState';
 import { MediaPreview, MediaDifference, buildMediaPreview } from '../data/TraktMediaPreview';
 import { syncSelectedMedia, reconcilePendingMedia } from '../data/TraktMediaSync';
+import { checkpointEpisodes, checkpointMedia, adoptEpisodeCloud, adoptMediaCloud } from '../data/ThreeWaySync';
+import { threeWayLabel } from '../model/ThreeWay';
 import { searchTrakt } from '../data/TraktSearch';
 import { TRAKT_APPS_URL, TRAKT_REDIRECT_URI } from '../config/TraktConfig';
 import { ClientSettings, validateClientId } from '../data/ClientSettings';
@@ -41,6 +43,10 @@ struct Index {
   private episodeStore?: EpisodeStore;
   @State @Watch('onRecoveryGateChanged') syncBusy: boolean = false;
   @State syncStatus: string = '';
+  @State threeWayStatus: string = '';
+  @State baselineReview: string = '';
+  @State adoptEpisodeId: number = 0;
+  @State adoptMediaKey: string = '';
   @State syncAccount?: SyncAccount = undefined;
   @State syncBound: boolean = false;
   @State syncPreview?: SyncPreview = undefined;
@@ -694,9 +700,9 @@ struct Index {
   updateView() {
     Column({ space: 8 }) {
       Text('版本与更新').fontSize(19).fontWeight(FontWeight.Medium).width('100%')
-      Text('当前版本 ' + APP_VERSION + ' · 未签名个人预览版 · 0.9.3a').fontSize(13)
+      Text('当前版本 ' + APP_VERSION + ' · 未签名个人预览版 · 0.9.3b').fontSize(13)
         .fontColor($r('app.color.showly_secondary')).width('100%')
-      Text('v0.9.3a 本地备份与安全补充恢复版。').fontSize(12).width('100%')
+      Text('v0.9.3b 三方共同基线及云端变化保护版。').fontSize(12).width('100%')
       Button('查看功能审计与验收计划').onClick(() => { this.openFeatureAudit(); })
       Button(this.updateBusy ? '检查中…' : '检查更新').enabled(!this.updateBusy)
         .onClick(() => { this.checkAppUpdate(); })
@@ -803,6 +809,8 @@ struct Index {
   }
 
   private invalidateSync(): void {
+    this.clearThreeWayReview();
+    this.threeWayStatus = '';
     this.mediaRecoveryPending = false;
     this.mediaSelected = undefined;
     this.mediaWatchTime = '';
@@ -887,6 +895,7 @@ struct Index {
     if (!store || !expected || !this.syncBound || this.syncBusy || this.localBusy || this.cloudBusy ||
         this.setupBusy || !traktAuth.isCurrent(clientId, expected.generation)) { return; }
     this.syncBusy = true;
+    this.clearThreeWayReview();
     this.syncPreview = undefined;
     this.batchIds = [];
     this.batchConfirm = false;
@@ -1230,6 +1239,150 @@ struct Index {
     }
   }
 
+  private clearThreeWayReview(): void {
+    this.baselineReview = '';
+    this.adoptEpisodeId = 0;
+    this.adoptMediaKey = '';
+  }
+
+  private threeWayAvailable(): boolean {
+    return !!this.syncAccount && this.syncBound && this.episodeReady && this.ready && this.pageVisible &&
+      !this.syncBusy && !this.saving && !this.localBusy && !this.cloudBusy && !this.authBusy && !this.setupBusy &&
+      !this.backupBusy && traktAuth.isCurrent(this.clientId, this.syncAccount.generation);
+  }
+
+  private episodeCheckpointCount(): number {
+    return this.syncPreview?.rows.filter((row: SyncDifference) => row.kind === 'match').length ?? 0;
+  }
+
+  private mediaCheckpointCount(): number {
+    return this.mediaPreview?.rows.filter((row: MediaDifference) => row.domain === this.mediaDomain &&
+      row.category === 'match' && !row.operation).length ?? 0;
+  }
+
+  private async confirmCommonBaseline(domain: string): Promise<void> {
+    const binding = this.episodeStore;
+    const store = this.mediaStore;
+    const account = this.syncAccount;
+    const session = traktAuth.session(this.clientId);
+    const ep = this.syncPreview;
+    const media = this.mediaPreview;
+    if (!binding || !account || !session || !this.threeWayAvailable() || this.baselineReview !== domain) { return; }
+    if (domain === 'episode' ? (!ep || ep.account.uuid !== account.uuid) :
+        (!store || !media || media.account.uuid !== account.uuid || domain !== this.mediaDomain)) { return; }
+    this.syncBusy = true;
+    this.clearThreeWayReview();
+    this.threeWayStatus = '正在重新读取云端并校验已一致的条目…';
+    try {
+      let count = 0;
+      if (domain === 'episode' && ep) {
+        count = await checkpointEpisodes(binding, session, ep);
+      } else if (store && media) {
+        count = await checkpointMedia(store, binding, session, media, domain);
+      }
+      this.threeWayStatus = '已保存 ' + count + ' 条共同基线；未修改观看记录、待看、队列或 Trakt。请重新生成预览。';
+    } catch (error) {
+      this.threeWayStatus = '基线保存未确认：' + safeSyncError(error as Error) + '；请重新生成预览。';
+    } finally {
+      this.syncPreview = undefined;
+      this.mediaPreview = undefined;
+      this.mediaSelected = undefined;
+      this.batchIds = [];
+      this.batchConfirm = false;
+      this.importConfirm = false;
+      this.uploadSelectedId = 0;
+      this.removeSelectedId = 0;
+      this.syncBusy = false;
+    }
+  }
+
+  private async confirmAdoptEpisode(): Promise<void> {
+    const store = this.episodeStore;
+    const preview = this.syncPreview;
+    const account = this.syncAccount;
+    const session = traktAuth.session(this.clientId);
+    const id = this.adoptEpisodeId;
+    if (!store || !preview || !account || !session || !this.threeWayAvailable() || preview.account.uuid !== account.uuid) { return; }
+    const row = preview.rows.find((item: SyncDifference) => item.episodeId === id && item.kind === 'remote');
+    if (!row) { return; }
+    this.syncBusy = true;
+    this.clearThreeWayReview();
+    this.threeWayStatus = '正在校验所选分集的最新云端状态…';
+    try {
+      await adoptEpisodeCloud(store, session, preview, row);
+      this.threeWayStatus = '已采用云端分集状态并保存共同基线；仅修改本机，不上传或删除云端历史。';
+      this.localRecent = await store.recent();
+      this.localSeries = undefined;
+      await this.reloadQueue();
+    } catch (error) {
+      this.threeWayStatus = '采用云端状态未确认：' + safeSyncError(error as Error) + '；请重新读取本机并生成预览。';
+    } finally {
+      this.syncPreview = undefined;
+      this.batchIds = [];
+      this.batchConfirm = false;
+      this.importConfirm = false;
+      this.uploadSelectedId = 0;
+      this.removeSelectedId = 0;
+      this.syncBusy = false;
+    }
+  }
+
+  private async confirmAdoptMedia(): Promise<void> {
+    const store = this.mediaStore;
+    const binding = this.episodeStore;
+    const preview = this.mediaPreview;
+    const account = this.syncAccount;
+    const session = traktAuth.session(this.clientId);
+    const key = this.adoptMediaKey;
+    if (!store || !binding || !preview || !account || !session || !this.threeWayAvailable() ||
+        preview.account.uuid !== account.uuid) { return; }
+    const row = preview.rows.find((item: MediaDifference) => item.domain + ':' + item.id === key && item.category === 'remote');
+    if (!row) { return; }
+    this.syncBusy = true;
+    this.clearThreeWayReview();
+    this.threeWayStatus = '正在校验所选电影或待看条目的最新云端状态…';
+    try {
+      const records = await adoptMediaCloud(store, binding, session, preview, row);
+      this.mediaRecords = records;
+      this.items = records.map((record: MediaRecord) => record.media);
+      this.resetCollection();
+      this.threeWayStatus = '已采用云端状态并保存共同基线；仅修改所选本机状态域，未写入 Trakt。';
+    } catch (error) {
+      this.threeWayStatus = '采用云端状态未确认：' + safeSyncError(error as Error) + '；请重新生成预览。';
+      try {
+        const records = await store.load();
+        this.mediaRecords = records;
+        this.items = records.map((record: MediaRecord) => record.media);
+        this.resetCollection();
+      } catch (failure) { this.ready = false; }
+    } finally {
+      this.mediaPreview = undefined;
+      this.mediaSelected = undefined;
+      this.mediaWatchTime = '';
+      this.syncBusy = false;
+    }
+  }
+
+  @Builder
+  commonBaselineView(domain: string, count: number) {
+    Column({ space: 6 }) {
+      Text('三方共同基线：只保存已明确一致的状态，不将未知记录或云端独有条目当成删除。')
+        .fontSize(12).width('100%')
+      Button('保存一致状态为共同基线 · ' + count + ' 条').fontSize(13)
+        .enabled(this.threeWayAvailable() && count > 0)
+        .onClick(() => { this.clearThreeWayReview(); this.baselineReview = domain; })
+      if (this.baselineReview === domain) {
+        Text('确认记录这 ' + count + ' 条双方一致的状态？仅保存比较依据，不创建观看历史或同步权限。')
+          .fontSize(12).width('100%')
+        Row({ space: 8 }) {
+          Button('取消').layoutWeight(1).onClick(() => { this.clearThreeWayReview(); })
+          Button('确认保存基线').layoutWeight(1).enabled(this.threeWayAvailable())
+            .onClick(() => { this.confirmCommonBaseline(domain); })
+        }.width('100%')
+      }
+    }.width('100%')
+  }
+
   private visibleSyncRows(): SyncDifference[] {
     return this.syncPreview?.rows.filter((row: SyncDifference) => row.kind === this.syncFilter) ?? [];
   }
@@ -1248,7 +1401,7 @@ struct Index {
     Button(label).layoutWeight(1).fontSize(12)
       .backgroundColor(this.syncFilter === value ? $r('app.color.showly_accent') : $r('app.color.showly_muted_surface'))
       .fontColor(this.syncFilter === value ? $r('app.color.showly_on_accent') : $r('app.color.showly_text'))
-      .onClick(() => { this.syncFilter = value; this.syncPage = 1; this.removeSelectedId = 0; this.uploadSelectedId = 0; })
+      .onClick(() => { this.clearThreeWayReview(); this.syncFilter = value; this.syncPage = 1; this.removeSelectedId = 0; this.uploadSelectedId = 0; })
   }
 
   @Builder
@@ -1262,6 +1415,7 @@ struct Index {
         .onClick(() => { this.verifySync(); })
       Text(this.syncStatus).fontSize(13).width('100%')
       if (this.uploadStatus) { Text(this.uploadStatus).fontSize(14).width('100%') }
+      if (this.threeWayStatus) { Text(this.threeWayStatus).fontSize(13).width('100%') }
       if (this.syncAccount && this.signedIn && traktAuth.isCurrent(this.clientId, this.syncAccount.generation)) {
         Text('当前账户：' + this.syncAccount.username).fontSize(14).width('100%')
         if (!this.syncBound) {
@@ -1314,8 +1468,10 @@ struct Index {
           Text('本机明确操作 ' + this.syncPreview.localCount + ' 集 · 云端已看 ' + this.syncPreview.cloudCount + ' 集')
             .fontSize(14).width('100%')
           Text('待核对新增 ' + this.syncPreview.additions + ' · 一致 ' + this.syncPreview.matches +
-            ' · 撤销冲突 ' + this.syncPreview.conflicts + ' · 目录异常 ' + this.syncPreview.unknown)
+            ' · 撤销冲突 ' + this.syncPreview.conflicts + ' · 目录异常 ' + this.syncPreview.unknown +
+            ' · 仅云端变化 ' + this.syncPreview.remoteChanges)
             .fontSize(14).width('100%')
+          this.commonBaselineView('episode', this.episodeCheckpointCount())
           Text('仅云端存在 ' + this.syncPreview.cloudOnly + ' 集（含可能的特别篇），保留原记录。')
             .fontSize(13).width('100%')
           Button('导入云端已看状态到本机').enabled(!this.syncBusy && !this.localBusy && !this.cloudBusy)
@@ -1359,6 +1515,7 @@ struct Index {
             this.syncFilterButton('冲突', 'conflict')
             this.syncFilterButton('异常', 'unknown')
           }.width('100%')
+          Row({ space: 4 }) { this.syncFilterButton('仅云端变化', 'remote') }.width('100%')
           if (this.visibleSyncRows().length === 0) { Text('本分类没有记录').fontSize(13).width('100%') }
           ForEach(this.syncSlice(), (row: SyncDifference) => {
             Column({ space: 4 }) {
@@ -1366,6 +1523,18 @@ struct Index {
               Text('本机 ' + (row.localWatched ? '已看' : '撤销') + ' / 云端 ' +
                 (row.cloudWatched ? '已看' : '无已看记录')).fontSize(12).width('100%')
                 .fontColor($r('app.color.showly_secondary'))
+              Text(threeWayLabel(row.threeWay, row.baseline)).fontSize(12).width('100%')
+              if (row.kind === 'remote' && row.threeWay === 'remote') {
+                Button('采用云端状态（仅本机）').fontSize(12).enabled(this.threeWayAvailable())
+                  .onClick(() => { this.clearThreeWayReview(); this.adoptEpisodeId = row.episodeId; })
+                if (this.adoptEpisodeId === row.episodeId) {
+                  Text('确认将本机此集设为' + (row.cloudWatched ? '已看' : '未看') + '？原有云端历史和保护凭证不变。').fontSize(12).width('100%')
+                  Row({ space: 8 }) {
+                    Button('取消').layoutWeight(1).onClick(() => { this.clearThreeWayReview(); })
+                    Button('确认采用').layoutWeight(1).enabled(this.threeWayAvailable()).onClick(() => { this.confirmAdoptEpisode(); })
+                  }.width('100%')
+                }
+              }
               if (row.kind === 'addition' && row.uploadBlocked) {
                 Text('已有上传保护凭证，禁止重发；请核对 Trakt。').fontSize(12).width('100%')
               }
@@ -1496,6 +1665,7 @@ struct Index {
     const store = this.mediaStore;
     if (!this.ready || this.saving || this.syncBusy || !store) { return false; }
     this.saving = true;
+    this.clearThreeWayReview();
     this.mediaSelected = undefined;
     this.mediaWatchTime = '';
     this.mediaPreview = undefined;
@@ -1587,6 +1757,7 @@ struct Index {
     const session = traktAuth.session(clientId);
     if (!session) { return; }
     this.syncBusy = true;
+    this.clearThreeWayReview();
     this.mediaPreview = undefined;
     this.mediaSelected = undefined;
     this.mediaWatchTime = '';
@@ -1725,7 +1896,7 @@ struct Index {
     Button(label + ' ' + this.mediaRows(category).length).fontSize(12).layoutWeight(1)
       .backgroundColor(this.mediaCategory === category ? $r('app.color.showly_accent') : $r('app.color.showly_muted_surface'))
       .fontColor(this.mediaCategory === category ? $r('app.color.showly_on_accent') : $r('app.color.showly_text'))
-      .onClick(() => { this.mediaCategory = category; this.mediaPage = 1; this.mediaSelected = undefined; })
+      .onClick(() => { this.clearThreeWayReview(); this.mediaCategory = category; this.mediaPage = 1; this.mediaSelected = undefined; })
   }
 
   @Builder
@@ -1743,6 +1914,7 @@ struct Index {
           .onClick(() => { this.loadMediaPreview(); })
         Text(this.mediaPreviewStatus).fontSize(13).width('100%')
         if (this.mediaSyncStatus) { Text(this.mediaSyncStatus).fontSize(13).width('100%') }
+        if (this.threeWayStatus) { Text(this.threeWayStatus).fontSize(13).width('100%') }
         Button(this.showMediaLogs ? '收起电影与待看日志' : '查看电影与待看日志')
           .onClick(() => { this.showMediaLogs = !this.showMediaLogs; if (this.showMediaLogs) { this.refreshMediaLogs(); } })
         if (this.showMediaLogs) {
@@ -1761,12 +1933,13 @@ struct Index {
             Button('电影观看').layoutWeight(1)
               .backgroundColor(this.mediaDomain === 'movie' ? $r('app.color.showly_accent') : $r('app.color.showly_muted_surface'))
               .fontColor(this.mediaDomain === 'movie' ? $r('app.color.showly_on_accent') : $r('app.color.showly_text'))
-              .onClick(() => { this.mediaDomain = 'movie'; this.mediaPage = 1; this.mediaSelected = undefined; })
+              .onClick(() => { this.clearThreeWayReview(); this.mediaDomain = 'movie'; this.mediaPage = 1; this.mediaSelected = undefined; })
             Button('待看清单').layoutWeight(1)
               .backgroundColor(this.mediaDomain === 'watchlist' ? $r('app.color.showly_accent') : $r('app.color.showly_muted_surface'))
               .fontColor(this.mediaDomain === 'watchlist' ? $r('app.color.showly_on_accent') : $r('app.color.showly_text'))
-              .onClick(() => { this.mediaDomain = 'watchlist'; this.mediaPage = 1; this.mediaSelected = undefined; })
+              .onClick(() => { this.clearThreeWayReview(); this.mediaDomain = 'watchlist'; this.mediaPage = 1; this.mediaSelected = undefined; })
           }.width('100%')
+          this.commonBaselineView(this.mediaDomain, this.mediaCheckpointCount())
           Row({ space: 4 }) {
             this.mediaCategoryButton('新增', 'addition')
             this.mediaCategoryButton('一致', 'match')
@@ -1775,6 +1948,7 @@ struct Index {
           Row({ space: 4 }) {
             this.mediaCategoryButton('本机未知', 'unknown')
             this.mediaCategoryButton('仅云端', 'cloud')
+            this.mediaCategoryButton('云端变化', 'remote')
           }.width('100%')
           if (!this.mediaRows().length) { Text('本分类没有记录').fontSize(13) }
           ForEach(this.mediaSlice(), (row: MediaDifference) => {
@@ -1782,7 +1956,19 @@ struct Index {
               Text(row.title + ' · ' + row.id).fontSize(14).width('100%')
               Text('本机 ' + this.localIntentLabel(row.local) + ' / 云端 ' + (row.remote ? '存在' : '不存在'))
                 .fontSize(12).width('100%')
+              Text(threeWayLabel(row.threeWay, row.baseline)).fontSize(12).width('100%')
               if (row.operationNote) { Text(row.operationNote).fontSize(12).width('100%') }
+              if (row.category === 'remote' && row.threeWay === 'remote' && !row.operation) {
+                Button('采用云端状态（仅本机）').fontSize(12).enabled(this.threeWayAvailable())
+                  .onClick(() => { this.clearThreeWayReview(); this.adoptMediaKey = row.domain + ':' + row.id; })
+                if (this.adoptMediaKey === row.domain + ':' + row.id) {
+                  Text('确认将本机' + (row.domain === 'movie' ? '电影已看' : '待看') + '状态设为' + (row.remote ? '存在' : '不存在') + '？不写入 Trakt。').fontSize(12).width('100%')
+                  Row({ space: 8 }) {
+                    Button('取消').layoutWeight(1).onClick(() => { this.clearThreeWayReview(); })
+                    Button('确认采用').layoutWeight(1).enabled(this.threeWayAvailable()).onClick(() => { this.confirmAdoptMedia(); })
+                  }.width('100%')
+                }
+              }
               if (row.operation) {
                 Button(this.mediaOperationLabel(row)).fontSize(12)
                   .enabled(!this.syncBusy && !this.saving && !this.cloudBusy && !this.authBusy && !this.setupBusy)

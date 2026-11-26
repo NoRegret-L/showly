@@ -3,6 +3,7 @@ import { TraktSession, traktAuth } from './TraktAuth';
 import { EpisodeStore, JournalIntent } from './EpisodeStore';
 import { SyncPreview, SyncDifference, readSyncAccount, invalidateWatchedCache } from './TraktSyncPreview';
 import { readActivity } from './TraktLibrary';
+import { classifyThreeWay } from '../model/ThreeWay';
 import { readEpisodeHistory, SinglePlay } from './TraktPlayHistory';
 
 interface RemoveBody { ids: number[]; }
@@ -24,6 +25,10 @@ export async function removeSelectedPlay(store: EpisodeStore, session: TraktSess
   if (!receipt || receipt.removalState !== 0 || receipt.historyId !== row.undoHistoryId ||
       receipt.watchedAt !== row.undoWatchedAt || !intent || !intent.catalogKnown || intent.watched) {
     throw new Error('Local intent or receipt changed');
+  }
+  const baseline = (await store.commonStates(account.uuid, 'episode')).get(episodeId.toString());
+  if (classifyThreeWay('no', true, baseline) === 'remote') {
+    return { message: '云端相对于共同基线已变化，禁止反向删除；请重新预览。' };
   }
   const before = await readActivity(session);
   const history = await readEpisodeHistory(session, episodeId);

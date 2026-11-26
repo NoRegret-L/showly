@@ -29,7 +29,7 @@ async function readPublic(url: string): Promise<string> {
     const response = await request.request(url, {
       method: http.RequestMethod.GET,
       header: { 'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28',
-        'User-Agent': 'Showly-HarmonyOS-Update/0.9.3' },
+        'User-Agent': 'Showly-HarmonyOS-Update/0.9.3.1' },
       expectDataType: http.HttpDataType.STRING
     });
     if (response.responseCode !== 200 || typeof response.result !== 'string') {

@@ -1,6 +1,6 @@
 {
   "name": "showly-harmonyos",
-  "version": "0.9.3",
+  "version": "0.9.3.1",
   "ohos": {
     "org": "noregrete",
     "buildTool": "hvigor",

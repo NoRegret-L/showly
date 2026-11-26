@@ -2,6 +2,7 @@ import { http } from '@kit.NetworkKit';
 import { TraktSession, traktAuth } from './TraktAuth';
 import { readActivity } from './TraktLibrary';
 import { EpisodeStore, JournalIntent } from './EpisodeStore';
+import { classifyThreeWay } from '../model/ThreeWay';
 
 interface UserIds { uuid: string; }
 interface UserIdentity { username: string; ids: UserIds; }
@@ -13,6 +14,9 @@ interface WatchedRow { episode: WatchedEpisode; plays: number; }
 interface WatchedPage { items: WatchedRow[]; pages: number; total: number; }
 export interface SyncDifference {
   episodeId: number;
+  intentSeq: number;
+  baseline: string;
+  threeWay: string;
   label: string;
   localWatched: boolean;
   cloudWatched: boolean;
@@ -33,6 +37,7 @@ export interface SyncPreview {
   matches: number;
   conflicts: number;
   unknown: number;
+  remoteChanges: number;
   rows: SyncDifference[];
 }
 
@@ -157,26 +162,32 @@ export async function buildSyncPreview(store: EpisodeStore, session: TraktSessio
     throw new Error('Snapshot or account changed');
   }
   watchedCache = { uuid: account.uuid, clientId: session.clientId, generation: session.generation, activity: after, ids: cloud };
+  const common = await store.commonStates(account.uuid, 'episode');
   const rows: SyncDifference[] = [];
   let additions = 0;
   let matches = 0;
   let conflicts = 0;
   let unknown = 0;
+  let remoteChanges = 0;
   let cloudOnly = cloud.size;
   for (const intent of local) {
     const remote = cloud.has(intent.episodeId);
     if (remote) { cloudOnly--; }
-    const kind = classifyIntent(intent, remote);
+    const base = common.get(intent.episodeId.toString());
+    const threeWay = classifyThreeWay(intent.catalogKnown ? (intent.watched ? 'yes' : 'no') : 'unknown', remote, base);
+    const kind = threeWay === 'remote' || threeWay === 'divergent' ? 'remote' : classifyIntent(intent, remote);
     if (kind === 'addition') { additions++; }
     else if (kind === 'match') { matches++; }
     else if (kind === 'conflict') { conflicts++; }
+    else if (kind === 'remote') { remoteChanges++; }
     else { unknown++; }
     const receipt = kind === 'conflict' ? await store.undoReceipt(account.uuid, intent.episodeId) : undefined;
-    rows.push({ episodeId: intent.episodeId, label: intent.label, localWatched: intent.watched,
+    rows.push({ episodeId: intent.episodeId, intentSeq: intent.seq, baseline: base ? (base.value ? 'yes' : 'no') : 'unknown',
+      threeWay: threeWay, label: intent.label, localWatched: intent.watched,
       cloudWatched: remote, kind: kind, undoHistoryId: receipt?.historyId ?? 0,
       undoWatchedAt: receipt?.watchedAt ?? '', undoState: receipt?.removalState ?? -1,
       uploadBlocked: kind === 'addition' ? await store.hasUploadAttempt(account.uuid, intent.episodeId) : false });
   }
   return { account: verified, activity: after, localCount: local.length, cloudCount: cloud.size, cloudIds: Array.from(cloud),
-    cloudOnly: cloudOnly, additions: additions, matches: matches, conflicts: conflicts, unknown: unknown, rows: rows };
+    cloudOnly: cloudOnly, additions: additions, matches: matches, conflicts: conflicts, unknown: unknown, remoteChanges: remoteChanges, rows: rows };
 }

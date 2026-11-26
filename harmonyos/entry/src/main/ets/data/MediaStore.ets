@@ -1,7 +1,8 @@
 import { relationalStore } from '@kit.ArkData';
 import { common } from '@kit.AbilityKit';
 import { Media } from '../model/Media';
-import { MediaRecord, MediaSnapshot, migrateLegacy, validateMediaRecords } from '../model/MediaState';
+import { CommonEntry, CommonUpdate, commonId } from '../model/ThreeWay';
+import { MediaRecord, MediaSnapshot, migrateLegacy, validateMediaRecords, setMediaIntent } from '../model/MediaState';
 
 // A single atomic row stores the ordered catalog and the two independent
 // intent domains. The original Preferences store is never modified.
@@ -43,6 +44,7 @@ export class MediaStore {
     await db.executeSql("CREATE TABLE IF NOT EXISTS media_operation (seq INTEGER PRIMARY KEY AUTOINCREMENT, account_uuid TEXT NOT NULL, domain TEXT NOT NULL CHECK(domain IN ('movie','watchlist')), media_id TEXT NOT NULL, action TEXT NOT NULL CHECK(action IN ('add','remove')), state TEXT NOT NULL CHECK(state IN ('pending','verified','unsent')), history_id INTEGER NOT NULL DEFAULT 0, watched_at TEXT NOT NULL DEFAULT '', message TEXT NOT NULL, created_at INTEGER NOT NULL)");
     await db.executeSql('CREATE INDEX IF NOT EXISTS media_operation_lookup ON media_operation(account_uuid,domain,media_id,seq)');
     await db.executeSql('CREATE TABLE IF NOT EXISTS media_response_evidence (seq INTEGER PRIMARY KEY, account_uuid TEXT NOT NULL, requested_at TEXT NOT NULL, http_status INTEGER NOT NULL, accepted INTEGER NOT NULL CHECK(accepted IN (0,1)))');
+    await db.executeSql("CREATE TABLE IF NOT EXISTS sync_common_state (account_uuid TEXT NOT NULL, domain TEXT NOT NULL CHECK(domain IN ('movie','watchlist')), payload TEXT NOT NULL, PRIMARY KEY(account_uuid,domain))");
     const store = new MediaStore(db);
     const existing = await store.readOptional();
     if (existing !== undefined) { return store; }
@@ -55,6 +57,66 @@ export class MediaStore {
     const verified = await store.load();
     if (JSON.stringify(verified) !== JSON.stringify(records)) { throw new Error('Migration verification failed'); }
     return store;
+  }
+
+  async commonStates(uuid: string, domain: string): Promise<Map<string, CommonEntry>> {
+    if (!uuid || (domain !== 'movie' && domain !== 'watchlist')) { throw new Error('Invalid baseline scope'); }
+    const rows = await this.db.querySql('SELECT payload FROM sync_common_state WHERE account_uuid=? AND domain=?', [uuid, domain]);
+    const result: Map<string, CommonEntry> = new Map<string, CommonEntry>();
+    try {
+      if (!rows.goToFirstRow()) { return result; }
+      const entries = JSON.parse(rows.getString(0)) as CommonEntry[];
+      if (!Array.isArray(entries)) { throw new Error('Invalid common baseline'); }
+      for (const entry of entries) {
+        if (!entry || typeof entry.id !== 'string' || !commonId(domain, entry.id) ||
+            typeof entry.value !== 'boolean' || typeof entry.activity !== 'string' || !entry.activity ||
+            result.has(entry.id)) { throw new Error('Invalid common baseline entry'); }
+        result.set(entry.id, entry);
+      }
+      return result;
+    } finally { rows.close(); }
+  }
+
+  async saveCommonStates(uuid: string, domain: string, activity: string, updates: CommonUpdate[]): Promise<number> {
+    if (typeof activity !== 'string' || !activity) { throw new Error('Missing baseline revision'); }
+    const entries = await this.commonStates(uuid, domain);
+    const seen: Set<string> = new Set<string>();
+    for (const update of updates) {
+      if (!commonId(domain, update.id) || typeof update.value !== 'boolean' || seen.has(update.id)) {
+        throw new Error('Invalid baseline update');
+      }
+      seen.add(update.id);
+      entries.set(update.id, { id: update.id, value: update.value, activity: activity });
+    }
+    if (!updates.length) { return 0; }
+    // Single atomic row; unrelated or still divergent entries are retained.
+    const payload = JSON.stringify(Array.from(entries.values()));
+    await this.db.executeSql('INSERT OR REPLACE INTO sync_common_state(account_uuid,domain,payload) VALUES(?,?,?)',
+      [uuid, domain, payload]);
+    const verified = await this.commonStates(uuid, domain);
+    if (JSON.stringify(Array.from(verified.values())) !== payload) { throw new Error('Baseline verification failed'); }
+    return updates.length;
+  }
+
+  // The local decision and its new common baseline commit together. Existing
+  // operation/response evidence remains untouched.
+  async adoptRemote(uuid: string, domain: string, id: string, value: boolean, activity: string): Promise<MediaRecord[]> {
+    const current = await this.load();
+    const record = current.find((row: MediaRecord) => row.media.id === id);
+    if (!record || (await this.latestOperation(uuid, domain, id))?.state === 'pending') {
+      throw new Error('Title missing or pending operation');
+    }
+    const next = setMediaIntent(current, record.media, domain, value ? 'yes' : 'no');
+    this.db.beginTransaction();
+    try {
+      const saved = await this.save(next);
+      await this.saveCommonStates(uuid, domain, activity, [{ id: id, value: value }]);
+      this.db.commit();
+      return saved;
+    } catch (error) {
+      this.db.rollBack();
+      throw new Error('Title adoption transaction failed');
+    }
   }
 
   private async readOptional(): Promise<MediaRecord[] | undefined> {

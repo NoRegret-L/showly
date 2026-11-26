@@ -2,6 +2,7 @@ import { relationalStore } from '@kit.ArkData';
 import { common } from '@kit.AbilityKit';
 import { http } from '@kit.NetworkKit';
 import { Media } from '../model/Media';
+import { CommonEntry, CommonUpdate, commonId } from '../model/ThreeWay';
 import { canReadDetails } from './TraktDetails';
 
 interface EpisodeIds { trakt: number; }
@@ -204,7 +205,67 @@ export class EpisodeStore {
     await db.executeSql('CREATE TABLE IF NOT EXISTS sync_queue_done (account_uuid TEXT NOT NULL, event_seq INTEGER NOT NULL, episode_id INTEGER NOT NULL, PRIMARY KEY(account_uuid,event_seq,episode_id))');
     await db.executeSql('CREATE TABLE IF NOT EXISTS sync_play_archive (account_uuid TEXT NOT NULL, episode_id INTEGER NOT NULL, history_id INTEGER NOT NULL, watched_at TEXT NOT NULL, archived_at INTEGER NOT NULL, PRIMARY KEY(account_uuid,history_id))');
     await db.executeSql('CREATE TABLE IF NOT EXISTS episode_restore_baseline (show_id TEXT PRIMARY KEY, episode_ids TEXT NOT NULL, verified INTEGER NOT NULL DEFAULT 0 CHECK(verified IN (0,1)))');
+    await db.executeSql("CREATE TABLE IF NOT EXISTS sync_common_state (account_uuid TEXT NOT NULL, domain TEXT NOT NULL CHECK(domain='episode'), payload TEXT NOT NULL, PRIMARY KEY(account_uuid,domain))");
     return new EpisodeStore(db);
+  }
+
+  // Account/domain isolation; one validated JSON map per domain. No restored
+  // backup, unknown local default, or pending mutation is a common baseline.
+  async commonStates(uuid: string, domain: string): Promise<Map<string, CommonEntry>> {
+    if (!uuid || await this.boundAccount() !== uuid || domain !== 'episode') { throw new Error('Invalid baseline scope'); }
+    const rows = await this.db.querySql('SELECT payload FROM sync_common_state WHERE account_uuid=? AND domain=?', [uuid, domain]);
+    const result: Map<string, CommonEntry> = new Map<string, CommonEntry>();
+    try {
+      if (!rows.goToFirstRow()) { return result; }
+      const entries = JSON.parse(rows.getString(0)) as CommonEntry[];
+      if (!Array.isArray(entries)) { throw new Error('Invalid common baseline'); }
+      for (const entry of entries) {
+        if (!entry || typeof entry.id !== 'string' || !commonId(domain, entry.id) ||
+            typeof entry.value !== 'boolean' || typeof entry.activity !== 'string' || !entry.activity ||
+            result.has(entry.id)) { throw new Error('Invalid common baseline entry'); }
+        result.set(entry.id, entry);
+      }
+      return result;
+    } finally { rows.close(); }
+  }
+
+  async saveCommonStates(uuid: string, domain: string, activity: string, updates: CommonUpdate[]): Promise<number> {
+    if (typeof activity !== 'string' || !activity) { throw new Error('Missing baseline revision'); }
+    const entries = await this.commonStates(uuid, domain);
+    const seen: Set<string> = new Set<string>();
+    for (const update of updates) {
+      if (!commonId(domain, update.id) || typeof update.value !== 'boolean' || seen.has(update.id)) {
+        throw new Error('Invalid baseline update');
+      }
+      seen.add(update.id);
+      entries.set(update.id, { id: update.id, value: update.value, activity: activity });
+    }
+    if (!updates.length) { return 0; }
+    // Single atomic row; unrelated or still divergent entries are retained.
+    const payload = JSON.stringify(Array.from(entries.values()));
+    await this.db.executeSql('INSERT OR REPLACE INTO sync_common_state(account_uuid,domain,payload) VALUES(?,?,?)',
+      [uuid, domain, payload]);
+    const verified = await this.commonStates(uuid, domain);
+    if (JSON.stringify(Array.from(verified.values())) !== payload) { throw new Error('Baseline verification failed'); }
+    return updates.length;
+  }
+
+  async adoptRemote(uuid: string, episodeId: number, expectedSeq: number, value: boolean, activity: string): Promise<void> {
+    if (await this.boundAccount() !== uuid) { throw new Error('Account mismatch'); }
+    const intent = (await this.journalIntents()).find((row: JournalIntent) => row.episodeId === episodeId);
+    if (!intent || !intent.catalogKnown || intent.seq !== expectedSeq || intent.watched === value) {
+      throw new Error('Local intent changed');
+    }
+    this.db.beginTransaction();
+    try {
+      // No autoUuid: accepting a cloud state never authorizes a new upload.
+      await this.mark(intent.showId, [episodeId], value);
+      await this.saveCommonStates(uuid, 'episode', activity, [{ id: episodeId.toString(), value: value }]);
+      this.db.commit();
+    } catch (error) {
+      this.db.rollBack();
+      throw new Error('Episode adoption transaction failed');
+    }
   }
 
   async catalog(showId: string): Promise<EpisodeCatalog | undefined> {

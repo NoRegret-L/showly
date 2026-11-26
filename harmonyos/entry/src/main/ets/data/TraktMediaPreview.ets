@@ -1,4 +1,5 @@
 import { Media } from '../model/Media';
+import { CommonEntry, classifyThreeWay } from '../model/ThreeWay';
 import { MediaRecord, isTraktMedia } from '../model/MediaState';
 import { MediaStore, MediaOperation } from './MediaStore';
 import { EpisodeStore } from './EpisodeStore';
@@ -16,6 +17,8 @@ export interface MediaDifference {
   operation: string;
   operationNote: string;
   operationSeq: number;
+  baseline: string;
+  threeWay: string;
 }
 export interface MediaPreview {
   account: SyncAccount;
@@ -43,12 +46,12 @@ function compareDomain(records: MediaRecord[], remote: Media[], domain: string):
     const local = domain === 'movie' ? record.movieState : record.watchlistState;
     const exists = remoteIds.has(media.id);
     rows.push({ id: media.id, title: media.title, domain: domain, local: local, remote: exists,
-      category: classifyMedia(local, exists, true), operation: '', operationNote: '', operationSeq: 0 });
+      category: classifyMedia(local, exists, true), operation: '', operationNote: '', operationSeq: 0, baseline: 'unknown', threeWay: 'unknown' });
     remoteIds.delete(media.id);
   }
   for (const media of remoteIds.values()) {
     rows.push({ id: media.id, title: media.title, domain: domain, local: 'unknown', remote: true,
-      category: classifyMedia('unknown', true, false), operation: '', operationNote: '', operationSeq: 0 });
+      category: classifyMedia('unknown', true, false), operation: '', operationNote: '', operationSeq: 0, baseline: 'unknown', threeWay: 'unknown' });
   }
   return rows;
 }
@@ -65,6 +68,14 @@ export async function buildMediaPreview(store: EpisodeStore, session: TraktSessi
       !traktAuth.isCurrent(session.clientId, session.generation)) { throw new Error('Account changed'); }
   const rows = [...compareDomain(records, snapshot.watchedMovies, 'movie'),
     ...compareDomain(records, snapshot.watchlist, 'watchlist')];
+  const movies = mediaStore ? await mediaStore.commonStates(expectedUuid, 'movie') : new Map<string, CommonEntry>();
+  const watchlist = mediaStore ? await mediaStore.commonStates(expectedUuid, 'watchlist') : new Map<string, CommonEntry>();
+  for (const row of rows) {
+    const base = (row.domain === 'movie' ? movies : watchlist).get(row.id);
+    row.baseline = base ? (base.value ? 'yes' : 'no') : 'unknown';
+    row.threeWay = classifyThreeWay(row.local, row.remote, base);
+    if (row.threeWay === 'remote' || row.threeWay === 'divergent') { row.category = 'remote'; }
+  }
   if (mediaStore) {
     for (const row of rows) {
       if (row.local === 'unknown') { continue; }
@@ -72,6 +83,7 @@ export async function buildMediaPreview(store: EpisodeStore, session: TraktSessi
       row.operationSeq = prior?.seq ?? 0;
       row.operation = mediaAction(row, prior);
       if (prior?.state === 'pending') { row.operationNote = '已有未确认操作；仅允许只读核对，不重发。'; }
+      else if (row.category === 'remote') { row.operationNote = '仅云端变化；暂停反向写入，可确认采用云端状态。'; }
       else if (row.category === 'conflict' && row.domain === 'movie' && !row.operation) {
         row.operationNote = '缺少本应用确认的单次历史凭证，不允许撤销云端电影记录。';
       } else if (row.category === 'addition' && !row.operation) {
