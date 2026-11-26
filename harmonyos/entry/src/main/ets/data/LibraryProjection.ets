@@ -5,6 +5,7 @@ import { RemoteLibraryObservation, RemoteShowObservation, RemotePlayPosition } f
 import { FullEpisodeCatalog, scheduleEpisodes, showSections } from '../model/ShowCatalog';
 import { CommonEntry } from '../model/ThreeWay';
 import { NextShow, projectShow } from './NextShows';
+import { TimedDecision, progressSource } from '../model/ProgressRules';
 import { ReadCheckpoint, ReadDecision, EffectiveEpisodes, allowLocalScope, resolveEpisodes } from '../model/EffectiveState';
 import { EpisodeStore, EpisodeBackupState, JournalIntent, LocalSeriesState, eligibleCatalog, materializeEffective, fetchFullEpisodeCatalog } from './EpisodeStore';
 
@@ -41,10 +42,14 @@ export async function projectLibrary(store: EpisodeStore, records: MediaRecord[]
   const remoteById: Map<string, RemoteShowObservation> = new Map<string, RemoteShowObservation>();
   for (const show of cloud?.shows ?? []) { remoteById.set(show.id, show); }
   const decisionsByShow: Map<string, ReadDecision[]> = new Map<string, ReadDecision[]>();
+  const timedByShow: Map<string, TimedDecision[]> = new Map<string, TimedDecision[]>();
   for (const intent of intents) {
     let decisions = decisionsByShow.get(intent.showId);
     if (!decisions) { decisions = []; decisionsByShow.set(intent.showId, decisions); }
     decisions.push({ episodeId: intent.episodeId, watched: intent.watched, seq: intent.seq });
+    let timed = timedByShow.get(intent.showId);
+    if (!timed) { timed = []; timedByShow.set(intent.showId, timed); }
+    timed.push({ episodeId: intent.episodeId, watched: intent.watched, seq: intent.seq, changedAt: intent.changedAt });
   }
   const result: LibraryShowEvidence[] = [];
   const matches: ReadCheckpoint[] = [];
@@ -96,6 +101,9 @@ export async function projectLibrary(store: EpisodeStore, records: MediaRecord[]
     const progressRow = progressState ? projectShow(progressState, latest.get(row.media.id) ?? 0) : undefined;
     if (progressRow && hasTrackingEvidence(row)) {
       progressRow.sections = sections;
+      if (full && effective?.complete) {
+        progressRow.source = progressSource(full, effective.ids, show, timedByShow.get(row.media.id) ?? [], checkpoints, !!cloud);
+      }
       next.push(progressRow);
     }
     result.push({ media: row.media, watchedEpisodes: state ? ids.length : -1,

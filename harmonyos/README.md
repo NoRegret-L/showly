@@ -1,4 +1,4 @@
-# Showly HarmonyOS Preview v0.9.3e.1c.1
+# Showly HarmonyOS Preview v0.9.3e.2a
 
 Unofficial native ArkTS prototype, not a complete Showly port. Your app uses Trakt but is not endorsed or certified by Trakt.
 
@@ -171,3 +171,7 @@ Separate explicit consent for new movie watched and watchlist add/remove actions
 ## v0.9.3e.1c.1 — global media mode and feature hierarchy (0.9.3.10, build 34)
 
 Global persisted shows/movies mode drives progress, discover, calendar and collection; search stays cross-type as on Android. Collection separates My Shows/My Movies, Watchlist, Hidden and Lists, with actual watching/finished/upcoming/all sections and collection search. Legacy/manual other records remain accessible. Basic movie progress uses known released watchlist movies and existing mark action. Hidden, lists and episode history explicitly not implemented; recent-added ordering and full date/next strategies deferred. No change to remote writer, consent, account scope, database schema or receipts. See docs/NAVIGATION.md.
+
+## v0.9.3e.2a — show progress rules (0.9.3.11, build 35)
+
+Full-catalog progress projection using verified effective watch state, actual known watch timestamps, LAST_WATCHED/OLDEST, configurable upcoming window, AIRED/ALL counts, grouping, pin/hold and sorting; explicit quick mark uses existing eligibility/consent/event path. Original default LAST_WATCHED, 30-day upcoming, AIRED, recent descending, new-at-top off. Personal rating sort, translated search and custom watched date are not implemented yet. See docs/PROGRESS_PARITY.md.

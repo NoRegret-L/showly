@@ -1,6 +1,7 @@
 import { preferences } from '@kit.ArkData';
 import { common } from '@kit.AbilityKit';
 import { http } from '@kit.NetworkKit';
+import { ProgressPreferences, ProgressFlag, defaultProgress, validProgress, validFlags } from '../model/ProgressRules';
 
 export class ClientSettings {
   private storage: preferences.Preferences;
@@ -17,6 +18,32 @@ export class ClientSettings {
   async saveMode(mode: string): Promise<void> {
     if (mode !== 'movie' && mode !== 'show') { throw new Error('Invalid media mode'); }
     await this.storage.put('media_mode', mode);
+    await this.storage.flush();
+  }
+  loadProgress(): ProgressPreferences {
+    const raw = this.storage.getSync('show_progress_options', '');
+    if (typeof raw !== 'string' || !raw) { return defaultProgress(); }
+    try {
+      const value = JSON.parse(raw) as ProgressPreferences;
+      return validProgress(value) ? value : defaultProgress();
+    } catch (error) { return defaultProgress(); }
+  }
+  async saveProgress(value: ProgressPreferences): Promise<void> {
+    if (!validProgress(value)) { throw new Error('Invalid progress settings'); }
+    await this.storage.put('show_progress_options', JSON.stringify(value));
+    await this.storage.flush();
+  }
+  loadProgressFlags(scope: string): ProgressFlag[] {
+    if (!scope) { return []; }
+    const raw = this.storage.getSync('show_progress_flags:' + scope, '');
+    if (typeof raw !== 'string' || !raw) { return []; }
+    const flags = JSON.parse(raw) as ProgressFlag[];
+    if (!validFlags(flags)) { throw new Error('Invalid progress flags'); }
+    return flags;
+  }
+  async saveProgressFlags(scope: string, flags: ProgressFlag[]): Promise<void> {
+    if (!scope || !validFlags(flags)) { throw new Error('Invalid progress flag scope'); }
+    await this.storage.put('show_progress_flags:' + scope, JSON.stringify(flags));
     await this.storage.flush();
   }
   async save(value: string): Promise<void> {

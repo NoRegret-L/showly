@@ -1,6 +1,7 @@
 import { Media } from '../model/Media';
 import { EpisodeStore, EpisodeBackupState, LocalEpisode, JournalIntent } from './EpisodeStore';
 import { showSections } from '../model/ShowCatalog';
+import { ProgressSource } from '../model/ProgressRules';
 
 export interface NextShow {
   media: Media;
@@ -11,6 +12,7 @@ export interface NextShow {
   nextTitle: string;
   lastSeq: number;
   sections?: string[];
+  source?: ProgressSource;
 }
 
 export function projectShow(state: EpisodeBackupState, lastSeq: number): NextShow {

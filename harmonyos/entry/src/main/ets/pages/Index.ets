@@ -11,7 +11,8 @@ import { MediaPreview, MediaDifference, buildMediaPreview } from '../data/TraktM
 import { syncSelectedMedia, reconcilePendingMedia } from '../data/TraktMediaSync';
 import { checkpointEpisodes, checkpointMedia, adoptEpisodeCloud, adoptMediaCloud } from '../data/ThreeWaySync';
 import { threeWayLabel } from '../model/ThreeWay';
-import { NextShow, sortNextShows } from '../data/NextShows';
+import { NextShow } from '../data/NextShows';
+import { ProgressSource, ProgressPreferences, ProgressFlag, ProgressRow, defaultProgress, validProgress, toggleProgressFlag, progressRows } from '../model/ProgressRules';
 import { CalendarSnapshot, CalendarEntry, readCalendar, calendarWindow, localDay } from '../data/TraktCalendar';
 import { PersonalMovie, PersonalMovieSnapshot, readPersonalMovies, readPersonalMovieDate } from '../data/TraktLibrary';
 import { MovieCalendarItem, filterMovies, moviePage } from '../data/MovieCalendar';
@@ -108,8 +109,14 @@ struct Index {
   @State progressMode: string = 'next';
   @State nextShows: NextShow[] = [];
   @State nextStatus: string = '';
-  @State nextSort: string = 'recent';
-  @State nextFilter: string = 'remaining';
+  @State progressPrefs: ProgressPreferences = defaultProgress();
+  @State progressFlags: ProgressFlag[] = [];
+  @State progressFlagScope: string = '';
+  @State progressPrefsBusy: boolean = false;
+  @State progressOptions: boolean = false;
+  @State progressDaysInput: string = '30';
+  @State progressOptionStatus: string = '';
+  @State nextFilter: string = 'all';
   @State nextQuery: string = '';
   @State nextPage: number = 1;
   @State calendarWeek: number = 0;
@@ -223,6 +230,9 @@ struct Index {
       this.settings = new ClientSettings(context);
       this.clientId = this.settings.load();
       this.mediaMode = normalizeMode(this.settings.loadMode());
+      this.progressPrefs = this.settings.loadProgress();
+      this.progressDaysInput = this.progressPrefs.days.toString();
+      this.reloadProgressFlags();
       this.draftId = this.clientId;
       this.configuring = !this.clientId;
       if (!this.clientId) { this.tab = 'account'; }
@@ -329,6 +339,9 @@ struct Index {
   // A busy auth/DB/sync operation no longer drops the network-resume event.
   // Coalesce to a single pending event, not a periodic retry loop.
   private onObservationAuthChanged(): void {
+    this.progressFlags = [];
+    this.progressFlagScope = '';
+    this.nextShows = [];
     this.titleConsent = undefined;
     this.titleQuickPending = false;
     this.titleConfirm = false;
@@ -1882,6 +1895,8 @@ struct Index {
     this.cloud = undefined;
     this.cloudUuid = '';
     this.cloudFresh = false;
+    this.progressFlags = [];
+    this.progressFlagScope = '';
     this.titleConsent = undefined;
     this.titleQuickPending = false;
     this.titleConfirm = false;
@@ -1992,6 +2007,7 @@ struct Index {
       if (!current()) { throw new Error('Session changed'); }
       this.cloudLocalAllowed = result.localAllowed;
       this.nextShows = result.next;
+      this.reloadProgressFlags();
       this.nextPage = 1;
       this.movieProgressPage = 1;
       this.nextStatus = result.missing ? '部分剧集资料尚未补齐。' : '';
@@ -2697,7 +2713,7 @@ struct Index {
     this.projectionPending = true;
     this.resetCollection();
     this.nextPage = 1;
-    this.nextStatus = '本机记录已变化，请刷新追剧进度。';
+    this.nextStatus = '观看记录已变化，正在更新进度。';
   }
 
   private async loadNextShows(): Promise<void> {
@@ -2716,6 +2732,7 @@ struct Index {
         (done: number, total: number): void => {});
       if (this.activeCloud() !== active || this.cloudUuid !== uuid || (this.signedIn && !active)) { return; }
       this.nextShows = result.next;
+      this.reloadProgressFlags();
       this.cloudLocalAllowed = result.localAllowed && !!active;
       this.libraryEvidence = result.evidence;
       this.resetCollection();
@@ -2730,18 +2747,148 @@ struct Index {
     } finally { this.localBusy = false; }
   }
 
-  private nextFiltered(): NextShow[] {
-    if (this.signedIn && !this.activeCloud()) { return []; }
-    const q = this.nextQuery.trim().toLowerCase();
-    return sortNextShows(this.nextShows.filter((row: NextShow) =>
-      (this.nextFilter === 'all' || (this.nextFilter === 'remaining' ? row.nextSeason > 0 :
-        row.total > 0 && row.completed === row.total)) &&
-      (!q || row.media.title.toLowerCase().includes(q))), this.nextSort);
+  private currentProgressScope(): string {
+    if (!this.signedIn) { return 'device'; }
+    return this.activeCloud() && this.cloudUuid ? 'account:' + this.cloudUuid : '';
   }
 
-  private nextPages(): number { return Math.max(1, Math.ceil(this.nextFiltered().length / this.collectionPageSize)); }
-  private nextSlice(): NextShow[] {
-    return this.nextFiltered().slice((this.nextPage - 1) * this.collectionPageSize, this.nextPage * this.collectionPageSize);
+  private reloadProgressFlags(): void {
+    const scope = this.currentProgressScope();
+    if (scope === this.progressFlagScope || this.progressPrefsBusy) { return; }
+    this.progressFlags = [];
+    this.progressFlagScope = '';
+    if (!scope || !this.settings) { return; }
+    try {
+      this.progressFlags = this.settings.loadProgressFlags(scope);
+      this.progressFlagScope = scope;
+    } catch (error) { this.progressOptionStatus = '置顶与暂停设置无法读取，未覆盖原记录。'; }
+  }
+
+  private async editProgressFlag(id: string, kind: string): Promise<void> {
+    const settings = this.settings;
+    const scope = this.currentProgressScope();
+    if (!settings || !scope || scope !== this.progressFlagScope || this.progressPrefsBusy ||
+        !this.canEditLibrary() || this.localBusy || this.cloudBusy || this.syncBusy ||
+        !this.nextFiltered().some((row: ProgressRow) => row.media.id === id)) { return; }
+    this.progressPrefsBusy = true;
+    try {
+      const flags = toggleProgressFlag(this.progressFlags, id, kind);
+      await settings.saveProgressFlags(scope, flags);
+      if (this.currentProgressScope() !== scope) { return; }
+      this.progressFlags = flags;
+      this.nextPage = 1;
+      this.progressOptionStatus = '';
+    } catch (error) { this.progressOptionStatus = '设置保存失败，请重试。'; }
+    finally { this.progressPrefsBusy = false; this.reloadProgressFlags(); }
+  }
+
+  private async editProgressOption(key: string, value: string): Promise<void> {
+    const settings = this.settings;
+    if (!settings || this.progressPrefsBusy) { return; }
+    const old = this.progressPrefs;
+    const next: ProgressPreferences = {
+      strategy: key === 'strategy' ? value : old.strategy,
+      count: key === 'count' ? value : old.count,
+      days: key === 'days' ? Number(value) : old.days,
+      sort: key === 'sort' ? value : old.sort,
+      descending: key === 'direction' ? !old.descending : old.descending,
+      newAtTop: key === 'new' ? !old.newAtTop : old.newAtTop,
+      upcomingCollapsed: key === 'upcoming' ? !old.upcomingCollapsed : old.upcomingCollapsed,
+      holdCollapsed: key === 'hold' ? !old.holdCollapsed : old.holdCollapsed
+    };
+    if ((key === 'days' && !/^\d+$/.test(value.trim())) || !validProgress(next)) {
+      this.progressOptionStatus = '请输入有效的非负整数天数。'; return;
+    }
+    this.progressPrefsBusy = true;
+    try {
+      await settings.saveProgress(next);
+      this.progressPrefs = next;
+      this.progressDaysInput = next.days.toString();
+      this.progressOptionStatus = '';
+      if (!next.days && (this.nextFilter === 'upcoming' || this.nextFilter === 'both')) {
+        this.nextFilter = this.nextFilter === 'both' ? 'hold' : 'all';
+      }
+      this.nextPage = 1;
+    } catch (error) { this.progressOptionStatus = '设置保存失败，请重试。'; }
+    finally { this.progressPrefsBusy = false; this.reloadProgressFlags(); }
+  }
+
+  private nextFiltered(): ProgressRow[] {
+    if (this.signedIn && !this.activeCloud()) { return []; }
+    const sources: ProgressSource[] = [];
+    for (const row of this.nextShows) { if (row.source) { sources.push(row.source); } }
+    const flags = this.progressFlagScope === this.currentProgressScope() ? this.progressFlags : [];
+    return progressRows(sources, this.progressPrefs, flags, Date.now(), this.nextFilter, this.nextQuery);
+  }
+
+  private visibleNext(): ProgressRow[] {
+    return this.nextFiltered().filter((row: ProgressRow) =>
+      !(row.group === 'upcoming' && this.progressPrefs.upcomingCollapsed) &&
+      !(row.group === 'hold' && this.progressPrefs.holdCollapsed));
+  }
+
+  private nextPages(): number { return Math.max(1, Math.ceil(this.visibleNext().length / this.collectionPageSize)); }
+  private nextSlice(): ProgressRow[] {
+    return this.visibleNext().slice((this.nextPage - 1) * this.collectionPageSize, this.nextPage * this.collectionPageSize);
+  }
+
+  private async markNext(row: ProgressRow): Promise<void> {
+    const store = this.episodeStore;
+    const snapshot = this.activeCloud();
+    const uuid = this.cloudUuid;
+    const clientId = this.clientId;
+    const signedIn = this.signedIn;
+    const revision = this.detailRevision;
+    const current = (): boolean => this.pageVisible && this.tab === 'progress' &&
+      this.mediaMode === 'show' && this.progressMode === 'next' && !this.selectedMedia &&
+      this.detailRevision === revision && this.clientId === clientId && this.signedIn === signedIn &&
+      this.activeCloud() === snapshot && this.cloudUuid === uuid && this.canEditLibrary();
+    if (!store || !current() || !this.episodeReady || this.localBusy || this.cloudBusy || this.syncBusy ||
+        this.saving || this.backupBusy || this.authBusy || this.setupBusy || row.upcoming ||
+        !this.nextFiltered().some((item: ProgressRow) => item.media.id === row.media.id && item.episode.id === row.episode.id)) { return; }
+    this.localBusy = true;
+    let saved = false;
+    const auto = this.autoActive() ? this.autoConsent : undefined;
+    try {
+      if (signedIn && (!uuid || await store.boundAccount() !== uuid)) { throw new Error('Account mismatch'); }
+      let full = await store.fullCatalog(row.media.id);
+      if (!full || !current()) { throw new Error('Missing progress metadata'); }
+      let allowed = eligibleCatalog(full, Date.now());
+      if (!allowed.episodes.some((ep: LocalEpisode) => ep.id === row.episode.id)) { throw new Error('Episode not aired'); }
+      const existing = await store.catalog(row.media.id);
+      if (await store.needsCatalogVerification(row.media.id) ||
+          !existing?.episodes.some((ep: LocalEpisode) => ep.id === row.episode.id)) {
+        // Explicit user mark is allowed to verify metadata; mere recommendation never grants eligibility.
+        full = await fetchFullEpisodeCatalog(row.media, clientId);
+        allowed = eligibleCatalog(full, full.fetchedAt);
+        if (!current() || !allowed.episodes.some((ep: LocalEpisode) => ep.id === row.episode.id)) {
+          throw new Error('Episode no longer eligible');
+        }
+        await store.saveFullCatalog(full);
+      }
+      const effective = await projectDetail(store, full, row.media.id, snapshot, uuid);
+      if (!current() || !effective.complete || !effective.localAllowed || !effective.state) { throw new Error('State changed'); }
+      let unwatched = false;
+      for (const season of effective.state.seasons) {
+        if (season.episodes.some((ep: LocalEpisodeState) => ep.episode.id === row.episode.id && !ep.watched)) { unwatched = true; }
+      }
+      if (!unwatched) { this.nextStatus = '该集已看，正在更新推荐。'; this.requestProjection(); return; }
+      if (signedIn && await store.boundAccount() !== uuid) { throw new Error('Account mismatch'); }
+      if (!current()) { return; }
+      this.invalidateSync();
+      // Same guarded write path as detail. No direct remote request.
+      await store.mark(row.media.id, [row.episode.id], true, auto && this.autoActive() ? auto.uuid : '');
+      saved = true;
+      this.invalidateNextShows();
+      this.requestProjection();
+      this.localRecent = await store.recent();
+      await this.reloadQueue();
+      this.nextStatus = '观看状态已更新。';
+    } catch (error) {
+      this.nextStatus = '未能完成观看操作，请刷新后核对。';
+      this.requestProjection();
+    } finally { this.localBusy = false; }
+    if (saved && auto && this.autoActive()) { this.requestRecovery(); }
   }
 
   private invalidateMovieCalendar(): void {
@@ -2867,60 +3014,147 @@ struct Index {
       .onClick(() => { this.chooseProgressMode(mode); })
   }
 
-  @Builder
-  nextFilterButton(label: string, filter: string) {
-    Button(label).layoutWeight(1).fontSize(12)
-      .backgroundColor(this.nextFilter === filter ? $r('app.color.showly_accent') : $r('app.color.showly_muted_surface'))
-      .fontColor(this.nextFilter === filter ? $r('app.color.showly_on_accent') : $r('app.color.showly_text'))
-      .onClick(() => { this.nextFilter = filter; this.nextPage = 1; })
+  private progressFilterSelected(filter: string): boolean {
+    return this.nextFilter === filter || (this.nextFilter === 'both' && filter !== 'all');
+  }
+
+  private changeProgressFilter(filter: string): void {
+    if (filter === 'all') { this.nextFilter = 'all'; }
+    else {
+      const upcoming = filter === 'upcoming' ? !this.progressFilterSelected('upcoming') : this.progressFilterSelected('upcoming');
+      const hold = filter === 'hold' ? !this.progressFilterSelected('hold') : this.progressFilterSelected('hold');
+      this.nextFilter = upcoming && hold ? 'both' : upcoming ? 'upcoming' : hold ? 'hold' : 'all';
+    }
+    this.nextPage = 1;
   }
 
   @Builder
-  nextSortButton(label: string, mode: string) {
+  nextFilterButton(label: string, filter: string) {
     Button(label).layoutWeight(1).fontSize(12)
-      .backgroundColor(this.nextSort === mode ? $r('app.color.showly_accent') : $r('app.color.showly_muted_surface'))
-      .fontColor(this.nextSort === mode ? $r('app.color.showly_on_accent') : $r('app.color.showly_text'))
-      .onClick(() => { this.nextSort = mode; this.nextPage = 1; })
+      .backgroundColor(this.progressFilterSelected(filter) ? $r('app.color.showly_accent') : $r('app.color.showly_muted_surface'))
+      .fontColor(this.progressFilterSelected(filter) ? $r('app.color.showly_on_accent') : $r('app.color.showly_text'))
+      .onClick(() => { this.changeProgressFilter(filter); })
+  }
+
+  @Builder
+  progressOptionButton(label: string, key: string, value: string, selected: boolean) {
+    Button(label).layoutWeight(1).fontSize(12).enabled(!this.progressPrefsBusy)
+      .backgroundColor(selected ? $r('app.color.showly_accent') : $r('app.color.showly_muted_surface'))
+      .fontColor(selected ? $r('app.color.showly_on_accent') : $r('app.color.showly_text'))
+      .onClick(() => { this.editProgressOption(key, value); })
+  }
+
+  @Builder
+  progressOptionsView() {
+    Column({ space: 7 }) {
+      Text('下一集策略').fontSize(14).width('100%')
+      Row({ space: 6 }) {
+        this.progressOptionButton('最后观看之后', 'strategy', 'last', this.progressPrefs.strategy === 'last')
+        this.progressOptionButton('最早未看', 'strategy', 'oldest', this.progressPrefs.strategy === 'oldest')
+      }.width('100%')
+      Text('进度统计').fontSize(14).width('100%')
+      Row({ space: 6 }) {
+        this.progressOptionButton('已播集数', 'count', 'aired', this.progressPrefs.count === 'aired')
+        this.progressOptionButton('全部集数', 'count', 'all', this.progressPrefs.count === 'all')
+      }.width('100%')
+      Text('待播预告天数（0 = 关闭）').fontSize(14).width('100%')
+      Row({ space: 6 }) {
+        TextInput({ placeholder: '天数', text: this.progressDaysInput }).layoutWeight(1)
+          .type(InputType.Number).onChange((value: string) => { this.progressDaysInput = value; })
+        Button('保存').enabled(!this.progressPrefsBusy).onClick(() => { this.editProgressOption('days', this.progressDaysInput); })
+      }.width('100%')
+      Text('排序').fontSize(14).width('100%')
+      Row({ space: 4 }) {
+        this.progressOptionButton('最近观看', 'sort', 'recent', this.progressPrefs.sort === 'recent')
+        this.progressOptionButton('剩余集数', 'sort', 'remaining', this.progressPrefs.sort === 'remaining')
+        this.progressOptionButton('片名', 'sort', 'title', this.progressPrefs.sort === 'title')
+      }.width('100%')
+      Row({ space: 4 }) {
+        this.progressOptionButton('播出日期', 'sort', 'newest', this.progressPrefs.sort === 'newest')
+        this.progressOptionButton('评分', 'sort', 'rating', this.progressPrefs.sort === 'rating')
+        this.progressOptionButton('随机', 'sort', 'random', this.progressPrefs.sort === 'random')
+      }.width('100%')
+      Row({ space: 6 }) {
+        this.progressOptionButton(this.progressPrefs.descending ? '降序' : '升序', 'direction', '', false)
+        this.progressOptionButton(this.progressPrefs.newAtTop ? '新集优先：开' : '新集优先：关', 'new', '', this.progressPrefs.newAtTop)
+      }.width('100%')
+      Text('个人评分排序尚未接入；未知评分不参与数值比较。').fontSize(12).width('100%')
+    }.width('100%').padding(10).borderRadius(10).backgroundColor($r('app.color.showly_surface'))
+  }
+
+  @Builder
+  nextProgressCard(row: ProgressRow) {
+    Column({ space: 6 }) {
+      Text(row.media.title).fontSize(17).fontWeight(FontWeight.Medium).width('100%')
+      Text((row.pinned ? '置顶 · ' : row.held ? '暂停 · ' : '') +
+        (row.fresh ? '新集 · ' : '') + 'S' + row.episode.season + 'E' + row.episode.number +
+        (row.episode.title ? ' · ' + row.episode.title : '')).fontSize(14).width('100%')
+      Text((row.upcoming ? '待播 · ' : '播出 · ') + row.episode.firstAired.substring(0,10)).fontSize(12).width('100%')
+      Text('已看 ' + row.completed + ' / ' + row.total + ' 集 · 剩余 ' + (row.total - row.completed) + ' 集')
+        .fontSize(12).width('100%')
+      if (row.total > 0) {
+        Progress({ value: row.completed, total: row.total, type: ProgressType.Linear }).width('100%').color($r('app.color.showly_accent'))
+      }
+      if (row.dateUnknown) { Text('部分观看时间未知，按可验证记录推荐。').fontSize(12).width('100%') }
+      Row({ space: 6 }) {
+        Button('详情').layoutWeight(1).fontSize(12).enabled(!this.detailBusy)
+          .onClick(() => { this.openDetail(row.media, false, row.episode.season); })
+        Button(row.upcoming ? '尚未播出' : '标记已看').layoutWeight(1).fontSize(12)
+          .enabled(!row.upcoming && this.canEditLibrary() && !this.localBusy && !this.cloudBusy && !this.syncBusy && !this.saving)
+          .onClick(() => { this.markNext(row); })
+      }.width('100%')
+      Row({ space: 6 }) {
+        Button(row.pinned ? '取消置顶' : '置顶').layoutWeight(1).fontSize(12)
+          .enabled(this.canEditLibrary() && !this.progressPrefsBusy && !!this.progressFlagScope)
+          .onClick(() => { this.editProgressFlag(row.media.id, 'pin'); })
+        Button(row.held ? '恢复追剧' : '暂停追剧').layoutWeight(1).fontSize(12)
+          .enabled(this.canEditLibrary() && !this.progressPrefsBusy && !!this.progressFlagScope)
+          .onClick(() => { this.editProgressFlag(row.media.id, 'hold'); })
+      }.width('100%')
+    }.padding(12).borderRadius(10).width('100%').backgroundColor($r('app.color.showly_surface'))
   }
 
   @Builder
   nextShowsView() {
     Column({ space: 10 }) {
-      Text('下一集').fontSize(21).fontWeight(FontWeight.Medium).width('100%')
+      Row({ space: 6 }) {
+        Text('下一集').fontSize(21).fontWeight(FontWeight.Medium).layoutWeight(1)
+        Button(this.progressOptions ? '收起筛选设置' : '筛选与排序').fontSize(12)
+          .onClick(() => { this.progressOptions = !this.progressOptions; })
+      }.width('100%')
       this.librarySyncNotice()
+      if (this.progressOptions) { this.progressOptionsView() }
+      if (this.progressOptionStatus) { Text(this.progressOptionStatus).fontSize(12).width('100%') }
       Button(this.localBusy || this.cloudBusy ? '更新中…' : '刷新进度')
         .enabled(this.episodeReady && !this.localBusy && !this.cloudBusy && !this.syncBusy && !this.backupBusy)
         .onClick(() => { if (this.signedIn) { this.requestObservation(); } else { this.loadNextShows(); } })
       if (this.nextStatus) { Text(this.nextStatus).fontSize(12).width('100%') }
       Row({ space: 4 }) {
-        this.nextFilterButton('待追', 'remaining')
-        this.nextFilterButton('已追平', 'completed')
         this.nextFilterButton('全部', 'all')
+        if (this.progressPrefs.days > 0) { this.nextFilterButton('待播', 'upcoming') }
+        this.nextFilterButton('暂停', 'hold')
       }.width('100%')
-      Row({ space: 4 }) {
-        this.nextSortButton('最近操作', 'recent')
-        this.nextSortButton('剩余集数', 'remaining')
-        this.nextSortButton('片名', 'title')
-      }.width('100%')
-      TextInput({ placeholder: '筛选剧集', text: this.nextQuery })
+      TextInput({ placeholder: '搜索剧集或分集标题', text: this.nextQuery })
         .onChange((value: string) => { this.nextQuery = value; this.nextPage = 1; })
+      if (this.nextShows.some((row: NextShow) => !row.source)) {
+        Text('部分剧集缺少完整播出目录，暂不推荐。').fontSize(12).width('100%')
+      }
+      if (this.nextFiltered().some((row: ProgressRow) => row.group === 'upcoming')) {
+        Button(this.progressPrefs.upcomingCollapsed ? '展开待播' : '折叠待播').fontSize(12)
+          .enabled(!this.progressPrefsBusy).onClick(() => { this.editProgressOption('upcoming', ''); })
+      }
+      if (this.nextFiltered().some((row: ProgressRow) => row.group === 'hold')) {
+        Button(this.progressPrefs.holdCollapsed ? '展开暂停' : '折叠暂停').fontSize(12)
+          .enabled(!this.progressPrefsBusy).onClick(() => { this.editProgressOption('hold', ''); })
+      }
       Text('符合条件 ' + this.nextFiltered().length + ' 部').fontSize(13).width('100%')
-      ForEach(this.nextSlice(), (row: NextShow) => {
-        Column({ space: 6 }) {
-          Text(row.media.title).fontSize(17).fontWeight(FontWeight.Medium).width('100%')
-          Text('已看 ' + row.completed + ' / ' + row.total + ' 集 · 剩余 ' + (row.total - row.completed) + ' 集')
-            .fontSize(12).width('100%')
-          if (row.total > 0) {
-            Progress({ value: row.completed, total: row.total, type: ProgressType.Linear }).width('100%').color($r('app.color.showly_accent'))
-          }
-          Text(row.nextSeason > 0 ? '下一集：S' + row.nextSeason + 'E' + row.nextNumber +
-            (row.nextTitle ? ' · ' + row.nextTitle : '') : row.total > 0 ? '已追平已播分集' : '暂无已播分集')
-            .fontSize(14).width('100%')
-          Button(row.nextSeason > 0 ? '查看下一集所在季' : '查看剧集详情')
-            .fontSize(12).enabled(!this.localBusy && !this.syncBusy && !this.detailBusy)
-            .onClick(() => { this.openDetail(row.media, false, row.nextSeason); })
-        }.padding(12).borderRadius(10).width('100%').backgroundColor($r('app.color.showly_surface'))
-      }, (row: NextShow) => row.media.id + ':' + row.completed + ':' + row.nextSeason + ':' + row.nextNumber)
+      if (!this.nextFiltered().length && !this.cloudBusy && !this.localBusy) {
+        Text('暂无符合条件的下一集。').fontSize(14).width('100%')
+      }
+      ForEach(this.nextSlice(), (row: ProgressRow) => {
+        this.nextProgressCard(row)
+      }, (row: ProgressRow) => row.media.id + ':' + row.episode.id + ':' + row.completed + ':' + row.total +
+        ':' + row.group + ':' + row.upcoming + ':' + row.fresh)
       Row({ space: 8 }) {
         Button('上一页').layoutWeight(1).enabled(this.nextPage > 1).onClick(() => { this.nextPage--; })
         Text(this.nextPage + ' / ' + this.nextPages()).fontSize(13)

@@ -137,8 +137,13 @@ export async function fetchFullEpisodeCatalog(item: Media, clientId: string): Pr
     }
     seasons.sort((left: ScheduledSeason, right: ScheduledSeason) => left.number - right.number);
     let status = '';
-    try { status = (await readDetails(item, clientId, true)).status; } catch (error) {}
-    const result: FullEpisodeCatalog = { media: item, status: status, fetchedAt: Date.now(), seasons: seasons };
+    let rating: number | undefined = undefined;
+    try {
+      const details = await readDetails(item, clientId, true);
+      status = details.status;
+      if (details.rating > 0 && details.rating <= 10) { rating = details.rating; }
+    } catch (error) {}
+    const result: FullEpisodeCatalog = { media: item, status: status, fetchedAt: Date.now(), seasons: seasons, rating: rating };
     validateFullCatalog(result, item.id);
     return result;
   } finally {

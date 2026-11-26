@@ -17,6 +17,7 @@ export interface FullEpisodeCatalog {
   media: Media;
   status: string;
   fetchedAt: number;
+  rating?: number;
   seasons: ScheduledSeason[];
 }
 
@@ -31,6 +32,7 @@ export function validateFullCatalog(catalog: FullEpisodeCatalog, showId: string)
       !/^show:[1-9][0-9]*$/.test(showId) || !positive(Number(showId.substring(5))) ||
       typeof catalog.media.title !== 'string' || !Number.isFinite(catalog.media.year) ||
       typeof catalog.status !== 'string' || !positive(catalog.fetchedAt) ||
+      (catalog.rating !== undefined && (!Number.isFinite(catalog.rating) || catalog.rating < 0 || catalog.rating > 10)) ||
       !Array.isArray(catalog.seasons)) { throw new Error('Invalid full catalog'); }
   const seasons: Set<number> = new Set<number>();
   const ids: Set<number> = new Set<number>();
