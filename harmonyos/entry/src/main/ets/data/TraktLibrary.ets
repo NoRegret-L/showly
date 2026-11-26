@@ -26,11 +26,6 @@ interface SyncItem {
 interface Activity {
   all: string;
 }
-interface PageHeaders {
-  'x-pagination-page'?: string;
-  'x-pagination-page-count'?: string;
-  'x-pagination-item-count'?: string;
-}
 interface Page {
   items: SyncItem[];
   current: number;
@@ -99,7 +94,7 @@ async function readPage(session: TraktSession, path: string, page: number): Prom
       throw new Error('Unexpected library response');
     }
     // HTTP header names are case insensitive. Only numeric values are consumed.
-    const headers = JSON.parse(JSON.stringify(res.header).toLowerCase()) as PageHeaders;
+    const headers = JSON.parse(JSON.stringify(res.header).toLowerCase()) as Record<string, string>;
     const current = Number(headers['x-pagination-page']);
     const pages = Number(headers['x-pagination-page-count']);
     const total = Number(headers['x-pagination-item-count']);
