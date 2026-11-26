@@ -2,12 +2,16 @@ import { common } from '@kit.AbilityKit';
 import { Media, mediaLabel, setWatched } from '../model/Media';
 import { LibraryStore } from '../data/LibraryStore';
 import { searchTrakt } from '../data/TraktSearch';
+import { TRAKT_CLIENT_ID } from '../config/TraktConfig';
+import { traktAuth } from '../data/TraktAuth';
 
 @Entry
 @Component
 struct Index {
   @State title: string = '';
-  @State clientId: string = '';
+  @StorageLink('traktAuthStatus') authStatus: string = '尚未登录 Trakt';
+  @StorageLink('traktAuthBusy') authBusy: boolean = false;
+  @StorageLink('traktSignedIn') signedIn: boolean = false;
   @State items: Media[] = [];
   @State results: Media[] = [];
   @State ready: boolean = false;
@@ -53,14 +57,14 @@ struct Index {
   }
 
   private async search(): Promise<void> {
-    if (this.searching || this.title.trim().length === 0 || this.clientId.trim().length === 0) {
+    if (this.searching || this.title.trim().length === 0 || TRAKT_CLIENT_ID.length === 0) {
       return;
     }
     this.searching = true;
     this.results = [];
     this.searchStatus = '搜索中…';
     try {
-      this.results = await searchTrakt(this.title.trim(), this.clientId.trim());
+      this.results = await searchTrakt(this.title.trim(), TRAKT_CLIENT_ID);
       this.searchStatus = this.results.length === 0 ? '没有搜索结果' : '搜索完成';
     } catch (error) {
       this.searchStatus = '搜索失败：请检查网络、Client ID 或 Trakt API 权限与限额。';
@@ -87,14 +91,28 @@ struct Index {
         Text('非官方应用，使用 Trakt，但未获 Trakt 认可或认证。')
           .fontSize(12).fontColor('#687887')
         Text('搜索（可选）').fontSize(20).fontWeight(FontWeight.Medium)
-        TextInput({ placeholder: 'Trakt Client ID（仅本次会话）', text: this.clientId })
-          .type(InputType.Password)
-          .onChange((value: string) => { this.clientId = value; })
+        Text('Trakt 账户').fontSize(20).fontWeight(FontWeight.Medium)
+        if (TRAKT_CLIENT_ID.length === 0) {
+          Text('开发者尚未配置 Trakt 应用，在线功能暂不可用。').fontSize(13)
+        } else {
+          Text(this.authStatus).fontSize(14)
+          if (!this.signedIn && !this.authBusy) {
+            Button('登录 Trakt').onClick(() => {
+              const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
+              traktAuth.begin(context);
+            })
+          }
+          if (this.signedIn || this.authBusy) {
+            Button(this.authBusy ? '取消授权' : '断开本机登录')
+              .onClick(() => { traktAuth.disconnect(); })
+          }
+          Text('开发预览：登录状态仅保留在本次应用进程，暂不同步观看记录。').fontSize(12)
+        }
         TextInput({ placeholder: '电影或剧集名称', text: this.title })
           .onChange((value: string) => { this.title = value; })
         Row({ space: 8 }) {
           Button('搜索 Trakt').layoutWeight(1)
-            .enabled(!this.searching && this.title.trim().length > 0 && this.clientId.trim().length > 0)
+            .enabled(!this.searching && this.title.trim().length > 0 && TRAKT_CLIENT_ID.length > 0)
             .onClick(() => { this.search(); })
           Button('手动添加').layoutWeight(1)
             .enabled(this.ready && !this.saving && this.title.trim().length > 0)
