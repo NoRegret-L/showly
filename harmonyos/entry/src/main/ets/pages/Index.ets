@@ -14,6 +14,7 @@ import { AppearanceStore, applyAppearance } from '../data/AppearanceStore';
 import { EpisodeStore, LocalSeriesState, LocalSeasonState, LocalEpisodeState, fetchEpisodeCatalog } from '../data/EpisodeStore';
 import { SyncAccount, SyncPreview, SyncDifference, readSyncAccount, buildSyncPreview } from '../data/TraktSyncPreview';
 import { uploadSelectedEpisode } from '../data/TraktSyncUpload';
+import { removeSelectedPlay } from '../data/TraktSyncRemove';
 
 @Entry
 @Component
@@ -29,6 +30,7 @@ struct Index {
   @State syncFilter: string = 'addition';
   @State syncPage: number = 1;
   @State uploadSelectedId: number = 0;
+  @State removeSelectedId: number = 0;
   @State uploadStatus: string = '';
   @State episodeReady: boolean = false;
   @State episodeInitStatus: string = '';
@@ -374,6 +376,7 @@ struct Index {
 
   private invalidateSync(): void {
     this.uploadSelectedId = 0;
+    this.removeSelectedId = 0;
     this.uploadStatus = '';
     this.syncPreview = undefined;
     this.syncAccount = undefined;
@@ -440,6 +443,7 @@ struct Index {
     this.syncBusy = true;
     this.syncPreview = undefined;
     this.uploadSelectedId = 0;
+    this.removeSelectedId = 0;
     this.syncPage = 1;
     this.syncStatus = '正在读取完整云端分集记录并比较…';
     try {
@@ -468,12 +472,40 @@ struct Index {
     const watchedAt = new Date().toISOString();
     this.syncBusy = true;
     this.uploadSelectedId = 0;
+    this.removeSelectedId = 0;
     this.uploadStatus = '正在重新校验账户、分集及云端记录…';
     try {
       const result = await uploadSelectedEpisode(store, session, preview, episodeId, watchedAt);
       this.uploadStatus = result.message;
     } catch (error) {
       this.uploadStatus = '未能完成安全上传流程。可能已保留尝试凭证；请重新生成预览并在 Trakt 核对，不会自动重试。';
+    } finally {
+      this.syncPreview = undefined;
+      this.syncPage = 1;
+      this.syncStatus = '本次流程已结束。重新生成差异预览可查看最新状态。';
+      this.syncBusy = false;
+    }
+  }
+
+  private async confirmEpisodeRemoval(): Promise<void> {
+    const store = this.episodeStore;
+    const preview = this.syncPreview;
+    const episodeId = this.removeSelectedId;
+    const clientId = this.clientId;
+    if (!store || !preview || !this.syncBound || episodeId <= 0 || this.syncBusy ||
+        this.localBusy || this.cloudBusy || this.authBusy || this.setupBusy ||
+        !traktAuth.isCurrent(clientId, preview.account.generation)) { return; }
+    const session = traktAuth.session(clientId);
+    if (!session) { return; }
+    this.syncBusy = true;
+    this.removeSelectedId = 0;
+    this.uploadSelectedId = 0;
+    this.uploadStatus = '正在验证账户及目标单次历史…';
+    try {
+      const result = await removeSelectedPlay(store, session, preview, episodeId);
+      this.uploadStatus = result.message;
+    } catch (error) {
+      this.uploadStatus = '安全撤销流程未完成，请重新生成预览并在 Trakt 核对；不会自动重试。';
     } finally {
       this.syncPreview = undefined;
       this.syncPage = 1;
@@ -500,14 +532,14 @@ struct Index {
     Button(label).layoutWeight(1).fontSize(12)
       .backgroundColor(this.syncFilter === value ? $r('app.color.showly_accent') : $r('app.color.showly_muted_surface'))
       .fontColor(this.syncFilter === value ? $r('app.color.showly_on_accent') : $r('app.color.showly_text'))
-      .onClick(() => { this.syncFilter = value; this.syncPage = 1; })
+      .onClick(() => { this.syncFilter = value; this.syncPage = 1; this.removeSelectedId = 0; this.uploadSelectedId = 0; })
   }
 
   @Builder
   syncPreviewView() {
     Column({ space: 10 }) {
       Text('分集同步预览').fontSize(22).fontWeight(FontWeight.Bold).width('100%')
-      Text('默认只读。仅手动确认的单集新增可上传；旧日志不会自动上传，不支持云端删除。')
+      Text('默认只读。单集新增需确认；仅具备本机历史凭证的单次观看可申请撤销。旧日志不会自动上传或删除。')
         .fontSize(12).width('100%').fontColor($r('app.color.showly_secondary'))
       Button(this.syncBusy ? '处理中…' : '验证同步账户')
         .enabled(this.episodeReady && this.signedIn && !this.syncBusy && !this.localBusy && !this.cloudBusy && !this.authBusy && !this.setupBusy)
@@ -549,7 +581,7 @@ struct Index {
               if (row.kind === 'addition') {
                 Button(this.uploadSelectedId === row.episodeId ? '取消选择' : '选择上传此集')
                   .fontSize(12).enabled(!this.syncBusy && !this.localBusy && !this.cloudBusy)
-                  .onClick(() => { this.uploadSelectedId = this.uploadSelectedId === row.episodeId ? 0 : row.episodeId; })
+                  .onClick(() => { this.removeSelectedId = 0; this.uploadSelectedId = this.uploadSelectedId === row.episodeId ? 0 : row.episodeId; })
                 if (this.uploadSelectedId === row.episodeId) {
                   Text('确认将 ' + row.label + ' 的一次观看记录新增至当前已绑定 Trakt 账户？观看时间为确认时刻。')
                     .fontSize(13).width('100%')
@@ -561,6 +593,33 @@ struct Index {
                     Button('确认上传 1 集').layoutWeight(1).enabled(!this.syncBusy && !this.localBusy && !this.cloudBusy && !this.authBusy && !this.setupBusy)
                       .onClick(() => { this.confirmEpisodeUpload(); })
                   }.width('100%')
+                }
+              }
+              if (row.kind === 'conflict') {
+                if (row.undoHistoryId > 0 && row.undoState === 0) {
+                  Text('本机上传回执：' + row.undoWatchedAt + ' · 历史 ID ' + row.undoHistoryId)
+                    .fontSize(12).width('100%')
+                  Button(this.removeSelectedId === row.episodeId ? '取消撤销选择' : '选择撤销此条历史')
+                    .fontSize(12).enabled(!this.syncBusy && !this.localBusy && !this.cloudBusy)
+                    .onClick(() => { this.uploadSelectedId = 0; this.removeSelectedId = this.removeSelectedId === row.episodeId ? 0 : row.episodeId; })
+                  if (this.removeSelectedId === row.episodeId) {
+                    Text('确认删除 ' + row.label + ' 的上述一次云端观看历史？请核对观看时间。此操作不可直接恢复。')
+                      .fontSize(13).width('100%')
+                    Text('若存在多次观看、历史变化或无法确认 ID，将停止。不会按剧集、季或整部剧删除。')
+                      .fontSize(12).width('100%')
+                    Row({ space: 8 }) {
+                      Button('取消').layoutWeight(1).enabled(!this.syncBusy)
+                        .onClick(() => { this.removeSelectedId = 0; })
+                      Button('确认删除 1 条历史').layoutWeight(1)
+                        .enabled(!this.syncBusy && !this.localBusy && !this.cloudBusy && !this.authBusy && !this.setupBusy)
+                        .onClick(() => { this.confirmEpisodeRemoval(); })
+                    }.width('100%')
+                  }
+                } else {
+                  Text(row.undoState === 1 ? '已有撤销尝试，禁止重复删除；请在 Trakt 核对。' :
+                    row.undoState === 2 ? '此前目标历史已确认不存在；保留其他云端记录。' :
+                    '无可验证的单次历史凭证（含旧版上传），保留云端记录，请在 Trakt 手动处理。')
+                    .fontSize(12).width('100%')
                 }
               }
             }.width('100%').padding(10).borderRadius(8).backgroundColor($r('app.color.showly_muted_surface'))
@@ -1467,7 +1526,7 @@ struct Index {
 
           } else if (this.tab === 'cloud') {
             Text('Trakt 云端').fontSize(23).fontWeight(FontWeight.Bold)
-            Text('云端读取默认只读；仅确认上传单集时才新增观看记录。').fontSize(13)
+            Text('云端默认只读；新增或精确撤销均需单独确认。').fontSize(13)
             this.syncPreviewView()
             if (!this.signedIn && !this.cloudBusy) {
               Text('请先在账户页面登录 Trakt。').fontSize(14)
@@ -1499,7 +1558,7 @@ struct Index {
               this.themeButton('深色', 'dark')
             }.width('100%')
             Text(this.themeStatus).fontSize(12)
-            Text('版本 0.8.2').fontSize(12).fontColor($r('app.color.showly_secondary'))
+            Text('版本 0.8.3').fontSize(12).fontColor($r('app.color.showly_secondary'))
             Text('非官方应用，使用 Trakt，但未获 Trakt 认可或认证。')
               .fontSize(12).fontColor($r('app.color.showly_secondary'))
         Text('Trakt 账户').fontSize(20).fontWeight(FontWeight.Medium)
@@ -1556,7 +1615,7 @@ struct Index {
             Button('清除 Client ID 与本机授权').enabled(!this.setupBusy && !this.searching && !this.cloudBusy && !this.syncBusy)
               .onClick(() => { this.clearClient(); })
           }
-          Text('登录使用 Trakt 官方浏览器页面。云端新增需手动确认，不支持删除。').fontSize(12)
+          Text('登录使用 Trakt 官方浏览器页面。云端新增或精确撤销需手动确认。').fontSize(12)
 
         }
 

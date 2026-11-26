@@ -29,6 +29,11 @@ interface EpisodeEvent {
   ids: number[];
   watched: boolean;
 }
+export interface UndoReceipt {
+  historyId: number;
+  watchedAt: string;
+  removalState: number;
+}
 export interface JournalIntent {
   episodeId: number;
   showId: string;
@@ -163,6 +168,7 @@ export class EpisodeStore {
     await db.executeSql('CREATE INDEX IF NOT EXISTS episode_event_show_seq ON episode_event(show_id,seq)');
     await db.executeSql('CREATE TABLE IF NOT EXISTS sync_binding (slot INTEGER PRIMARY KEY CHECK(slot=1), account_uuid TEXT NOT NULL)');
     await db.executeSql('CREATE TABLE IF NOT EXISTS sync_upload_guard (account_uuid TEXT NOT NULL, episode_id INTEGER NOT NULL, attempted_at INTEGER NOT NULL, confirmed INTEGER NOT NULL DEFAULT 0 CHECK(confirmed IN (0,1)), PRIMARY KEY(account_uuid,episode_id))');
+    await db.executeSql('CREATE TABLE IF NOT EXISTS sync_play_receipt (account_uuid TEXT NOT NULL, episode_id INTEGER NOT NULL, history_id INTEGER NOT NULL, watched_at TEXT NOT NULL, removal_state INTEGER NOT NULL DEFAULT 0 CHECK(removal_state IN (0,1,2)), PRIMARY KEY(account_uuid,episode_id), UNIQUE(account_uuid,history_id))');
     return new EpisodeStore(db);
   }
 
@@ -249,6 +255,43 @@ export class EpisodeStore {
   async confirmUpload(uuid: string, episodeId: number): Promise<void> {
     await this.db.executeSql('UPDATE sync_upload_guard SET confirmed=1 WHERE account_uuid=? AND episode_id=?',
       [uuid, episodeId]);
+  }
+
+  async undoReceipt(uuid: string, episodeId: number): Promise<UndoReceipt | undefined> {
+    const rows = await this.db.querySql('SELECT history_id,watched_at,removal_state FROM sync_play_receipt WHERE account_uuid=? AND episode_id=?', [uuid, episodeId]);
+    try {
+      if (!rows.goToFirstRow()) { return undefined; }
+      const id = rows.getLong(0);
+      const at = rows.getString(1);
+      const state = rows.getLong(2);
+      if (!validId(id) || !Number.isFinite(Date.parse(at)) || (state !== 0 && state !== 1 && state !== 2)) {
+        throw new Error('Invalid history receipt');
+      }
+      return { historyId: id, watchedAt: at, removalState: state };
+    } finally { rows.close(); }
+  }
+
+  async saveUndoReceipt(uuid: string, episodeId: number, historyId: number, watchedAt: string): Promise<void> {
+    if (!validId(episodeId) || !validId(historyId) || !Number.isFinite(Date.parse(watchedAt)) ||
+        await this.boundAccount() !== uuid || !await this.hasUploadAttempt(uuid, episodeId)) {
+      throw new Error('Invalid history receipt');
+    }
+    await this.db.executeSql('INSERT INTO sync_play_receipt(account_uuid,episode_id,history_id,watched_at,removal_state) VALUES(?,?,?,?,0)',
+      [uuid, episodeId, historyId, watchedAt]);
+  }
+
+  async reserveRemoval(uuid: string, episodeId: number, historyId: number): Promise<void> {
+    const receipt = await this.undoReceipt(uuid, episodeId);
+    if (!receipt || receipt.historyId !== historyId || receipt.removalState !== 0 || await this.boundAccount() !== uuid) {
+      throw new Error('Removal not eligible');
+    }
+    await this.db.executeSql('UPDATE sync_play_receipt SET removal_state=1 WHERE account_uuid=? AND episode_id=? AND history_id=? AND removal_state=0',
+      [uuid, episodeId, historyId]);
+  }
+
+  async confirmRemoval(uuid: string, episodeId: number, historyId: number): Promise<void> {
+    await this.db.executeSql('UPDATE sync_play_receipt SET removal_state=2 WHERE account_uuid=? AND episode_id=? AND history_id=? AND removal_state=1',
+      [uuid, episodeId, historyId]);
   }
 
   async journalIntents(): Promise<JournalIntent[]> {

@@ -3,6 +3,7 @@ import { TraktSession, traktAuth } from './TraktAuth';
 import { EpisodeStore } from './EpisodeStore';
 import { SyncPreview, SyncDifference, buildSyncPreview, readSyncAccount } from './TraktSyncPreview';
 import { readActivity } from './TraktLibrary';
+import { readEpisodeHistory, sameMinute } from './TraktPlayHistory';
 
 interface UploadIds { trakt: number; }
 interface UploadEpisode { ids: UploadIds; watched_at: string; }
@@ -107,6 +108,19 @@ export async function uploadSelectedEpisode(store: EpisodeStore, session: TraktS
     const exists = await hasHistory(session, episodeId);
     if (exists) {
       await store.confirmUpload(account.uuid, episodeId);
+      if (accepted) {
+        try {
+          const history = await readEpisodeHistory(session, episodeId);
+          if (history.count === 1 && history.plays.length === 1 &&
+              history.plays[0].action === 'watch' && sameMinute(history.plays[0].watched_at, watchedAt) &&
+              traktAuth.isCurrent(session.clientId, session.generation)) {
+            await store.saveUndoReceipt(account.uuid, episodeId, history.plays[0].id, history.plays[0].watched_at);
+            return { status: 'verified', message: '新增 1 集成功，已回读并保存单次历史 ID；撤销仍需单独确认。' };
+          }
+        } catch (error) {
+          // Upload succeeded; missing/ambiguous provenance must never enable removal.
+        }
+      }
       return { status: 'verified', message: accepted ?
         '新增 1 集成功，已回读确认云端存在该集。' :
         '云端已存在该集，回读确认；无法确定本次请求是否新增，禁止重复上传。' };
