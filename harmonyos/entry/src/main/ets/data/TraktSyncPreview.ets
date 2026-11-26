@@ -20,12 +20,14 @@ export interface SyncDifference {
   undoHistoryId: number;
   undoWatchedAt: string;
   undoState: number;
+  uploadBlocked: boolean;
 }
 export interface SyncPreview {
   account: SyncAccount;
   activity: string;
   localCount: number;
   cloudCount: number;
+  cloudIds: number[];
   cloudOnly: number;
   additions: number;
   matches: number;
@@ -155,8 +157,9 @@ export async function buildSyncPreview(store: EpisodeStore, session: TraktSessio
     const receipt = kind === 'conflict' ? await store.undoReceipt(account.uuid, intent.episodeId) : undefined;
     rows.push({ episodeId: intent.episodeId, label: intent.label, localWatched: intent.watched,
       cloudWatched: remote, kind: kind, undoHistoryId: receipt?.historyId ?? 0,
-      undoWatchedAt: receipt?.watchedAt ?? '', undoState: receipt?.removalState ?? -1 });
+      undoWatchedAt: receipt?.watchedAt ?? '', undoState: receipt?.removalState ?? -1,
+      uploadBlocked: kind === 'addition' ? await store.hasUploadAttempt(account.uuid, intent.episodeId) : false });
   }
-  return { account: verified, activity: after, localCount: local.length, cloudCount: cloud.size,
+  return { account: verified, activity: after, localCount: local.length, cloudCount: cloud.size, cloudIds: Array.from(cloud),
     cloudOnly: cloudOnly, additions: additions, matches: matches, conflicts: conflicts, unknown: unknown, rows: rows };
 }

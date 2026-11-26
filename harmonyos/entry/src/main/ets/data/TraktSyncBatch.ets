@@ -1,0 +1,134 @@
+import { http } from '@kit.NetworkKit';
+import { TraktSession, traktAuth } from './TraktAuth';
+import { EpisodeStore } from './EpisodeStore';
+import { SyncPreview, SyncDifference, buildSyncPreview, readSyncAccount } from './TraktSyncPreview';
+import { readEpisodeHistory, sameMinute } from './TraktPlayHistory';
+import { readActivity } from './TraktLibrary';
+
+interface BatchIds { trakt: number; }
+interface BatchEpisode { ids: BatchIds; watched_at: string; }
+interface BatchBody { episodes: BatchEpisode[]; }
+interface AddedCounts { episodes: number; movies?: number; }
+interface MissingItems { episodes?: BatchEpisode[]; }
+interface BatchResponse { added: AddedCounts; not_found?: MissingItems; }
+export interface BatchResult { message: string; }
+
+function current(session: TraktSession): void {
+  if (!traktAuth.isCurrent(session.clientId, session.generation)) { throw new Error('Session changed'); }
+}
+
+// Both the explicit selection and the automatic action pass through this gate.
+// Do not upload an implicit default or an imported baseline record.
+export async function uploadBatch(store: EpisodeStore, session: TraktSession,
+  uuid: string, selectedIds: number[], watchedAt: string, mode: string,
+  preview?: SyncPreview): Promise<BatchResult> {
+  if (!selectedIds.length || new Set<number>(selectedIds).size !== selectedIds.length ||
+      selectedIds.some((id: number) => !Number.isSafeInteger(id) || id <= 0) ||
+      !Number.isFinite(Date.parse(watchedAt)) ||
+      (mode !== 'manual' && mode !== 'auto')) { throw new Error('Invalid batch'); }
+  if (mode === 'manual' && (!preview || preview.account.uuid !== uuid ||
+      preview.account.generation !== session.generation ||
+      selectedIds.some((id: number) => !preview.rows.some((row: SyncDifference) =>
+        row.episodeId === id && row.kind === 'addition' && !row.uploadBlocked)))) {
+    throw new Error('Invalid reviewed selection');
+  }
+  const account = await readSyncAccount(session);
+  if (account.uuid !== uuid || await store.boundAccount() !== uuid) { throw new Error('Account mismatch'); }
+  const fresh = await buildSyncPreview(store, session);
+  if (fresh.account.uuid !== uuid) { throw new Error('Account changed'); }
+  const send: number[] = [];
+  let skipped = 0;
+  let blocked = 0;
+  for (const id of selectedIds) {
+    const row = fresh.rows.find((value: SyncDifference) => value.episodeId === id);
+    if (!row || !row.localWatched || (row.kind !== 'addition' && row.kind !== 'match')) {
+      blocked++;
+      continue;
+    }
+    if (row.cloudWatched) { skipped++; continue; }
+    if (row.uploadBlocked || await store.hasUploadAttempt(uuid, id)) { blocked++; continue; }
+    const history = await readEpisodeHistory(session, id);
+    if (history.count > 0) { skipped++; continue; }
+    send.push(id);
+  }
+  if (!send.length) {
+    const message = '未发送；已存在 ' + skipped + ' 集，受保护或不符合条件 ' + blocked + ' 集。';
+    await store.logSync(uuid, mode, selectedIds, message);
+    return { message: message };
+  }
+  if (await readActivity(session) !== fresh.activity) { throw new Error('Cloud changed before batch'); }
+  const reserved: number[] = [];
+  let sent = false;
+  try {
+    for (const id of send) {
+      current(session);
+      await store.reserveUpload(uuid, id);
+      reserved.push(id);
+    }
+    await store.logSync(uuid, mode, send, '已保留凭证，准备发送；若中断需核对');
+    if (await readActivity(session) !== fresh.activity) { throw new Error('Cloud changed'); }
+    current(session);
+    const verified = await readSyncAccount(session);
+    if (verified.uuid !== uuid || await store.boundAccount() !== uuid) { throw new Error('Account changed'); }
+    current(session);
+    const body: BatchBody = { episodes: send.map((id: number): BatchEpisode => {
+      return { ids: { trakt: id }, watched_at: watchedAt };
+    }) };
+    const request = http.createHttp();
+    let accepted = false;
+    try {
+      // Any failure after entering request() is ambiguous, even an HTTP error.
+      sent = true;
+      const response = await request.request('https://api.trakt.tv/sync/history', {
+        method: http.RequestMethod.POST,
+        header: { 'Content-Type': 'application/json', 'trakt-api-version': '2',
+          'trakt-api-key': session.clientId, 'Authorization': 'Bearer ' + session.token },
+        extraData: JSON.stringify(body), expectDataType: http.HttpDataType.STRING
+      });
+      if ((response.responseCode === 200 || response.responseCode === 201) && typeof response.result === 'string') {
+        const result = JSON.parse(response.result) as BatchResponse;
+        accepted = result.added?.episodes === send.length && (result.added?.movies ?? 0) === 0 &&
+          Array.isArray(result.not_found?.episodes) && result.not_found?.episodes?.length === 0;
+      }
+    } catch (error) {
+      // No retransmission; verify readback below.
+    } finally { request.destroy(); }
+    let present = 0;
+    let receipts = 0;
+    const readback = await readSyncAccount(session);
+    if (readback.uuid !== uuid) { throw new Error('Account changed after POST'); }
+    for (const id of send) {
+      current(session);
+      try {
+        const history = await readEpisodeHistory(session, id);
+        if (history.count > 0) {
+          await store.confirmUpload(uuid, id);
+          present++;
+          if (accepted && history.count === 1 && history.plays[0].action === 'watch' &&
+              sameMinute(history.plays[0].watched_at, watchedAt)) {
+            await store.saveUndoReceipt(uuid, id, history.plays[0].id, history.plays[0].watched_at);
+            receipts++;
+          }
+        }
+      } catch (error) {
+        // Each unverifiable episode stays protected; no retry.
+      }
+    }
+    const message = '请求 ' + send.length + ' 集，回读存在 ' + present + ' 集，未确认 ' +
+      (send.length - present) + ' 集，撤销凭证 ' + receipts + ' 集，跳过 ' + skipped +
+      ' 集，受保护 ' + blocked + ' 集。' + (accepted ? '' : ' 服务端新增数量未完整确认。');
+    await store.logSync(uuid, mode, send, message);
+    return { message: message };
+  } catch (error) {
+    if (!sent) {
+      // Only this live invocation knows no POST was issued.
+      for (const id of reserved) { await store.releaseUnsentUpload(uuid, id); }
+      const message = '发送前校验失败，未上传；已释放本次未发送凭证，可手动重新预览。';
+      await store.logSync(uuid, mode, selectedIds, message);
+      return { message: message };
+    }
+    const message = '请求可能已发送，结果未确认；保留全部凭证，禁止盲目重试。';
+    await store.logSync(uuid, mode, send, message);
+    return { message: message };
+  }
+}

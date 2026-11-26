@@ -126,8 +126,9 @@ export async function fetchEpisodeCatalog(item: Media, clientId: string): Promis
 }
 
 // Event order (SQLite sequence), not the wall clock, determines final state.
-function materialize(catalog: EpisodeCatalog, events: EpisodeEvent[]): LocalSeriesState {
+function materialize(catalog: EpisodeCatalog, events: EpisodeEvent[], baseline: number[]): LocalSeriesState {
   const state: Map<number, boolean> = new Map<number, boolean>();
+  for (const id of baseline) { state.set(id, true); }
   for (const event of events) {
     for (const id of event.ids) { state.set(id, event.watched); }
   }
@@ -169,6 +170,8 @@ export class EpisodeStore {
     await db.executeSql('CREATE TABLE IF NOT EXISTS sync_binding (slot INTEGER PRIMARY KEY CHECK(slot=1), account_uuid TEXT NOT NULL)');
     await db.executeSql('CREATE TABLE IF NOT EXISTS sync_upload_guard (account_uuid TEXT NOT NULL, episode_id INTEGER NOT NULL, attempted_at INTEGER NOT NULL, confirmed INTEGER NOT NULL DEFAULT 0 CHECK(confirmed IN (0,1)), PRIMARY KEY(account_uuid,episode_id))');
     await db.executeSql('CREATE TABLE IF NOT EXISTS sync_play_receipt (account_uuid TEXT NOT NULL, episode_id INTEGER NOT NULL, history_id INTEGER NOT NULL, watched_at TEXT NOT NULL, removal_state INTEGER NOT NULL DEFAULT 0 CHECK(removal_state IN (0,1,2)), PRIMARY KEY(account_uuid,episode_id), UNIQUE(account_uuid,history_id))');
+    await db.executeSql('CREATE TABLE IF NOT EXISTS sync_cloud_baseline (account_uuid TEXT PRIMARY KEY, episode_ids TEXT NOT NULL, imported_at INTEGER NOT NULL)');
+    await db.executeSql('CREATE TABLE IF NOT EXISTS sync_run_log (seq INTEGER PRIMARY KEY AUTOINCREMENT, account_uuid TEXT NOT NULL, mode TEXT NOT NULL, episode_ids TEXT NOT NULL, status TEXT NOT NULL, created_at INTEGER NOT NULL)');
     return new EpisodeStore(db);
   }
 
@@ -211,7 +214,9 @@ export class EpisodeStore {
     } finally {
       result.close();
     }
-    return materialize(catalog, events);
+    const uuid = await this.boundAccount();
+    const baseline = uuid ? await this.cloudBaseline(uuid) : [];
+    return materialize(catalog, events, baseline);
   }
 
   async mark(showId: string, ids: number[], watched: boolean): Promise<void> {
@@ -292,6 +297,53 @@ export class EpisodeStore {
   async confirmRemoval(uuid: string, episodeId: number, historyId: number): Promise<void> {
     await this.db.executeSql('UPDATE sync_play_receipt SET removal_state=2 WHERE account_uuid=? AND episode_id=? AND history_id=? AND removal_state=1',
       [uuid, episodeId, historyId]);
+  }
+
+  async cloudBaseline(uuid: string): Promise<number[]> {
+    const rows = await this.db.querySql('SELECT episode_ids FROM sync_cloud_baseline WHERE account_uuid=?', [uuid]);
+    try {
+      if (!rows.goToFirstRow()) { return []; }
+      const ids = JSON.parse(rows.getString(0)) as number[];
+      if (!Array.isArray(ids) || ids.some((id: number) => !validId(id)) ||
+          new Set<number>(ids).size !== ids.length) { throw new Error('Invalid cloud baseline'); }
+      return ids;
+    } finally { rows.close(); }
+  }
+
+  // Add-only baseline. Never append cloud data to explicit local intent events.
+  async importCloudBaseline(uuid: string, ids: number[]): Promise<number> {
+    if (await this.boundAccount() !== uuid || ids.some((id: number) => !validId(id))) {
+      throw new Error('Invalid baseline identity');
+    }
+    const old = await this.cloudBaseline(uuid);
+    const next: Set<number> = new Set<number>(old);
+    for (const id of ids) { next.add(id); }
+    await this.db.executeSql('INSERT OR REPLACE INTO sync_cloud_baseline(account_uuid,episode_ids,imported_at) VALUES(?,?,?)',
+      [uuid, JSON.stringify(Array.from(next)), Date.now()]);
+    return next.size - old.length;
+  }
+
+  // Release only a guard created by this process before any POST was invoked.
+  async releaseUnsentUpload(uuid: string, episodeId: number): Promise<void> {
+    await this.db.executeSql('DELETE FROM sync_upload_guard WHERE account_uuid=? AND episode_id=? AND confirmed=0',
+      [uuid, episodeId]);
+  }
+
+  async logSync(uuid: string, mode: string, ids: number[], status: string): Promise<void> {
+    if (await this.boundAccount() !== uuid) { throw new Error('Account mismatch'); }
+    await this.db.executeSql('INSERT INTO sync_run_log(account_uuid,mode,episode_ids,status,created_at) VALUES(?,?,?,?,?)',
+      [uuid, mode, JSON.stringify(ids), status, Date.now()]);
+  }
+
+  async syncLogs(uuid: string): Promise<string[]> {
+    const rows = await this.db.querySql('SELECT mode,status,created_at FROM sync_run_log WHERE account_uuid=? ORDER BY seq DESC LIMIT 12', [uuid]);
+    const result: string[] = [];
+    try {
+      while (rows.goToNextRow()) {
+        result.push(new Date(rows.getLong(2)).toLocaleString() + ' · ' + rows.getString(0) + ' · ' + rows.getString(1));
+      }
+    } finally { rows.close(); }
+    return result;
   }
 
   async journalIntents(): Promise<JournalIntent[]> {

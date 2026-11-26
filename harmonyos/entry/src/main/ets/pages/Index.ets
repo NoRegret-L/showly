@@ -15,6 +15,7 @@ import { EpisodeStore, LocalSeriesState, LocalSeasonState, LocalEpisodeState, fe
 import { SyncAccount, SyncPreview, SyncDifference, readSyncAccount, buildSyncPreview } from '../data/TraktSyncPreview';
 import { uploadSelectedEpisode } from '../data/TraktSyncUpload';
 import { removeSelectedPlay } from '../data/TraktSyncRemove';
+import { uploadBatch } from '../data/TraktSyncBatch';
 
 @Entry
 @Component
@@ -31,6 +32,12 @@ struct Index {
   @State syncPage: number = 1;
   @State uploadSelectedId: number = 0;
   @State removeSelectedId: number = 0;
+  @State batchIds: number[] = [];
+  @State batchConfirm: boolean = false;
+  @State importConfirm: boolean = false;
+  @State autoAccount?: SyncAccount = undefined;
+  @State autoStatus: string = '';
+  @State syncLogs: string[] = [];
   @State uploadStatus: string = '';
   @State episodeReady: boolean = false;
   @State episodeInitStatus: string = '';
@@ -175,7 +182,7 @@ struct Index {
         if (state && state.seasons.length > 0 && !state.seasons.some((season: LocalSeasonState) => season.number === this.localSeason)) {
           this.localSeason = state.seasons[0].number;
         }
-        this.localStatus = state ? '本机独立记录 · 不会上传 Trakt' : '首次使用请联网下载分集目录';
+        this.localStatus = state ? '本机状态（可含已导入云端记录）· 手动模式不会上传' : '首次使用请联网下载分集目录';
       }
     } catch (error) {
       if (revision === this.detailRevision) {
@@ -192,14 +199,18 @@ struct Index {
     const revision = this.detailRevision;
     this.localBusy = true;
     this.confirmSeason = -1;
+    const auto = this.autoAccount;
+    let saved = false;
+    const watchedAt = new Date().toISOString();
     try {
       this.invalidateSync();
       await store.mark(item.id, ids, watched);
+      saved = true;
       const state = await store.read(item.id);
       this.localRecent = await store.recent();
       if (revision === this.detailRevision) {
         this.localSeries = state;
-        this.localStatus = '已保存到本机 · 未上传 Trakt';
+        this.localStatus = '已保存到本机 · 本地操作完成';
       }
     } catch (error) {
       if (revision === this.detailRevision) {
@@ -208,13 +219,17 @@ struct Index {
     } finally {
       this.localBusy = false;
     }
+    if (saved && watched && auto && this.autoAccount?.uuid === auto.uuid &&
+        this.autoAccount?.generation === auto.generation) {
+      await this.runAutoAction(auto, ids, watchedAt);
+    }
   }
 
   @Builder
   localEpisodesView(item: Media) {
     Column({ space: 10 }) {
       Text('本机分集管理').fontSize(20).fontWeight(FontWeight.Medium).width('100%')
-      Text('与下方 Trakt 云端观看状态独立。仅统计已确认播出的普通集；不会自动上传或导入云端记录。')
+      Text('本机明确操作优先于已导入的云端记录。仅统计已播普通集；自动新增仅在本次会话主动开启后生效。')
         .fontSize(12).fontColor($r('app.color.showly_secondary')).width('100%')
       if (!this.episodeReady) {
         Text(this.episodeInitStatus || '正在打开分集数据库…').fontSize(13).width('100%')
@@ -226,6 +241,7 @@ struct Index {
             .onClick(() => { this.loadLocalEpisodes(item, true); })
         }.width('100%')
         Text(this.localStatus).fontSize(12).width('100%')
+        if (this.autoStatus) { Text(this.autoStatus).fontSize(12).width('100%') }
         if (this.localSeries) {
           Text('本机已看 ' + this.localSeries.completed + ' / ' + this.localSeries.catalog.episodes.length + ' 集')
             .fontSize(16).width('100%')
@@ -375,6 +391,10 @@ struct Index {
   }
 
   private invalidateSync(): void {
+    this.batchIds = [];
+    this.batchConfirm = false;
+    this.importConfirm = false;
+    this.syncLogs = [];
     this.uploadSelectedId = 0;
     this.removeSelectedId = 0;
     this.uploadStatus = '';
@@ -404,6 +424,7 @@ struct Index {
       }
       this.syncAccount = account;
       this.syncBound = bound === account.uuid;
+      if (this.syncBound) { this.syncLogs = await store.syncLogs(account.uuid); }
       this.syncStatus = this.syncBound ? '账户已验证，可以生成差异预览。' :
         bound ? '本机已绑定另一 Trakt 账户，禁止生成预览或重新绑定。' : '请核对账户并确认绑定；不会上传记录。';
       if (bound && bound !== account.uuid) { this.syncAccount = undefined; }
@@ -427,6 +448,7 @@ struct Index {
           !traktAuth.isCurrent(clientId, session.generation)) { throw new Error('Account changed'); }
       await store.bindAccount(verified.uuid);
       this.syncBound = true;
+      this.syncLogs = await store.syncLogs(verified.uuid);
       this.syncStatus = '账户绑定成功；尚未同步任何记录。';
     } catch (error) {
       this.invalidateSync();
@@ -442,6 +464,9 @@ struct Index {
         this.setupBusy || !traktAuth.isCurrent(clientId, expected.generation)) { return; }
     this.syncBusy = true;
     this.syncPreview = undefined;
+    this.batchIds = [];
+    this.batchConfirm = false;
+    this.importConfirm = false;
     this.uploadSelectedId = 0;
     this.removeSelectedId = 0;
     this.syncPage = 1;
@@ -453,9 +478,125 @@ struct Index {
       if (preview.account.uuid !== expected.uuid || this.clientId !== clientId ||
           !traktAuth.isCurrent(clientId, session.generation)) { throw new Error('Account changed'); }
       this.syncPreview = preview;
+      this.syncLogs = await store.syncLogs(preview.account.uuid);
       this.syncStatus = '预览完成；本机与云端观看记录均未改动。';
     } catch (error) {
       this.syncStatus = '预览失败：账户、分页或活动快照无法验证。请检查网络并重试。';
+    } finally { this.syncBusy = false; }
+  }
+
+  private autoActive(): boolean {
+    const account = this.autoAccount;
+    return !!account && this.signedIn && traktAuth.isCurrent(this.clientId, account.generation);
+  }
+
+  private enableAuto(): void {
+    if (this.syncBusy || this.localBusy || this.cloudBusy || this.setupBusy || !this.syncBound ||
+        !this.syncAccount || !traktAuth.isCurrent(this.clientId, this.syncAccount.generation)) { return; }
+    this.autoAccount = this.syncAccount;
+    this.autoStatus = '本次会话自动新增已开启；只处理接下来明确标记已看的分集，不追溯旧日志。';
+  }
+
+  private async runAutoAction(account: SyncAccount, ids: number[], watchedAt: string): Promise<void> {
+    const store = this.episodeStore;
+    const clientId = this.clientId;
+    if (!store || !this.autoActive() || this.syncBusy || this.cloudBusy || this.localBusy || this.setupBusy ||
+        this.autoAccount?.uuid !== account.uuid || this.autoAccount?.generation !== account.generation) {
+      this.autoStatus = '自动新增未执行；本机已保留，可手动预览。';
+      return;
+    }
+    const session = traktAuth.session(clientId);
+    if (!session || session.generation !== account.generation) { return; }
+    this.syncBusy = true;
+    this.autoStatus = '正在自动校验并上传本次新增操作…';
+    try {
+      const result = await uploadBatch(store, session, account.uuid, ids, watchedAt, 'auto');
+      this.autoStatus = result.message;
+    } catch (error) {
+      this.autoStatus = '自动新增未完成，请在云端手动预览核对；不会自动重试。';
+    } finally {
+      this.syncPreview = undefined;
+      this.syncBusy = false;
+    }
+  }
+
+  private toggleBatch(id: number): void {
+    if (this.syncBusy || this.batchConfirm) { return; }
+    this.uploadSelectedId = 0;
+    this.removeSelectedId = 0;
+    this.importConfirm = false;
+    this.batchIds = this.batchIds.includes(id) ? this.batchIds.filter((value: number) => value !== id) :
+      [...this.batchIds, id];
+  }
+
+  private selectBatchPage(): void {
+    if (this.syncBusy || this.batchConfirm) { return; }
+    const ids: Set<number> = new Set<number>(this.batchIds);
+    for (const row of this.syncSlice()) {
+      if (row.kind === 'addition' && !row.uploadBlocked) { ids.add(row.episodeId); }
+    }
+    this.batchIds = Array.from(ids);
+    this.uploadSelectedId = 0;
+    this.removeSelectedId = 0;
+    this.importConfirm = false;
+  }
+
+  private batchLabels(): SyncDifference[] {
+    return this.syncPreview?.rows.filter((row: SyncDifference) => this.batchIds.includes(row.episodeId)) ?? [];
+  }
+
+  private async confirmBatchUpload(): Promise<void> {
+    const store = this.episodeStore;
+    const preview = this.syncPreview;
+    const ids = [...this.batchIds];
+    if (!store || !preview || !this.syncBound || !this.batchConfirm || !ids.length ||
+        this.syncBusy || this.localBusy || this.cloudBusy || this.authBusy || this.setupBusy ||
+        !traktAuth.isCurrent(this.clientId, preview.account.generation)) { return; }
+    const session = traktAuth.session(this.clientId);
+    if (!session) { return; }
+    this.syncBusy = true;
+    this.batchIds = [];
+    this.batchConfirm = false;
+    this.uploadStatus = '正在复核批量新增…';
+    try {
+      const result = await uploadBatch(store, session, preview.account.uuid, ids,
+        new Date().toISOString(), 'manual', preview);
+      this.uploadStatus = result.message;
+      this.syncLogs = await store.syncLogs(preview.account.uuid);
+    } catch (error) {
+      this.uploadStatus = '批量流程未完成，请重新预览并核对云端；不会盲目重试。';
+    } finally {
+      this.syncPreview = undefined;
+      this.syncPage = 1;
+      this.syncStatus = '批量流程结束；请重新生成预览。';
+      this.syncBusy = false;
+    }
+  }
+
+  private async confirmCloudImport(): Promise<void> {
+    const store = this.episodeStore;
+    const preview = this.syncPreview;
+    if (!store || !preview || !this.syncBound || !this.importConfirm || this.syncBusy ||
+        this.localBusy || this.cloudBusy || this.authBusy || this.setupBusy ||
+        !traktAuth.isCurrent(this.clientId, preview.account.generation)) { return; }
+    const session = traktAuth.session(this.clientId);
+    if (!session) { return; }
+    this.syncBusy = true;
+    this.importConfirm = false;
+    this.batchIds = [];
+    this.batchConfirm = false;
+    try {
+      const fresh = await buildSyncPreview(store, session);
+      if (fresh.account.uuid !== preview.account.uuid || !traktAuth.isCurrent(this.clientId, session.generation)) {
+        throw new Error('Account changed');
+      }
+      const added = await store.importCloudBaseline(fresh.account.uuid, fresh.cloudIds);
+      this.uploadStatus = '已新增保存 ' + added + ' 个云端已看分集 ID 到本机基线；明确本机操作优先，未修改 Trakt。';
+      await store.logSync(fresh.account.uuid, 'import', [], this.uploadStatus);
+      this.syncLogs = await store.syncLogs(fresh.account.uuid);
+      this.syncPreview = fresh;
+    } catch (error) {
+      this.uploadStatus = '导入流程未完成，请核对本机记录；未向云端写入。';
     } finally { this.syncBusy = false; }
   }
 
@@ -539,7 +680,7 @@ struct Index {
   syncPreviewView() {
     Column({ space: 10 }) {
       Text('分集同步预览').fontSize(22).fontWeight(FontWeight.Bold).width('100%')
-      Text('默认只读。单集新增需确认；仅具备本机历史凭证的单次观看可申请撤销。旧日志不会自动上传或删除。')
+      Text('默认手动模式。批量新增和云端基线导入需确认；撤销仍仅允许具备历史凭证的单次操作。')
         .fontSize(12).width('100%').fontColor($r('app.color.showly_secondary'))
       Button(this.syncBusy ? '处理中…' : '验证同步账户')
         .enabled(this.episodeReady && this.signedIn && !this.syncBusy && !this.localBusy && !this.cloudBusy && !this.authBusy && !this.setupBusy)
@@ -556,6 +697,22 @@ struct Index {
         } else {
           Button('生成同步差异预览').enabled(!this.syncBusy && !this.localBusy && !this.cloudBusy && !this.authBusy)
             .onClick(() => { this.generateSyncPreview(); })
+          Text(this.autoActive() ? '同步模式：本次会话自动新增' : '同步模式：手动（默认）').fontSize(14).width('100%')
+          Text('开启后，接下来单集或整季标记已看将自动上传本次新增；不追溯旧记录、不自动删除、不后台重试。重启或授权变化后关闭。')
+            .fontSize(12).width('100%')
+          Button(this.autoActive() ? '关闭自动新增' : '授权开启本次会话自动新增')
+            .enabled(!this.syncBusy && !this.localBusy && !this.cloudBusy && !this.authBusy)
+            .onClick(() => {
+              if (this.autoActive()) { this.autoAccount = undefined; this.autoStatus = '自动新增已关闭'; }
+              else { this.enableAuto(); }
+            })
+          if (this.autoStatus) { Text(this.autoStatus).fontSize(13).width('100%') }
+          if (this.syncLogs.length > 0) {
+            Text('最近批量同步与导入日志').fontSize(15).fontWeight(FontWeight.Medium).width('100%')
+            ForEach(this.syncLogs, (log: string, index: number) => {
+              Text(log).fontSize(12).width('100%')
+            }, (log: string, index: number) => index.toString() + log)
+          }
         }
         if (this.syncPreview && this.syncBound) {
           Text('本机明确操作 ' + this.syncPreview.localCount + ' 集 · 云端已看 ' + this.syncPreview.cloudCount + ' 集')
@@ -565,6 +722,41 @@ struct Index {
             .fontSize(14).width('100%')
           Text('仅云端存在 ' + this.syncPreview.cloudOnly + ' 集（含可能的特别篇），保留原记录。')
             .fontSize(13).width('100%')
+          Button('导入云端已看状态到本机').enabled(!this.syncBusy && !this.localBusy && !this.cloudBusy)
+            .onClick(() => { this.importConfirm = true; this.batchConfirm = false; this.batchIds = []; this.uploadSelectedId = 0; this.removeSelectedId = 0; })
+          if (this.importConfirm) {
+            Text('确认保存当前账户的云端已看 ID？只新增本机基线，不覆盖本机明确标记或撤销；已缓存分集目录可离线显示，不导入单次历史时间。')
+              .fontSize(12).width('100%')
+            Row({ space: 8 }) {
+              Button('取消').layoutWeight(1).enabled(!this.syncBusy).onClick(() => { this.importConfirm = false; })
+              Button('确认导入').layoutWeight(1).enabled(!this.syncBusy).onClick(() => { this.confirmCloudImport(); })
+            }.width('100%')
+          }
+          if (this.syncFilter === 'addition') {
+            Row({ space: 6 }) {
+              Button('选择本页可上传').layoutWeight(1).fontSize(12).enabled(!this.syncBusy && !this.batchConfirm)
+                .onClick(() => { this.selectBatchPage(); })
+              Button('清空选择').layoutWeight(1).fontSize(12).enabled(!this.syncBusy)
+                .onClick(() => { this.batchIds = []; this.batchConfirm = false; })
+            }.width('100%')
+          }
+          if (this.batchIds.length > 0) {
+            Text('已选 ' + this.batchIds.length + ' 集（支持跨页选择）').fontSize(14).width('100%')
+            Button('核对批量新增').enabled(!this.syncBusy && !this.batchConfirm)
+              .onClick(() => { this.batchConfirm = true; this.importConfirm = false; this.uploadSelectedId = 0; this.removeSelectedId = 0; })
+            if (this.batchConfirm) {
+              Text('确认以下分集确实看过？将尝试新增各一次观看，使用确认时刻；可能影响 Trakt 追剧进度。')
+                .fontSize(13).width('100%')
+              ForEach(this.batchLabels(), (row: SyncDifference) => {
+                Text(row.label).fontSize(12).width('100%')
+              }, (row: SyncDifference) => row.episodeId.toString())
+              Row({ space: 8 }) {
+                Button('取消').layoutWeight(1).enabled(!this.syncBusy).onClick(() => { this.batchConfirm = false; })
+                Button('确认上传所选').layoutWeight(1).enabled(!this.syncBusy && !this.localBusy && !this.cloudBusy)
+                  .onClick(() => { this.confirmBatchUpload(); })
+              }.width('100%')
+            }
+          }
           Row({ space: 4 }) {
             this.syncFilterButton('新增', 'addition')
             this.syncFilterButton('一致', 'match')
@@ -578,10 +770,16 @@ struct Index {
               Text('本机 ' + (row.localWatched ? '已看' : '撤销') + ' / 云端 ' +
                 (row.cloudWatched ? '已看' : '无已看记录')).fontSize(12).width('100%')
                 .fontColor($r('app.color.showly_secondary'))
-              if (row.kind === 'addition') {
+              if (row.kind === 'addition' && row.uploadBlocked) {
+                Text('已有上传保护凭证，禁止重发；请核对 Trakt。').fontSize(12).width('100%')
+              }
+              if (row.kind === 'addition' && !row.uploadBlocked) {
+                Button(this.batchIds.includes(row.episodeId) ? '已选入批量' : '加入批量选择')
+                  .fontSize(12).enabled(!this.syncBusy && !this.batchConfirm)
+                  .onClick(() => { this.toggleBatch(row.episodeId); })
                 Button(this.uploadSelectedId === row.episodeId ? '取消选择' : '选择上传此集')
                   .fontSize(12).enabled(!this.syncBusy && !this.localBusy && !this.cloudBusy)
-                  .onClick(() => { this.removeSelectedId = 0; this.uploadSelectedId = this.uploadSelectedId === row.episodeId ? 0 : row.episodeId; })
+                  .onClick(() => { this.batchIds = []; this.batchConfirm = false; this.importConfirm = false; this.removeSelectedId = 0; this.uploadSelectedId = this.uploadSelectedId === row.episodeId ? 0 : row.episodeId; })
                 if (this.uploadSelectedId === row.episodeId) {
                   Text('确认将 ' + row.label + ' 的一次观看记录新增至当前已绑定 Trakt 账户？观看时间为确认时刻。')
                     .fontSize(13).width('100%')
@@ -601,7 +799,7 @@ struct Index {
                     .fontSize(12).width('100%')
                   Button(this.removeSelectedId === row.episodeId ? '取消撤销选择' : '选择撤销此条历史')
                     .fontSize(12).enabled(!this.syncBusy && !this.localBusy && !this.cloudBusy)
-                    .onClick(() => { this.uploadSelectedId = 0; this.removeSelectedId = this.removeSelectedId === row.episodeId ? 0 : row.episodeId; })
+                    .onClick(() => { this.batchIds = []; this.batchConfirm = false; this.importConfirm = false; this.uploadSelectedId = 0; this.removeSelectedId = this.removeSelectedId === row.episodeId ? 0 : row.episodeId; })
                   if (this.removeSelectedId === row.episodeId) {
                     Text('确认删除 ' + row.label + ' 的上述一次云端观看历史？请核对观看时间。此操作不可直接恢复。')
                       .fontSize(13).width('100%')
@@ -1526,7 +1724,7 @@ struct Index {
 
           } else if (this.tab === 'cloud') {
             Text('Trakt 云端').fontSize(23).fontWeight(FontWeight.Bold)
-            Text('云端默认只读；新增或精确撤销均需单独确认。').fontSize(13)
+            Text('默认手动同步；自动新增需主动授权，云端撤销仍需单独确认。').fontSize(13)
             this.syncPreviewView()
             if (!this.signedIn && !this.cloudBusy) {
               Text('请先在账户页面登录 Trakt。').fontSize(14)
@@ -1558,7 +1756,7 @@ struct Index {
               this.themeButton('深色', 'dark')
             }.width('100%')
             Text(this.themeStatus).fontSize(12)
-            Text('版本 0.8.3').fontSize(12).fontColor($r('app.color.showly_secondary'))
+            Text('版本 0.8.4').fontSize(12).fontColor($r('app.color.showly_secondary'))
             Text('非官方应用，使用 Trakt，但未获 Trakt 认可或认证。')
               .fontSize(12).fontColor($r('app.color.showly_secondary'))
         Text('Trakt 账户').fontSize(20).fontWeight(FontWeight.Medium)
@@ -1615,7 +1813,7 @@ struct Index {
             Button('清除 Client ID 与本机授权').enabled(!this.setupBusy && !this.searching && !this.cloudBusy && !this.syncBusy)
               .onClick(() => { this.clearClient(); })
           }
-          Text('登录使用 Trakt 官方浏览器页面。云端新增或精确撤销需手动确认。').fontSize(12)
+          Text('登录使用 Trakt 官方浏览器页面。同步模式在云端页设置；云端撤销需手动确认。').fontSize(12)
 
         }
 
