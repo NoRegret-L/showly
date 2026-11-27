@@ -1,4 +1,4 @@
-# Showly HarmonyOS Preview v0.9.3e.2d.6
+# Showly HarmonyOS Preview v0.9.3e.2d.7
 
 Unofficial native ArkTS prototype, not a complete Showly port. Your app uses Trakt but is not endorsed or certified by Trakt.
 
@@ -213,3 +213,6 @@ See [Display isolation](docs/DISPLAY_ISOLATION.md).
 
 ## v0.9.3e.2d.6 — local-first discovery (0.9.3.23, build 47)
 See [Discovery read model](docs/DISCOVER_LOCAL_FIRST.md).
+
+## v0.9.3e.2d.7 — local series calendar (0.9.3.24, build 48)
+See [Local calendar](docs/CALENDAR_LOCAL.md).

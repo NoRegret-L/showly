@@ -42,6 +42,11 @@ const repo=new DiscoverRead(disk,net);
   const result=await Promise.all(Array.from({length:393},()=>repo.load('client-A',request,false,()=>{})));
   assert.equal(calls,4);result.forEach(x=>assert.deepEqual(x.items,reference));
   await repo.load('client-A',request,false,()=>{});assert.equal(calls,4);
+  const ranked=[item(1),item(2),item(3),item(4),item(5),item(6),item(1),item(7),item(8),item(9)];
+  const dupStore={read:async()=>'',write:async()=>{}};
+  const dupNet={read:async(c,r,mode,page,limit)=>{const all=mode==='anticipated'?[item(999)]:ranked;const n=4;const items=all.slice((page-1)*n,page*n);return {items,page,pages:Math.ceil(all.length/n),limit:n,count:items.length}}};
+  const dup=await new DiscoverRead(dupStore,dupNet).load('client-A',request,false,()=>{});
+  assert.deepEqual(dup.items,d.mixDiscover(ranked,[item(999)]));assert.equal(dup.items[6].media.id,'show:999');
   fs.writeFileSync('saved.json',JSON.stringify([...map]));
  }else{
   for(const [k,v] of JSON.parse(fs.readFileSync('saved.json','utf8')))map.set(k,v);

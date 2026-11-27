@@ -39,7 +39,7 @@ export class DiscoverRead {
       if (request.mode === 'trending') {
         const lists = await Promise.all([this.chart(client,request,'trending',request.limit),this.chart(client,request,'anticipated',ANTICIPATED_LIMIT)]);
         items = mixDiscover(lists[0],lists[1]);
-      } else { items = await this.chart(client,request,request.mode,request.limit); }
+      } else { items = mixDiscover(await this.chart(client,request,request.mode,request.limit),[]); }
       const feed: DiscoverFeed = {fetchedAt:Date.now(),items:items};
       if (!validDiscoverFeed(feed,request.kind)) { throw new Error('Invalid discovery feed'); }
       try { await this.storage.write(key,JSON.stringify(feed)); } catch (error) { /* optional public cache */ }
@@ -48,7 +48,6 @@ export class DiscoverRead {
   }
   private async chart(client: string, request: DiscoverRequest, mode: string, target: number): Promise<DiscoverItem[]> {
     const rows: DiscoverItem[] = [];
-    const ids = new Set<string>();
     let page = 1;
     let consumed = 0;
     let effective = 0;
@@ -61,11 +60,8 @@ export class DiscoverRead {
         throw new Error('Invalid discovery pagination');
       }
       effective = part.limit;
-      // Preserve server rank for the requested prefix, even if duplicate IDs
-      // appear across pages. No arbitrary page cap; server limit controls it.
-      for (const item of part.items.slice(0,Math.max(0,target-consumed))) {
-        if (!ids.has(item.media.id)) { ids.add(item.media.id); rows.push(item); }
-      }
+      // Keep original ranks until mixing; duplicates still occupy upstream positions.
+      rows.push(...part.items.slice(0,Math.max(0,target-consumed)));
       consumed += part.count;
       if (page >= part.pages || part.count === 0) { break; }
       page++;

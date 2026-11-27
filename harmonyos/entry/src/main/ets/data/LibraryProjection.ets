@@ -1,4 +1,5 @@
 import { taskpool } from '@kit.ArkTS';
+import { CalendarSource } from '../model/CalendarRules';
 import { summarizeAired } from '../model/BatchEpisodeRead';
 import { Media } from '../model/Media';
 import { ProjectionInput, ProjectionOutput, computeProjectionBatch, ShowProjectionCache, showProjectionStateKey, persistentProjectionScope, diskProjectionAllowed } from '../model/ProjectionCompute';
@@ -21,6 +22,7 @@ export interface LibraryProjection {
   localAllowed: boolean;
   matches: ReadCheckpoint[];
   next: NextShow[];
+  calendar: CalendarSource[];
   computedAt: number;
   validUntil: number;
   cacheable: boolean;
@@ -90,6 +92,7 @@ export async function projectLibrary(store: EpisodeStore, records: MediaRecord[]
   const result: LibraryShowEvidence[] = [];
   const matches: ReadCheckpoint[] = [];
   const next: NextShow[] = [];
+  const calendar: CalendarSource[] = [];
   const latest: Map<string, number> = new Map<string, number>();
   for (const intent of intents) { latest.set(intent.showId, Math.max(latest.get(intent.showId) ?? 0, intent.seq)); }
   let missing = 0;
@@ -222,6 +225,7 @@ export async function projectLibrary(store: EpisodeStore, records: MediaRecord[]
       if (!work.diskReusable) { changedDisk.push(encodeIndexedProjection(input,work.catalogKey,work.key,calculated)); }
     } else if (disk.has(row.media.id)) { removedDisk.push(row.media.id); }
     const effective = calculated?.effective;
+    calendar.push({media:row.media,full:full,watchedIds:effective?.complete ? effective.ids : undefined,queued:row.queued});
     if (!effective?.complete || !full?.status) { cacheable = false; }
     if (effective && effective.complete) {
       for (const match of effective.matches) {
@@ -254,7 +258,7 @@ export async function projectLibrary(store: EpisodeStore, records: MediaRecord[]
   if (changedDisk.length) { await store.saveProjectionRows(diskScope,changedDisk); }
   if (removedDisk.length) { await store.removeProjectionRows(diskScope,removedDisk); }
   if (!current() || (readOnly && store.readModelRevision() !== revision)) { throw new Error('Observation inputs changed'); }
-  return { evidence: result, missing: missing, failed: failed, localAllowed: localAllowed, matches: matches, next: next,
+  return { evidence: result, missing: missing, failed: failed, localAllowed: localAllowed, matches: matches, next: next, calendar: calendar,
     computedAt: now, validUntil: validUntil, cacheable: cacheable && !missing && !failed, computedShows: computedShows, reusedShows: reusedShows, diskHits: diskHits, scheduleParses: scheduleParses,
     diskParses: diskParses, diskWrites: changedDisk.length, workerBatches: workerBatches, repairTargets: repairTargets };
 }

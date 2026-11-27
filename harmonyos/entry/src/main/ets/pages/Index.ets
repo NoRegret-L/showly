@@ -24,7 +24,8 @@ import { RevisionMemo, projectionKey, progressExpiry } from '../model/ReadModelC
 import { ShowProjectionCache } from '../model/ProjectionCompute';
 import { MovieProgressOptions, MovieProgressSource, defaultMovieProgress, validMovieProgress, movieProgressRows as projectMovieProgress, clearMoviePin } from '../model/MovieProgressRules';
 import { ProgressSource, ProgressPreferences, ProgressFlag, ProgressRow, defaultProgress, validProgress, toggleProgressFlag, selectProgress, sortProgressCandidates, ProgressEntry, progressSections, progressEntries, progressPage, effectiveProgressFilter } from '../model/ProgressRules';
-import { CalendarSnapshot, CalendarEntry, readCalendar, calendarWindow, localDay } from '../data/TraktCalendar';
+import { CalendarSource, CalendarInput, CalendarEntry, CalendarIndex, CalendarText, CalendarJobInput, calendarClockKey, calendarExpiry, calendarPageRows, calendarTitleHidden } from '../model/CalendarRules';
+import { calendarDisplay } from '../data/CalendarTask';
 import { PersonalMovie, PersonalMovieSnapshot, readPersonalMovieDate, CollectionRating, readCollectionRatings } from '../data/TraktLibrary';
 import { MovieCalendarItem, filterMovies, moviePage } from '../data/MovieCalendar';
 import { searchTrakt } from '../data/TraktSearch';
@@ -195,11 +196,22 @@ struct Index {
   @State @Watch('onPresentationChanged') collectionStatusFilter: string = 'all';
   @State @Watch('onPresentationChanged') nextQuery: string = '';
   @State @Watch('onPresentationChanged') nextPage: number = 1;
-  @State calendarWeek: number = 0;
+  @State @Watch('onPresentationChanged') showCalendarMode: string = 'future';
+  @State @Watch('onPresentationChanged') calendarPremieres: boolean = false;
+  @State @Watch('onPresentationChanged') calendarQuery: string = '';
+  @State @Watch('onPresentationChanged') calendarProtect: boolean = true;
   @State @Watch('onPresentationChanged') calendarPage: number = 1;
   @State calendarBusy: boolean = false;
   @State calendarStatus: string = '';
-  @State @Watch('onPresentationChanged') calendarData?: CalendarSnapshot = undefined;
+  @State calendarSourceVersion: number = 0;
+  @State calendarViewRevision: number = 0;
+  @State calendarSummary: DisplaySummary = {key:'',total:0,page:1,pages:1};
+  private calendarSourceScope: string = '';
+  private calendarSources: CalendarSource[] = [];
+  private calendarRepairTargets: Media[] = [];
+  private calendarIndex: CalendarIndex = new CalendarIndex();
+  private calendarMemo: RevisionMemo<CalendarEntry[]> = new RevisionMemo<CalendarEntry[]>();
+  private calendarHydrationKey: string = '';
   @State @Watch('onMoviesChanged') movieCalendarData?: PersonalMovieSnapshot = undefined;
   private movieRatingKey: string = '';
   private movieRatingRows: CollectionRating[] = [];
@@ -487,7 +499,7 @@ struct Index {
   // Coalesce to a single pending event, not a periodic retry loop.
   private onObservationAuthChanged(): void {
     this.viewport.clear();
-    this.calendarRows.replace([],[],[]);
+    this.clearLocalCalendar(true);
     this.movieCalendarRows.replace([],[],[]);
     this.collectionScope = '';
     this.collectionRatingKey = '';
@@ -528,7 +540,7 @@ struct Index {
     this.movieUndoStatus = '';
     if (!this.signedIn) {
       this.cloudLocalAllowed = false;
-      this.libraryEvidence = [];
+      this.clearLocalCalendar(); this.libraryEvidence = [];
       this.localSeries = undefined;
       this.effectiveEditable = false;
       this.observationPending = false;
@@ -536,7 +548,7 @@ struct Index {
       return;
     }
     this.cloudLocalAllowed = false;
-    this.libraryEvidence = [];
+    this.clearLocalCalendar(); this.libraryEvidence = [];
     this.nextShows = [];
     this.localSeries = undefined;
     this.effectiveEditable = false;
@@ -1152,7 +1164,7 @@ struct Index {
     this.reloadCollectionOptions();
     const route = JSON.stringify([this.clientId, this.tab, this.mediaMode, this.progressMode, this.selectedMedia?.id ?? '',
       this.nextPage, this.nextQuery, this.movieProgressPage, this.movieProgressQuery, this.collectionPage,
-      this.collectionQuery, this.collectionFilter, this.collectionStatusFilter, this.calendarPage, this.movieCalendarQuery,
+      this.collectionQuery, this.collectionFilter, this.collectionStatusFilter, this.calendarPage, this.showCalendarMode,this.calendarPremieres,this.calendarQuery,this.calendarProtect,this.movieCalendarQuery,
       this.movieCalendarMode, this.schedulePage, this.localSeason, this.presentationLanguage, this.collectionOptions]);
     if (route !== this.presentationRoute) {
       this.presentationRoute = route;
@@ -1197,8 +1209,13 @@ struct Index {
         const rows = this.movieCalendarCurrent() ? this.movieSlice() : [];
         await this.movieCalendarRows.submit(rows,rows.map((row: MovieCalendarItem) => row.movie.media.id),rows.map((row: MovieCalendarItem) => this.movieCalendarKey(row)),diffDisplay,current);
       } else {
-        const rows = this.calendarSlice();
-        await this.calendarRows.submit(rows,rows.map((row: CalendarEntry) => row.key),rows.map((row: CalendarEntry) => this.calendarRowKey(row)),diffDisplay,current);
+        const prepared = this.prepareCalendar();
+        if (!prepared) { return; }
+        const pages = Math.max(1,Math.ceil(prepared.length/this.collectionPageSize));
+        const summary: DisplaySummary = {key:this.calendarDisplayKey(),total:prepared.length,page:Math.min(this.calendarPage,pages),pages:pages};
+        const rows = calendarPageRows(prepared,summary.page,this.collectionPageSize);
+        const committed = await this.calendarRows.submit(rows,rows.map((row: CalendarEntry) => row.key),rows.map((row: CalendarEntry) => this.calendarRowKey(row)),diffDisplay,current);
+        if (committed && current()) { this.calendarSummary = summary; }
       }
       return;
     }
@@ -1275,8 +1292,7 @@ struct Index {
       this.artwork(row.movie.media),this.displayTitle(row.movie.media)]);
   }
   private calendarRowKey(row: CalendarEntry): string {
-    return JSON.stringify([row.key,row.day,row.time,row.season,row.number,this.artwork(row.media),this.displayTitle(row.media),
-      this.displayEpisode(row.media,row.season,Number(row.key.substring(8)),row.episodeTitle)]);
+    return JSON.stringify([row.key,row.day,row.time,row.season,row.number,row.group,row.header,row.state,row.queued,row.synthetic,this.calendarProtect,this.artwork(row.media),this.displayTitle(row.media),this.calendarEpisodeTitle(row)]);
   }
   private requestPresentation(): void {
     this.scheduleLazyRows();
@@ -1334,7 +1350,7 @@ struct Index {
       }
     } else if (this.tab === 'progress' && this.progressMode === 'calendar') {
       if (this.mediaMode === 'show') {
-        for (const row of this.calendarSlice()) { this.addPresentationTask(tasks, row.media, true, row.season); }
+        for (const row of this.calendarSlice()) { this.addPresentationTask(tasks, row.media, true, row.synthetic ? 0 : row.season); }
       } else {
         for (const row of this.movieSlice()) { this.addPresentationTask(tasks, row.movie.media, true); }
         if (this.movieCalendarQuery.trim() && this.presentationLanguage === 'zh') {
@@ -2555,7 +2571,7 @@ struct Index {
 
   private clearCloud(): void {
     this.viewport.clear();
-    this.calendarRows.replace([],[],[]);
+    this.clearLocalCalendar(true);
     this.movieCalendarRows.replace([],[],[]);
     this.collectionScope = '';
     this.collectionRatingKey = '';
@@ -2599,7 +2615,7 @@ struct Index {
     this.localSeries = undefined;
     this.effectiveEditable = false;
     this.nextShows = [];
-    this.libraryEvidence = [];
+    this.clearLocalCalendar(); this.libraryEvidence = [];
     this.cloudStatus = '';
     this.trackingPage = 1;
     this.trackingQuery = '';
@@ -2689,6 +2705,7 @@ struct Index {
           initialRecords = JSON.stringify(this.mediaRecords);
           this.nextShows = initial.next;
           this.libraryEvidence = initial.evidence;
+          this.publishLocalCalendar(initial);
           this.reloadProgressFlags();
         } catch (error) {
           if (!current()) { throw new Error('Session changed'); }
@@ -2710,7 +2727,7 @@ struct Index {
         this.cloud = snapshot;
         this.cloudUuid = account.uuid;
         this.publishMovieSource(snapshot);
-        if (changed) { this.libraryEvidence = []; }
+        if (changed) { this.clearLocalCalendar(); this.libraryEvidence = []; }
         this.cloudFresh = true;
       } catch (error) {
         if (!current() || !this.cloud || this.cloudUuid !== account.uuid) { throw new Error('读取云端失败'); }
@@ -2772,6 +2789,7 @@ struct Index {
       this.movieProgressPage = 1;
       this.nextStatus = result.missing ? '部分剧集资料尚未补齐。' : '';
       this.libraryEvidence = result.evidence;
+      this.publishLocalCalendar(result);
       this.resetCollection();
       await this.refreshEffectiveDetail();
       // A newly acknowledged watch time can alter LAST_WATCHED. Only that
@@ -3110,7 +3128,7 @@ struct Index {
       this.invalidateMovieCalendar();
       this.cloud = undefined;
       this.cloudLocalAllowed = false;
-      this.libraryEvidence = [];
+      this.clearLocalCalendar(); this.libraryEvidence = [];
       this.cloudFresh = false;
       this.requestObservation();
       this.cloudStatus = '电影/待看操作已结束；正在重新读取云端清单。';
@@ -3586,7 +3604,7 @@ struct Index {
   private invalidateNextShows(): void {
     this.projectionMemo.clear();
     this.nextShows = [];
-    this.libraryEvidence = [];
+    this.clearLocalCalendar(); this.libraryEvidence = [];
     this.projectionPending = true;
     this.resetCollection();
     this.nextPage = 1;
@@ -3604,7 +3622,7 @@ struct Index {
       const clientId = this.clientId;
       const signedIn = this.signedIn;
       const active = snapshot && signedIn && traktAuth.isCurrent(clientId, snapshot.generation) ? snapshot : undefined;
-      if (signedIn && !active) { this.nextShows = []; this.libraryEvidence = []; return; }
+      if (signedIn && !active) { this.nextShows = []; this.clearLocalCalendar(); this.libraryEvidence = []; return; }
       const result = await this.readLibraryProjection(store, active, uuid, clientId, false, false,
         (): boolean => this.signedIn === signedIn && this.activeCloud() === active && this.cloudUuid === uuid && this.clientId === clientId);
       if (this.activeCloud() !== active || this.cloudUuid !== uuid || (this.signedIn && !active)) { return; }
@@ -3612,6 +3630,7 @@ struct Index {
       this.reloadProgressFlags();
       this.cloudLocalAllowed = result.localAllowed && !!active;
       this.libraryEvidence = result.evidence;
+      this.publishLocalCalendar(result);
       this.resetCollection();
       await this.refreshEffectiveDetail();
       if (this.tab === 'library' && this.collectionGrid && !this.selectedMedia) { this.loadCollectionPosters(); }
@@ -3857,7 +3876,7 @@ struct Index {
     this.movieCalendarData = undefined;
     this.movieRatingKey = '';
     this.movieRatingRows = [];
-    this.calendarData = undefined;
+    this.clearLocalCalendar(true);
     this.calendarBusy = false;
     this.calendarPage = 1;
     this.calendarStatus = '';
@@ -3911,83 +3930,162 @@ struct Index {
     }
   }
 
-  private async loadCalendar(): Promise<void> {
-    if (this.calendarBusy || this.authBusy || this.setupBusy || this.syncBusy || !this.signedIn || !this.clientId) { return; }
-    const session = traktAuth.session(this.clientId);
-    if (!session) { this.calendarStatus = '登录会话尚不可用，请恢复 Trakt 登录后重试。'; return; }
-    const revision = ++this.calendarRevision;
-    const kind = this.mediaMode;
-    const week = this.calendarWeek;
-    this.calendarBusy = true;
-    this.calendarData = undefined;
-    this.calendarPage = 1;
-    this.calendarStatus = '正在更新日历…';
-    try {
-      if (kind === 'movie') {
-        const source = this.activeCloud();
-        if (source?.movieDetails) {
-          this.publishMovieSource(source);
-          this.calendarStatus = '使用已验证账户的个人电影资料，共 ' + (this.movieCalendarData?.movies.length ?? 0) + ' 部。';
-        } else {
-          this.calendarStatus = '等待个人库核对及电影资料读取。';
-          this.requestObservation();
-        }
-        return;
-      }
-      const result = await readCalendar(session, kind, week);
-      if (revision !== this.calendarRevision || this.mediaMode !== kind || this.calendarWeek !== week ||
-          !this.signedIn || !traktAuth.isCurrent(this.clientId, session.generation)) { return; }
-      this.calendarData = result;
-      this.calendarStatus = (result.entries.length ? '日历读取完成，共 ' + result.entries.length + ' 条。' : '此日期范围暂无返回的日历记录。') +
-        (result.skipped ? ' 跳过日期或标识不完整的 ' + result.skipped + ' 条。' : '');
-    } catch (error) {
-      if (revision === this.calendarRevision) {
-        this.calendarStatus = '日历读取失败：' + safeSyncError(error as Error) + '；未改动观看记录。';
-      }
-    } finally { if (revision === this.calendarRevision) { this.calendarBusy = false; } }
+  private calendarAccountKey(): string {
+    const scope=this.currentProgressScope();
+    return scope ? JSON.stringify([this.clientId,scope,this.activeCloud()?.generation ?? -1]) : '';
   }
-
-  private calendarRangeLabel(): string {
-    const range = calendarWindow(new Date(), this.calendarWeek);
-    return range.from + ' 至 ' + range.to;
+  private calendarScopeKey(): string {
+    const account=this.calendarAccountKey();
+    return account ? JSON.stringify([account,this.activeCloud()?.activity ?? '']) : '';
   }
-
+  private clearLocalCalendar(resetIndex: boolean = false): void {
+    this.calendarSourceScope='';
+    this.calendarSources=[];
+    this.calendarRepairTargets=[];
+    this.calendarSourceVersion++;
+    this.calendarMemo.clear();
+    this.calendarHydrationKey='';
+    this.calendarRows.replace([],[],[]);
+    this.calendarSummary={key:'',total:0,page:1,pages:1};
+    if (resetIndex) { this.calendarIndex.clear(); }
+  }
+  private publishLocalCalendar(result: LibraryProjection): void {
+    const scope=this.calendarScopeKey();
+    if (!scope) { this.clearLocalCalendar(true); return; }
+    this.calendarIndex.begin(this.calendarAccountKey());
+    if (this.calendarSourceScope!==scope || this.calendarSources!==result.calendar) {
+      this.calendarSourceScope=scope;
+      this.calendarSources=result.calendar;
+      this.calendarRepairTargets=result.repairTargets;
+      this.calendarSourceVersion++;
+      this.calendarMemo.clear();
+      this.requestPresentation();
+    }
+  }
   private calendarCurrent(): boolean {
-    if (this.mediaMode === 'movie') { return this.movieCalendarCurrent(); }
-    return !!this.calendarData && this.signedIn &&
-      traktAuth.isCurrent(this.clientId, this.calendarData.generation) &&
-      this.calendarData.window.from === calendarWindow(new Date(), this.calendarWeek).from &&
-      this.calendarData.window.startMs === calendarWindow(new Date(), this.calendarWeek).startMs;
+    if (this.mediaMode==='movie') { return this.movieCalendarCurrent(); }
+    return !!this.calendarSourceScope && this.calendarSourceScope===this.calendarScopeKey();
   }
-
-  private calendarSlice(): CalendarEntry[] {
+  private calendarKey(): string {
+    return JSON.stringify([this.calendarScopeKey(),this.calendarSourceVersion,this.libraryRevision,this.hiddenVersion('show'),
+      this.showCalendarMode,this.calendarPremieres,this.calendarQuery,this.presentationLanguage,this.metaVersion('show'),
+      this.calendarQuery ? this.titleVersion('show') : 0,this.calendarQuery ? this.episodeSearchRevision : 0,calendarClockKey(Date.now())]);
+  }
+  private calendarDisplayKey(): string { return JSON.stringify([this.calendarKey(),this.calendarPage,this.calendarProtect]); }
+  private calendarEntries(): CalendarEntry[] | undefined {
     if (!this.calendarCurrent()) { return []; }
-    return this.personalCalendarEntries().slice((this.calendarPage - 1) * this.collectionPageSize,
-      this.calendarPage * this.collectionPageSize);
+    return this.calendarViewRevision>=0 ? this.calendarMemo.get(this.calendarKey(),Date.now()) : undefined;
   }
-
-  private personalCalendarEntries(): CalendarEntry[] {
-    const members: Set<string> = new Set<string>(this.personalLibrary()
-      .filter((row: PersonalLibraryRow) => !this.isHidden(row.media) && (row.queued || hasTrackingEvidence(row)))
-      .map((row: PersonalLibraryRow) => row.media.id));
-    return (this.calendarData?.entries ?? []).filter((row: CalendarEntry) => members.has(row.media.id) && row.season > 0);
+  private calendarSlice(): CalendarEntry[] { return calendarPageRows(this.calendarEntries() ?? [],this.calendarPage,this.collectionPageSize); }
+  private calendarEpisodeTitle(row: CalendarEntry): string {
+    if (row.synthetic) { return '首播日期（待确认分集）'; }
+    return calendarTitleHidden(row,this.calendarProtect) ? '' : this.displayEpisode(row.media,row.season,row.episodeId,row.episodeTitle);
   }
-
-  private calendarPages(): number {
-    return Math.max(1, Math.ceil(this.personalCalendarEntries().length / this.collectionPageSize));
+  private prepareCalendar(): CalendarEntry[] | undefined {
+    const cached=this.calendarEntries();
+    if (cached!==undefined) { return cached; }
+    const key=this.calendarKey();
+    const token=this.sortJobs.begin('calendar',key);
+    if (token) { this.runCalendarProjection(key,token); }
+    return undefined;
   }
-
-  private changeCalendar(week: number): void {
-    const kind = this.mediaMode;
-    if (this.calendarBusy) { return; }
-    ++this.calendarRevision;
-    this.calendarData = undefined;
-    this.calendarPage = 1;
-    this.calendarStatus = '';
-    this.calendarWeek = week;
-    if (kind === 'movie' && this.movieCalendarCurrent()) {
-      this.calendarStatus = '已读取个人电影库，共 ' + (this.movieCalendarData?.movies.length ?? 0) + ' 部。';
-    } else { this.loadCalendar(); }
+  private async runCalendarProjection(key: string,token: number): Promise<void> {
+    const current=(): boolean=>this.sortJobs.current('calendar',token) && this.pageVisible && !this.selectedMedia &&
+      this.tab==='progress' && this.mediaMode==='show' && this.progressMode==='calendar' && this.calendarCurrent() && key===this.calendarKey();
+    const now=Date.now();
+    let retry=true;
+    try {
+      const inputs: CalendarInput[]=this.calendarSources.map((source: CalendarSource): CalendarInput=>({
+        source:source,release:source.queued ? this.titleIndex.get(source.media.id)?.collection?.release ?? '' : ''
+      }));
+      const plan=this.calendarIndex.plan(inputs);
+      const titles: CalendarText[]=[];
+      const episodes: CalendarText[]=[];
+      if (this.calendarQuery && this.presentationLanguage==='zh') {
+        for (const source of this.calendarSources) {
+          const title=this.titleIndex.get(source.media.id)?.text.title ?? '';
+          if (title) { titles.push({key:source.media.id,title:title}); }
+        }
+        for (const [id,title] of this.episodeNameIndex) { episodes.push({key:id,title:title}); }
+      }
+      const hidden=this.currentCollectionState().hidden.map((row: HiddenEntry)=>row.media.id);
+      const members=this.personalLibrary().filter((row: PersonalLibraryRow)=>row.media.kind==='show' &&
+        (row.queued || hasTrackingEvidence(row))).map((row: PersonalLibraryRow)=>row.media.id);
+      const input: CalendarJobInput={plan:plan,now:now,mode:this.showCalendarMode,premieres:this.calendarPremieres,query:this.calendarQuery,
+        hidden:hidden,members:members,titles:titles,episodes:episodes};
+      const output=await calendarDisplay(input);
+      if (!current() || Date.now()<now || Date.now()>=calendarExpiry(now)) { return; }
+      this.calendarIndex.commit(inputs,output.built);
+      this.calendarMemo.put(key,output.entries,now,calendarExpiry(now));
+      this.calendarStatus='本地日历 · 重建 '+output.built.length+' 部 · 复用 '+(inputs.length-output.built.length)+' 部 · 日历 API 0 次';
+      this.hydrateCalendarSearch();
+    } catch (error) { retry=false; if (current()) { this.calendarStatus='本地日历计算失败，请刷新。'; } }
+    finally { if (this.sortJobs.finish('calendar',token) && this.pageVisible) { this.calendarViewRevision++; if (retry) { this.requestPresentation(); } } }
+  }
+  private async hydrateCalendarSearch(): Promise<void> {
+    const repo=this.presentation;
+    if (!repo || !this.calendarQuery.trim() || this.presentationLanguage!=='zh' || !this.calendarCurrent()) { return; }
+    const key=JSON.stringify([this.calendarSourceScope,this.calendarSourceVersion]);
+    if (key===this.calendarHydrationKey) { return; }
+    this.calendarHydrationKey=key;
+    try {
+      for (const source of this.calendarSources) {
+        for (const season of source.full?.seasons ?? []) {
+          if (!this.pageVisible || this.tab!=='progress' || this.progressMode!=='calendar' || this.mediaMode!=='show' ||
+              !this.calendarQuery.trim() || key!==JSON.stringify([this.calendarSourceScope,this.calendarSourceVersion])) {
+            if (this.calendarHydrationKey===key) { this.calendarHydrationKey=''; }
+            return;
+          }
+          await repo.hydrateSeason(source.media,season.number);
+        }
+      }
+    } catch (error) { if (this.calendarHydrationKey===key) { this.calendarHydrationKey=''; } }
+    finally { this.publishPresentation(); }
+  }
+  private async loadCalendar(): Promise<void> {
+    if (this.calendarBusy || this.authBusy || this.setupBusy || this.syncBusy) { return; }
+    if (this.mediaMode==='show') {
+      this.calendarPage=1;
+      if (!this.calendarCurrent()) {
+        this.calendarStatus='正在读取共享个人库与播出目录…';
+        if (this.signedIn) { this.requestObservation(); } else { this.requestProjection(); }
+      } else if (this.signedIn) { this.requestObservation(); }
+      else if (this.calendarRepairTargets.length && this.clientId) { await this.repairDeviceCalendar(); }
+      else { this.requestProjection(); }
+      this.requestPresentation();
+      return;
+    }
+    if (!this.signedIn || !this.clientId) { return; }
+    const source=this.activeCloud();
+    if (source?.movieDetails) {
+      this.publishMovieSource(source);
+      this.calendarStatus='使用已验证账户的个人电影资料，共 '+(this.movieCalendarData?.movies.length ?? 0)+' 部。';
+    } else { this.calendarStatus='等待个人库核对及电影资料读取。'; this.requestObservation(); }
+  }
+  private async repairDeviceCalendar(): Promise<void> {
+    const store=this.episodeStore;
+    if (!store || this.signedIn || this.calendarBusy || this.localBusy || this.cloudBusy || this.saving || this.backupBusy) { return; }
+    const scope=this.calendarSourceScope, client=this.clientId, revision=++this.calendarRevision;
+    const targets=this.calendarRepairTargets;
+    this.calendarBusy=true; this.localBusy=true;
+    const current=(): boolean=>this.pageVisible && !this.signedIn && this.clientId===client && this.calendarRevision===revision &&
+      this.calendarSourceScope===scope && this.calendarScopeKey()===scope && this.tab==='progress' && this.mediaMode==='show' &&
+      this.progressMode==='calendar' && !this.selectedMedia && !this.backupBusy && !this.syncBusy && !this.authBusy && !this.setupBusy && !this.saving;
+    try {
+      for (const media of targets) {
+        if (!current()) { break; }
+        const before=store.readModelRevision();
+        const full=await fetchFullEpisodeCatalog(media,client);
+        if (!current() || store.readModelRevision()!==before) { break; }
+        await store.saveObservedSchedule(full);
+      }
+    } catch (error) { if (current()) { this.calendarStatus='目录补齐暂停；保留已有日历，下次刷新继续。'; } }
+    finally { this.localBusy=false; if (this.calendarRevision===revision) { this.calendarBusy=false; }
+      if (!this.signedIn && this.clientId===client) { this.requestProjection(); } }
+  }
+  private changeShowCalendar(mode: string): void {
+    if (mode!=='future' && mode!=='recent') { return; }
+    this.showCalendarMode=mode; this.calendarPage=1; this.requestPresentation();
   }
 
   private chooseProgressMode(mode: string): void {
@@ -3997,7 +4095,7 @@ struct Index {
       if (this.signedIn) { this.requestObservation(); } else { this.loadNextShows(); }
       if (this.mediaMode === 'movie' && !this.movieCalendarCurrent()) { this.loadCalendar(); }
     }
-    if (mode === 'calendar' && !this.calendarCurrent()) { this.loadCalendar(); }
+    if (mode === 'calendar') { if (!this.calendarCurrent()) { this.loadCalendar(); } else { this.requestPresentation(); } }
   }
 
   @Builder
@@ -4340,61 +4438,75 @@ struct Index {
 
   @Builder
   calendarView() {
-    List({ space: 10 }) {
+    List({space:10}) {
       ListItem() {
-        Column({ space: 10 }) {
+        Column({space:10}) {
           this.progressHeader()
           if (this.presentationStatus) { Text(this.presentationStatus).fontSize(12).width('100%') }
           Text('剧集播出日历').fontSize(21).fontWeight(FontWeight.Medium).width('100%')
-          Text('个人收藏中的剧集播出安排。').fontSize(12).width('100%')
-        Text(this.calendarRangeLabel()).fontSize(15).width('100%')
-        Row({ space: 4 }) {
-          Button('前七天').layoutWeight(1).fontSize(12).enabled(!this.calendarBusy && this.calendarWeek > -1)
-            .onClick(() => { this.changeCalendar(this.calendarWeek - 1); })
-          Button('今天起').layoutWeight(1).fontSize(12).enabled(!this.calendarBusy)
-            .onClick(() => { this.changeCalendar(0); })
-          Button('后七天').layoutWeight(1).fontSize(12).enabled(!this.calendarBusy && this.calendarWeek < 1)
-            .onClick(() => { this.changeCalendar(this.calendarWeek + 1); })
-        }.width('100%')
-        if (!this.signedIn) {
-          Text('登录 Trakt 后读取个人日历。').fontSize(13).width('100%')
-          Button('连接 Trakt').onClick(() => { this.navigate('account'); })
-        } else {
-          Button(this.calendarBusy ? '读取中…' : '刷新日历').enabled(!this.calendarBusy && !this.authBusy && !this.syncBusy && !this.setupBusy)
-            .onClick(() => { this.loadCalendar(); })
-          if (this.calendarStatus) { Text(this.calendarStatus).fontSize(13).width('100%') }
-          if (!this.calendarCurrent() && this.calendarData) {
-            Text('会话或当地日期已变化，请刷新日历。').fontSize(12).width('100%')
+          Row({space:8}) {
+            Button('未来播出').layoutWeight(1).fontSize(13)
+              .backgroundColor(this.showCalendarMode==='future' ? $r('app.color.showly_accent') : $r('app.color.showly_muted_surface'))
+              .fontColor(this.showCalendarMode==='future' ? $r('app.color.showly_on_accent') : $r('app.color.showly_text'))
+              .onClick(()=>{ this.changeShowCalendar('future'); })
+            Button('近期播出').layoutWeight(1).fontSize(13)
+              .backgroundColor(this.showCalendarMode==='recent' ? $r('app.color.showly_accent') : $r('app.color.showly_muted_surface'))
+              .fontColor(this.showCalendarMode==='recent' ? $r('app.color.showly_on_accent') : $r('app.color.showly_text'))
+              .onClick(()=>{ this.changeShowCalendar('recent'); })
+          }.width('100%')
+          Text(this.showCalendarMode==='recent' ? '最近3个自然月（不含今天）' : '从当地今天起的已知播出安排').fontSize(12).width('100%')
+          Row({space:8}) {
+            Button(this.calendarPremieres ? '仅首播：开' : '仅首播：关').layoutWeight(1).fontSize(12)
+              .onClick(()=>{ this.calendarPremieres=!this.calendarPremieres; this.calendarPage=1; })
+            Button(this.calendarProtect ? '剧透保护：开' : '剧透保护：关').layoutWeight(1).fontSize(12)
+              .onClick(()=>{ this.calendarProtect=!this.calendarProtect; })
+          }.width('100%')
+          TextInput({placeholder:'搜索剧集、分集或日期',text:this.calendarQuery})
+            .onChange((value: string)=>{ this.calendarQuery=value; this.calendarPage=1; })
+          Button(this.calendarBusy ? '补齐目录中…' : '刷新个人资料').enabled(!this.calendarBusy && !this.authBusy && !this.syncBusy && !this.setupBusy)
+            .onClick(()=>{ this.loadCalendar(); })
+          if (this.calendarStatus) { Text(this.calendarStatus).fontSize(12).width('100%') }
+          if (!this.calendarCurrent()) {
+            Text('等待当前账户或本机个人库核对；不显示其他账户日历。').fontSize(12).width('100%')
+          } else {
+            if (this.calendarRepairTargets.length) { Text('部分目录待补齐 '+this.calendarRepairTargets.length+' 部；以下为已知安排，不代表完整结果。').fontSize(12).width('100%') }
+            if (this.signedIn && !this.cloudFresh) { Text('使用已核对账户的上次缓存（非实时）。').fontSize(12).width('100%') }
+            if (this.calendarSummary.key===this.calendarDisplayKey()) {
+              Text('已知播出 '+this.calendarSummary.total+' 条').fontSize(13).width('100%')
+              if (!this.calendarSummary.total && !this.calendarRepairTargets.length) { Text('此范围暂无已知播出安排。').fontSize(13).width('100%') }
+            } else { Text('正在更新日历列表…').fontSize(13).width('100%') }
           }
-        }
         }.width('100%')
       }
-      if (this.signedIn && this.calendarCurrent()) {
-            LazyForEach(this.calendarRows, (row: CalendarEntry) => {
-              ListItem() {
-              Column({ space: 6 }) {
-                Text(row.day + (row.time ? ' · ' + row.time : ' · 上映日期')).fontSize(13)
-                  .fontColor($r('app.color.showly_secondary')).width('100%')
-                Row({ space: 8 }) {
-                  this.posterImage(row.media, 54, 81)
-                  Text(this.displayTitle(row.media)).fontSize(17).fontWeight(FontWeight.Medium).layoutWeight(1)
-                }.width('100%')
-                if (row.media.kind === 'show') {
-                  Text('S' + row.season + 'E' + row.number + (this.displayEpisode(row.media, row.season, Number(row.key.substring(8)), row.episodeTitle) ? ' · ' + this.displayEpisode(row.media, row.season, Number(row.key.substring(8)), row.episodeTitle) : ''))
-                    .fontSize(14).width('100%')
-                }
-                Button('查看详情').fontSize(12).enabled(!this.detailBusy && !this.localBusy && !this.syncBusy)
-                  .onClick(() => { this.openDetail(row.media, false, row.season); })
-              }.padding(12).width('100%').borderRadius(10).backgroundColor($r('app.color.showly_surface'))
-                .onVisibleAreaChange([0], (visible: boolean, ratio: number) => { this.viewportChanged(row.media,row.season,[],visible && ratio > 0,'progress','calendar',row.key); })
-              }
-            }, (row: CalendarEntry) => this.calendarRows.keyFor(row.key))
+      if (this.calendarCurrent()) {
+        LazyForEach(this.calendarRows,(row: CalendarEntry)=>{
+          ListItem() {
+            Column({space:6}) {
+              if (row.header) { Text(row.header).fontSize(18).fontWeight(FontWeight.Medium).width('100%') }
+              Text(row.day+' · '+row.time).fontSize(13).fontColor($r('app.color.showly_secondary')).width('100%')
+              Row({space:8}) {
+                this.posterImage(row.media,54,81)
+                Column({space:4}) {
+                  Text(this.displayTitle(row.media)).fontSize(17).fontWeight(FontWeight.Medium).width('100%')
+                  Text('S'+row.season+'E'+row.number+(this.calendarEpisodeTitle(row) ? ' · '+this.calendarEpisodeTitle(row) : '')).fontSize(14).width('100%')
+                  Text(row.synthetic ? '仅展示首播日期' : row.state==='watched' ? '已看' : row.state==='unknown' ? '观看状态未知' : '未看').fontSize(12).width('100%')
+                  if (row.queued) { Text('待看列表').fontSize(12).width('100%') }
+                }.layoutWeight(1)
+              }.width('100%')
+              Button('查看详情').fontSize(12).enabled(!this.detailBusy && !this.localBusy && !this.syncBusy)
+                .onClick(()=>{ this.openDetail(row.media,false,row.synthetic ? 0 : row.season); })
+            }.padding(12).width('100%').borderRadius(10).backgroundColor($r('app.color.showly_surface'))
+              .onVisibleAreaChange([0],(visible: boolean,ratio: number)=>{ this.viewportChanged(row.media,row.synthetic ? 0 : row.season,[],visible && ratio>0,'progress','calendar',row.key); })
+          }
+        },(row: CalendarEntry)=>this.calendarRows.keyFor(row.key))
         ListItem() {
-            Row({ space: 8 }) {
-              Button('上一页').layoutWeight(1).enabled(this.calendarPage > 1).onClick(() => { this.calendarPage--; })
-              Text(this.calendarPage + ' / ' + this.calendarPages()).fontSize(13)
-              Button('下一页').layoutWeight(1).enabled(this.calendarPage < this.calendarPages()).onClick(() => { this.calendarPage++; })
-            }.width('100%')
+          Row({space:8}) {
+            Button('上一页').layoutWeight(1).enabled(this.calendarSummary.key===this.calendarDisplayKey() && this.calendarSummary.page>1)
+              .onClick(()=>{ this.calendarPage=this.calendarSummary.page-1; })
+            Text(this.calendarSummary.page+' / '+this.calendarSummary.pages).fontSize(13)
+            Button('下一页').layoutWeight(1).enabled(this.calendarSummary.key===this.calendarDisplayKey() && this.calendarSummary.page<this.calendarSummary.pages)
+              .onClick(()=>{ this.calendarPage=this.calendarSummary.page+1; })
+          }.width('100%')
         }
       }
     }.width('100%').height('100%').padding(16)
@@ -5390,11 +5502,11 @@ struct Index {
       this.collectionStatusFilter = 'all';
       this.nextPage = 1;
       this.movieProgressPage = 1;
-      this.calendarWeek = 0;
+      this.showCalendarMode = 'future';
+      this.calendarQuery = '';
       this.resetDiscover();
       // Calendar range changes do not discard account movie metadata.
       ++this.calendarRevision;
-      this.calendarData = undefined;
       this.calendarBusy = false;
       this.calendarPage = 1;
       this.calendarStatus = '';
