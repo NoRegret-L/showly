@@ -222,3 +222,6 @@ See [Presentation scheduling](docs/PRESENTATION_SCHEDULING.md).
 
 ## v0.9.3e.2d.9 — local-first search (0.9.3.26, build 50)
 See [Search read model](docs/SEARCH_LOCAL.md).
+
+### Build 51 (0.9.3.27) — v0.9.3e.2d.9 search performance follow-up
+CI #67 published Build 50 from 85dec58 before #68 completed. CI #68 passed all models and native HAP but correctly refused to overwrite that release. Build 51 retains 959b7bd's immutable search candidate reuse, stable cold/warm order and async response regression, with a new version identity. Existing tags/releases remain unchanged.
