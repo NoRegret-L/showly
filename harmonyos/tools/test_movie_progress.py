@@ -75,8 +75,8 @@ compute=movie_rows.index("const rows = projectMovieProgress(sources, flags, this
 cache=movie_rows.index("memo.put(key, rows, now, Date.parse(utc + 'T00:00:00Z') + 86400000);")
 result=movie_rows.index("return rows;")
 assert guard < hit < hit_return < compute < cache < result
-assert "this.currentProgressScope()" in movie_rows and "this.activeCloud()?.generation" in movie_rows
-assert "this.listRevision" in movie_rows and "this.libraryRevision" in movie_rows
+assert "this.movieSortKey(query,utc)" in movie_rows and "this.currentProgressScope(),this.activeCloud()?.generation" in page
+assert "this.movieSortKey(query,utc)" in movie_rows and "this.displayRevisions.movie,this.libraryRevision" in page
 assert "this.markMovieProgress(row.media)" in source
 assert "await this.changeMediaIntent(row.media, 'movie', 'yes')" in source
 assert "await this.clearWatchedMoviePin(item, pinScope)" in source

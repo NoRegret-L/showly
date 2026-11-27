@@ -1,4 +1,4 @@
-# Showly HarmonyOS Preview v0.9.3e.2d.4
+# Showly HarmonyOS Preview v0.9.3e.2d.5
 
 Unofficial native ArkTS prototype, not a complete Showly port. Your app uses Trakt but is not endorsed or certified by Trakt.
 
@@ -207,3 +207,6 @@ See [rendering performance](docs/RENDERING_PERFORMANCE.md).
 
 ## v0.9.3e.2d.4 — indexed derived reads (0.9.3.21, build 45)
 See [Indexed projection](docs/INDEXED_PROJECTION.md). Derived-only, no authoritative migration or new dependency.
+
+## v0.9.3e.2d.5 — display isolation and async list deltas (0.9.3.22, build 46)
+See [Display isolation](docs/DISPLAY_ISOLATION.md).

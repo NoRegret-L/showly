@@ -6,7 +6,7 @@ with tempfile.TemporaryDirectory() as tmp:
     work=Path(tmp)
     for path in (root/"model").glob("*.ets"):
         shutil.copyfile(path,work/(path.stem+".ts"))
-    (work/"arkui.d.ts").write_text("interface IDataSource { totalCount(): number; getData(index: number): unknown; registerDataChangeListener(l: DataChangeListener): void; unregisterDataChangeListener(l: DataChangeListener): void; } interface DataChangeListener { onDataReloaded(): void; onDataChange(index: number): void; onDataAdd(index: number): void; onDataDelete(index: number): void; }")
+    (work/"arkui.d.ts").write_text("interface IDataSource { totalCount(): number; getData(index: number): unknown; registerDataChangeListener(l: DataChangeListener): void; unregisterDataChangeListener(l: DataChangeListener): void; } interface DataChangeListener { onDataReloaded(): void; onDataChange(index: number): void; onDataAdd(index: number): void; onDataDelete(index:number):void; onDataMove(from:number,to:number):void; }")
     subprocess.run(["tsc","--strict","--target","ES2020","--module","commonjs","ProjectionCompute.ts","LazyRows.ts","arkui.d.ts"],cwd=work,check=True)
     (work/"test.cjs").write_text("""
 const assert=require('node:assert/strict');
@@ -56,13 +56,13 @@ if(process.argv[2]==='write'){
  for(const other of [p.persistentProjectionScope('client','account-B',true,true),p.persistentProjectionScope('other','account-A',true,true),p.persistentProjectionScope('client','account-A',true,false),p.persistentProjectionScope('client','',false,true)]) assert.equal(p.decodePersistedProjection(raw,other).size,0);
  assert.equal(p.decodePersistedProjection('{broken',scope).size,0);
  assert.equal(p.decodePersistedProjection(JSON.stringify({...JSON.parse(raw),schema:2}),scope).size,0);
- const rows=new LazyRows(), events=[], listener={onDataReloaded:()=>events.push('reload'),onDataChange:i=>events.push(i),onDataAdd:i=>events.push('add:'+i),onDataDelete:i=>events.push('delete:'+i)};
+ const rows=new LazyRows(), events=[], listener={onDataReloaded:()=>events.push('reload'),onDataChange:i=>events.push(i),onDataAdd:i=>events.push('add:'+i),onDataDelete:i=>events.push('delete:'+i),onDataMove:(a,b)=>events.push('move:'+a+':'+b)};
  rows.registerDataChangeListener(listener);rows.registerDataChangeListener(listener);
  rows.replace(['a','b'],['1','2'],['a','b']);assert.deepEqual(events,['reload']);
  rows.replace(['a','b'],['1','2'],['a','b']);assert.deepEqual(events,['reload']);
  rows.replace(['a','c'],['1','2'],['a','c']);assert.deepEqual(events,['reload',1]);assert.equal(rows.getData(1),'c');
- rows.replace(['c','a'],['2','1'],['c','a']);assert.deepEqual(events,['reload',1,'reload']);
- rows.unregisterDataChangeListener(listener);rows.replace([],[],[]);assert.equal(rows.totalCount(),0);assert.deepEqual(events,['reload',1,'reload']);
+ rows.replace(['c','a'],['2','1'],['c','a']);assert.deepEqual(events,['reload',1,'move:1:0']);
+ rows.unregisterDataChangeListener(listener);rows.replace([],[],[]);assert.equal(rows.totalCount(),0);assert.deepEqual(events,['reload',1,'move:1:0']);
  console.log('Process 2: 393 disk hits, 0 recomputations; 1 changed input recomputed; invalid cache, scopes, checkpoint safety and lazy row notifications passed');
 }
 """,encoding="utf-8")

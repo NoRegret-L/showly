@@ -7,7 +7,7 @@ with tempfile.TemporaryDirectory() as tmp:
     for path in (root/"model").glob("*.ets"):
         shutil.copyfile(path,work/(path.stem+".ts"))
     (work/"reference.ts").write_text("import { ProgressEpisode, ProgressSource, ProgressPreferences, ProgressFlag, ProgressRow } from './ProgressRules';\nconst DAY=86400000; const NEW_DURATION=3*DAY;\nfunction position(a: ProgressEpisode, b: ProgressEpisode): number {\n  return a.episode.season - b.episode.season || a.episode.number - b.episode.number;\n}\nexport function referenceSelect(source: ProgressSource, prefs: ProgressPreferences, flags: ProgressFlag[],\n  now: number): ProgressRow | undefined {\n  const ordered = source.episodes.filter((item: ProgressEpisode) => item.episode.season > 0).sort(position);\n  const watched = ordered.filter((item: ProgressEpisode) => item.watched);\n  const dated = watched.filter((item: ProgressEpisode) => item.watchedAt > 0)\n    .sort((a: ProgressEpisode, b: ProgressEpisode) => b.watchedAt - a.watchedAt || position(a,b));\n  const last = prefs.strategy === 'last' ? dated[0] : undefined;\n  const limit = now + prefs.days * DAY;\n  const next = ordered.find((item: ProgressEpisode) => !item.watched && !!item.episode.firstAired &&\n    Number.isFinite(Date.parse(item.episode.firstAired)) && Date.parse(item.episode.firstAired) <= limit &&\n    (!last || position(item, last) > 0));\n  if (!next) { return undefined; }\n  const aired = Date.parse(next.episode.firstAired);\n  const upcoming = aired > now;\n  if (upcoming && !prefs.days) { return undefined; }\n  // Upstream SQL counts first_aired < now, while the candidate limit is <=.\n  const counted = prefs.count === 'all' ? ordered : ordered.filter((item: ProgressEpisode) =>\n    !!item.episode.firstAired && Date.parse(item.episode.firstAired) < now);\n  const flag = flags.find((item: ProgressFlag) => item.id === source.media.id);\n  const pinned = flag?.pinned ?? false;\n  const held = flag?.held ?? false;\n  const fresh = aired < now && now - aired < NEW_DURATION;\n  const group = pinned ? 'pinned' : held ? 'hold' : prefs.newAtTop && fresh ? 'new' : upcoming ? 'upcoming' : 'aired';\n  return { media: source.media, episode: next.episode, total: counted.length,\n    completed: counted.filter((item: ProgressEpisode) => item.watched).length, upcoming: upcoming,\n    fresh: fresh, pinned: pinned, held: held, group: group, recentAt: source.recentAt, rating: source.rating,\n    randomOrder: source.randomOrder, dateUnknown: prefs.strategy === 'last' && watched.length > dated.length,\n    localizedTitle: source.localizedTitle, localizedEpisode: source.episodeNames?.get(next.episode.id) };\n}\n",encoding="utf-8")
-    (work/"arkui.d.ts").write_text("interface IDataSource { totalCount(): number; getData(index:number): unknown; registerDataChangeListener(l:DataChangeListener): void; unregisterDataChangeListener(l:DataChangeListener): void; } interface DataChangeListener { onDataReloaded():void; onDataChange(i:number):void; onDataAdd(i:number):void; onDataDelete(i:number):void; }")
+    (work/"arkui.d.ts").write_text("interface IDataSource { totalCount(): number; getData(index:number): unknown; registerDataChangeListener(l:DataChangeListener): void; unregisterDataChangeListener(l:DataChangeListener): void; } interface DataChangeListener { onDataReloaded():void; onDataChange(i:number):void; onDataAdd(i:number):void; onDataDelete(i:number):void; onDataMove(from:number,to:number):void; }")
     subprocess.run(["tsc","--strict","--target","ES2020","--module","commonjs","arkui.d.ts","reference.ts","ProgressRules.ts","ViewportTasks.ts","LazyRows.ts","ReadModelCache.ts"],cwd=work,check=True)
     (work/"test.cjs").write_text("""
 const assert=require('node:assert/strict');
@@ -61,14 +61,14 @@ assert.deepEqual(tasks.values().next().value.posterUrls,['hint']);
 vp.update(media,1,[],false,'episode2');assert.equal(vp.has(media,1),false);
 vp.update(other,1,[],true);vp.clear();assert.equal(vp.has(other,1),false);
 const data=new LazyRows(), events=[];
-data.registerDataChangeListener({onDataReloaded:()=>events.push('reload'),onDataChange:i=>events.push('change:'+i),onDataAdd:i=>events.push('add:'+i),onDataDelete:i=>events.push('delete:'+i)});
+data.registerDataChangeListener({onDataReloaded:()=>events.push('reload'),onDataChange:i=>events.push('change:'+i),onDataAdd:i=>events.push('add:'+i),onDataDelete:i=>events.push('delete:'+i),onDataMove:(a,b)=>events.push('move:'+a+':'+b)});
 data.replace(['a','b'],['a','b'],['1','1']);
 data.replace(['a','b'],['a','b'],['1','1']);
 data.replace(['a','B'],['a','b'],['1','2']);
 data.replace(['a','x','B'],['a','x','b'],['1','1','2']);
 data.replace(['x','B'],['x','b'],['1','2']);
 data.replace(['B','x'],['b','x'],['2','1']);
-assert.deepEqual(events,['reload','change:1','add:1','delete:0','reload']);
+assert.deepEqual(events,['reload','change:1','add:1','delete:0','move:1:0']);
 assert.equal(data.getData(0),'B');
 console.log('Rendering model: '+comparisons+' old/new candidate comparisons; 393 display-only memo reads -> 0 additional selections; visible dedup, account/clock invalidation and list delta passed');
 """,encoding="utf-8")
