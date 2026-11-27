@@ -1,3 +1,4 @@
+import { CommitFence } from '../model/CommitFence';
 import { SeasonSlice } from '../model/DetailSession';
 import { ReadCancel, ConsumerReadFlight } from '../model/ReadFlight';
 import { relationalStore } from '@kit.ArkData';
@@ -221,8 +222,20 @@ export function materializeEffective(catalog: EpisodeCatalog, ids: number[]): Lo
 
 export class EpisodeStore {
   private db: relationalStore.RdbStore;
-  private projectionRevision: number = 0;
-  readModelRevision(): number { return this.projectionRevision; }
+  private projectionFence: CommitFence=new CommitFence();
+  readModelRevision(): number { return this.projectionFence.revision(); }
+  committedProjectionKey(): string { return this.projectionFence.cacheVersion(); }
+  projectionChangedIds(): string[] { return this.projectionFence.changedIds(); }
+  projectionGlobalChanged(): boolean { return this.projectionFence.globalChanged(); }
+  clearProjectionChanges(revision: number): void { if (this.projectionReadable(revision)) { this.projectionFence.clearChanges(); } }
+  projectionReadable(revision: number): boolean { return this.projectionFence.readable(revision); }
+  assertProjectionReadable(): number { return this.projectionFence.assertReadable(); }
+  private async projectionWrite<T>(ids: string[], atomic: boolean, work: ()=>Promise<T>): Promise<T> {
+    const token=this.projectionFence.begin();
+    let success=false;
+    try { const value=await work(); success=true; return value; }
+    finally { this.projectionFence.finish(token,success,ids,!success && !atomic); }
+  }
   private readQueries: number = 0;
   private projectionSchedules: ScheduleReadCache = new ScheduleReadCache();
   projectionScheduleParseCount(): number { return this.projectionSchedules.parseCount(); }
@@ -295,7 +308,9 @@ export class EpisodeStore {
   }
 
   async saveCommonStates(uuid: string, domain: string, activity: string, updates: CommonUpdate[]): Promise<number> {
-    this.projectionRevision++;
+    return this.projectionWrite<number>([],false,()=>this.saveCommonStatesBody(uuid,domain,activity,updates));
+  }
+  private async saveCommonStatesBody(uuid: string, domain: string, activity: string, updates: CommonUpdate[]): Promise<number> {
     if (typeof activity !== 'string' || !activity) { throw new Error('Missing baseline revision'); }
     const entries = await this.commonStates(uuid, domain);
     const seen: Set<string> = new Set<string>();
@@ -311,14 +326,15 @@ export class EpisodeStore {
     const payload = JSON.stringify(Array.from(entries.values()));
     await this.db.executeSql('INSERT OR REPLACE INTO sync_common_state(account_uuid,domain,payload) VALUES(?,?,?)',
       [uuid, domain, payload]);
-    this.projectionRevision++;
     const verified = await this.commonStates(uuid, domain);
     if (JSON.stringify(Array.from(verified.values())) !== payload) { throw new Error('Baseline verification failed'); }
     return updates.length;
   }
 
   async adoptRemote(uuid: string, episodeId: number, expectedSeq: number, value: boolean, activity: string): Promise<void> {
-    this.projectionRevision++;
+    return this.projectionWrite<void>([],true,()=>this.adoptRemoteBody(uuid,episodeId,expectedSeq,value,activity));
+  }
+  private async adoptRemoteBody(uuid: string, episodeId: number, expectedSeq: number, value: boolean, activity: string): Promise<void> {
     if (await this.boundAccount() !== uuid) { throw new Error('Account mismatch'); }
     const intent = (await this.journalIntents()).find((row: JournalIntent) => row.episodeId === episodeId);
     if (!intent || !intent.catalogKnown || intent.seq !== expectedSeq || intent.watched === value) {
@@ -327,8 +343,8 @@ export class EpisodeStore {
     this.db.beginTransaction();
     try {
       // No autoUuid: accepting a cloud state never authorizes a new upload.
-      await this.mark(intent.showId, [episodeId], value);
-      await this.saveCommonStates(uuid, 'episode', activity, [{ id: episodeId.toString(), value: value }]);
+      await this.markBody(intent.showId, [episodeId], value);
+      await this.saveCommonStatesBody(uuid, 'episode', activity, [{ id: episodeId.toString(), value: value }]);
       this.db.commit();
     } catch (error) {
       this.db.rollBack();
@@ -420,7 +436,7 @@ export class EpisodeStore {
   // Read-only batch for a projection already protected by the page's
   // cloudBusy/localBusy gate. Do not use it to authorize a write.
   async projectionLocalInputs(bound: string): Promise<ProjectionLocalInputs> {
-    const revision = this.projectionRevision;
+    const revision = this.assertProjectionReadable();
     if (await this.boundAccount() !== bound) { throw new Error('Account binding changed'); }
     const catalogs = new Map<string, EpisodeCatalog>();
     const restored = new Map<string, number[]>();
@@ -479,7 +495,7 @@ export class EpisodeStore {
         ({ id: ep.id, season: ep.season }));
       states.push({ catalog: catalog, watchedIds: replayWatchedIds(identities,baseline,restored.get(id) ?? [],events.get(id) ?? []) });
     });
-    if (await this.boundAccount() !== bound || this.projectionRevision !== revision) {
+    if (await this.boundAccount() !== bound || !this.projectionReadable(revision)) {
       throw new Error('Local read inputs changed');
     }
     return { states: states, intents: Array.from(latest.values()) };
@@ -498,7 +514,9 @@ export class EpisodeStore {
   // Public schedule only: no eligible-catalog replacement, restore verification,
   // journal event, account binding, receipt or upload consent.
   async saveObservedSchedule(full: FullEpisodeCatalog): Promise<void> {
-    this.projectionRevision++;
+    return this.projectionWrite<void>([full.media.id],false,()=>this.saveObservedScheduleBody(full));
+  }
+  private async saveObservedScheduleBody(full: FullEpisodeCatalog): Promise<void> {
     validateFullCatalog(full, full.media.id);
     const old = await this.fullCatalog(full.media.id);
     if (old && scheduleEpisodes(old).length > 0 && scheduleEpisodes(full).length === 0) {
@@ -506,7 +524,6 @@ export class EpisodeStore {
     }
     await this.db.executeSql('INSERT OR REPLACE INTO episode_schedule(show_id,payload) VALUES(?,?)',
       [full.media.id, JSON.stringify(full)]);
-    this.projectionRevision++;
   }
 
   async readRemoteObservation(uuid: string): Promise<RemoteLibraryObservation | undefined> {
@@ -549,7 +566,10 @@ export class EpisodeStore {
   // Read projection acknowledgements are NOT sync_common_state and are
   // never consumed by upload, removal, or queue eligibility.
   async saveReadCheckpoints(uuid: string, updates: ReadCheckpoint[]): Promise<void> {
-    this.projectionRevision++;
+    if (!updates.length) { return; }
+    return this.projectionWrite<void>([],false,()=>this.saveReadCheckpointsBody(uuid,updates));
+  }
+  private async saveReadCheckpointsBody(uuid: string, updates: ReadCheckpoint[]): Promise<void> {
     if (!updates.length) { return; }
     const entries = await this.readCheckpoints(uuid);
     for (const update of updates) {
@@ -561,30 +581,31 @@ export class EpisodeStore {
     }
     await this.db.executeSql('INSERT OR REPLACE INTO episode_read_checkpoint(account_uuid,payload) VALUES(?,?)',
       [uuid, JSON.stringify(Array.from(entries.values()))]);
-    this.projectionRevision++;
   }
 
   async saveFullCatalog(full: FullEpisodeCatalog): Promise<void> {
-    this.projectionRevision++;
+    return this.projectionWrite<void>([full.media.id],true,()=>this.saveFullCatalogBody(full));
+  }
+  private async saveFullCatalogBody(full: FullEpisodeCatalog): Promise<void> {
     const catalog = eligibleCatalog(full, full.fetchedAt);
     // Both projections commit together. Keep every journal, receipt and
     // baseline untouched; never make a future/unknown episode eligible.
     this.db.beginTransaction();
     try {
-      await this.saveCatalog(catalog);
+      await this.saveCatalogBody(catalog);
       await this.db.executeSql('INSERT OR REPLACE INTO episode_schedule(show_id,payload) VALUES(?,?)',
         [catalog.showId, JSON.stringify(full)]);
       this.db.commit();
     } catch (error) {
       this.db.rollBack();
       throw new Error('Catalog refresh failed; previous data retained');
-    } finally {
-      this.projectionRevision++;
     }
   }
 
   async saveCatalog(catalog: EpisodeCatalog): Promise<void> {
-    this.projectionRevision++;
+    return this.projectionWrite<void>([catalog.showId],false,()=>this.saveCatalogBody(catalog));
+  }
+  private async saveCatalogBody(catalog: EpisodeCatalog): Promise<void> {
     validateCatalog(catalog, catalog.showId);
     // Refuse an unexpectedly empty refresh of an existing nonempty catalog.
     const old = await this.catalog(catalog.showId);
@@ -621,7 +642,9 @@ export class EpisodeStore {
   }
 
   async mark(showId: string, ids: number[], watched: boolean, autoUuid: string = ''): Promise<void> {
-    this.projectionRevision++;
+    return this.projectionWrite<void>([showId],false,()=>this.markBody(showId,ids,watched,autoUuid));
+  }
+  private async markBody(showId: string, ids: number[], watched: boolean, autoUuid: string = ''): Promise<void> {
     const catalog = await this.catalog(showId);
     if (!catalog || ids.length === 0) { throw new Error('Missing episode catalog'); }
     if (await this.needsCatalogVerification(showId)) { throw new Error('Restored catalog must be refreshed'); }
@@ -632,7 +655,6 @@ export class EpisodeStore {
     const authorized = watched && consent?.uuid === autoUuid && await this.boundAccount() === autoUuid ? autoUuid : '';
     await this.db.executeSql('INSERT INTO episode_event(show_id,episode_ids,watched,changed_at,auto_uuid) VALUES(?,?,?,?,?)',
       [showId, JSON.stringify(Array.from(unique)), watched ? 1 : 0, Date.now(), authorized]);
-    this.projectionRevision++;
   }
 
   async boundAccount(): Promise<string> {
@@ -647,7 +669,9 @@ export class EpisodeStore {
 
   // One explicit, durable binding; never silently replace an existing account.
   async bindAccount(uuid: string): Promise<void> {
-    this.projectionRevision++;
+    return this.projectionWrite<void>([],false,()=>this.bindAccountBody(uuid));
+  }
+  private async bindAccountBody(uuid: string): Promise<void> {
     if (!uuid || uuid.trim() !== uuid) { throw new Error('Invalid account'); }
     await this.db.executeSql('INSERT OR IGNORE INTO sync_binding(slot,account_uuid) VALUES(1,?)', [uuid]);
     if (await this.boundAccount() !== uuid) { throw new Error('Account binding mismatch'); }
@@ -787,7 +811,9 @@ export class EpisodeStore {
 
   // Add-only baseline. Never append cloud data to explicit local intent events.
   async importCloudBaseline(uuid: string, ids: number[]): Promise<number> {
-    this.projectionRevision++;
+    return this.projectionWrite<number>([],false,()=>this.importCloudBaselineBody(uuid,ids));
+  }
+  private async importCloudBaselineBody(uuid: string, ids: number[]): Promise<number> {
     if (await this.boundAccount() !== uuid || ids.some((id: number) => !validId(id))) {
       throw new Error('Invalid baseline identity');
     }
@@ -915,9 +941,13 @@ export class EpisodeStore {
   }
 
   async restoreMissingShows(states: EpisodeBackupState[]): Promise<number> {
-    this.projectionRevision++;
+    const changed: string[]=[];
+    return this.projectionWrite<number>(changed,true,()=>this.restoreMissingShowsBody(states,changed));
+  }
+  private async restoreMissingShowsBody(states: EpisodeBackupState[],changed: string[]): Promise<number> {
     const missing = await this.missingBackupShows(states);
     if (!missing.length) { return 0; }
+    for (const state of missing) { changed.push(state.catalog.showId); }
     // All episode additions are one transaction; no events, guards, receipts,
     // account IDs or auto-consent are restored from an external file.
     this.db.beginTransaction();

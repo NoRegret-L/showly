@@ -1,3 +1,4 @@
+import { MediaInputVersion } from '../model/MediaInputVersion';
 import { DetailSession, SeasonSummary, summarizeSeasons } from '../model/DetailSession';
 import { DetailEpisodeList, EpisodeDisplayRow } from './DetailEpisodeList';
 import { ListDiffInput } from '../model/ListDiff';
@@ -14,7 +15,7 @@ import { CollectionCandidate, CollectionOptions, CollectionState, HiddenEntry, d
 import { PresentationAttempts, PresentationFailure, runPresentationPass } from '../model/PresentationPolicy';
 import { presentationGate } from '../data/PresentationHttp';
 import { PresentationRepository } from '../data/PresentationRepository';
-import { TitlePresentation, PresentationTask, matchesText } from '../model/MediaPresentation';
+import { TitlePresentation, SeasonPresentation, PresentationTask, matchesText } from '../model/MediaPresentation';
 import { Media, CollectionDate, mediaLabel, setWatched } from '../model/Media';
 import { LibraryStore } from '../data/LibraryStore';
 import { MediaStore } from '../data/MediaStore';
@@ -114,6 +115,7 @@ struct Index {
   private titleIndex: Map<string, TitlePresentation> = new Map<string, TitlePresentation>();
   private episodeNameIndex: Map<string, string> = new Map<string, string>();
   private libraryRevision: number = 0;
+  private mediaInput: MediaInputVersion=new MediaInputVersion();
   private displayRevisions: DisplayRevisions = new DisplayRevisions();
   private sortJobs: LatestDisplayJobs = new LatestDisplayJobs();
   @State sortedViewRevision: number = 0;
@@ -168,10 +170,10 @@ struct Index {
   private showRatingVersion: number = 0;
   private viewport: ViewportTasks = new ViewportTasks();
   private viewportRouteKey: string = '';
-  private discoverRows: LazyRows<DiscoverItem[]> = new LazyRows<DiscoverItem[]>();
-  private searchRows: LazyRows<Media> = new LazyRows<Media>();
-  private calendarRows: LazyRows<CalendarEntry> = new LazyRows<CalendarEntry>();
-  private movieCalendarRows: LazyRows<MovieCalendarItem> = new LazyRows<MovieCalendarItem>();
+  private discoverRows: LazyRows<DiscoverItem[]> = new LazyRows<DiscoverItem[]>((row: DiscoverItem[])=>row.map((item: DiscoverItem)=>item.media.id));
+  private searchRows: LazyRows<Media> = new LazyRows<Media>((row: Media)=>[row.id]);
+  private calendarRows: LazyRows<CalendarEntry> = new LazyRows<CalendarEntry>((row: CalendarEntry)=>[row.media.id]);
+  private movieCalendarRows: LazyRows<MovieCalendarItem> = new LazyRows<MovieCalendarItem>((row: MovieCalendarItem)=>[row.movie.media.id]);
   private libraryMemo: RevisionMemo<PersonalLibraryRow[]> = new RevisionMemo<PersonalLibraryRow[]>();
   private progressMemo: RevisionMemo<ProgressRow[]> = new RevisionMemo<ProgressRow[]>();
   private progressAllMemo: RevisionMemo<ProgressRow[]> = new RevisionMemo<ProgressRow[]>();
@@ -357,9 +359,9 @@ struct Index {
   private repairEpoch: number = 0;
   @State repairStatus: string = '';
   private lazyPending: boolean = false;
-  private showRows: LazyRows<ProgressEntry> = new LazyRows<ProgressEntry>();
-  private movieRowsSource: LazyRows<PersonalLibraryRow> = new LazyRows<PersonalLibraryRow>();
-  private collectionRowsSource: LazyRows<CollectionGroup> = new LazyRows<CollectionGroup>();
+  private showRows: LazyRows<ProgressEntry> = new LazyRows<ProgressEntry>((entry: ProgressEntry)=>entry.row?[entry.row.media.id]:[]);
+  private movieRowsSource: LazyRows<PersonalLibraryRow> = new LazyRows<PersonalLibraryRow>((row: PersonalLibraryRow)=>[row.media.id]);
+  private collectionRowsSource: LazyRows<CollectionGroup> = new LazyRows<CollectionGroup>((group: CollectionGroup)=>group.rows.map((row: PersonalLibraryRow)=>row.media.id));
   @State @Watch('onCollectionStateChanged') collectionState: CollectionState = emptyCollectionState();
   @State collectionScope: string = '';
   @State @Watch('onCollectionViewChanged') collectionOptions: CollectionOptions = defaultCollection();
@@ -854,12 +856,12 @@ struct Index {
       const legacy = new LibraryStore(context).load();
       // Read-only legacy projection while the new database opens.
       this.items = legacy;
-      this.mediaRecords = migrateLegacy(legacy);
+      this.publishMediaRecords(migrateLegacy(legacy));
       const store = await MediaStore.open(context, legacy);
       const records = await store.load();
       this.mediaStore = store;
       this.invalidateMovieCalendar();
-      this.mediaRecords = records;
+      this.publishMediaRecords(records);
       this.items = records.map((record: MediaRecord) => record.media);
       this.resetCollection();
       this.migrationStatus = '收藏数据库已就绪 · ' + records.length + ' 部；旧版 Preferences 保留。';
@@ -897,10 +899,10 @@ struct Index {
     this.localBusy = true;
     this.localStatus = '正在读取分集…';
     try {
-      const readRevision=store.readModelRevision();
+      const readRevision=store.assertProjectionReadable();
       let full = this.detailSession.read(scope,item.id,readRevision);
       if (!full) { full=await store.fullCatalog(item.id); }
-      if (!current() || readRevision!==store.readModelRevision()) { return; }
+      if (!current() || !store.projectionReadable(readRevision)) { return; }
       if (full) { this.detailSession.remember(token,scope,item.id,readRevision,full); }
       this.fullSchedule = full;
       this.schedulePage = 1;
@@ -957,8 +959,8 @@ struct Index {
       return;
     }
     this.effectiveEditable=false;
-    const readRevision=store.readModelRevision();
-    const current=(): boolean=>this.pageVisible && revision===this.detailRevision && this.detailSession.current(token,scope,item.id) && scope===this.currentSearchAccount() && snapshot===this.activeCloud() && uuid===this.cloudUuid && readRevision===store.readModelRevision();
+    const readRevision=store.assertProjectionReadable();
+    const current=(): boolean=>this.pageVisible && revision===this.detailRevision && this.detailSession.current(token,scope,item.id) && scope===this.currentSearchAccount() && snapshot===this.activeCloud() && uuid===this.cloudUuid && store.projectionReadable(readRevision);
     let full=this.detailSession.read(scope,item.id,readRevision);
     if (!full) { full=await store.fullCatalog(item.id); }
     if (!current()) { return; }
@@ -1015,7 +1017,7 @@ struct Index {
       const editUuid=this.cloudUuid;
       const editRevision=store.readModelRevision();
       const evidence=await projectDetail(store,await store.fullCatalog(item.id),item.id,editSnapshot,editUuid);
-      if (revision !== this.detailRevision || !this.canEditLibrary() || editSnapshot!==this.activeCloud() || editUuid!==this.cloudUuid || editRevision!==store.readModelRevision() || !evidence.complete || !evidence.localAllowed) { return; }
+      if (revision !== this.detailRevision || !this.canEditLibrary() || editSnapshot!==this.activeCloud() || editUuid!==this.cloudUuid || !store.projectionReadable(editRevision) || !evidence.complete || !evidence.localAllowed) { return; }
       await store.mark(item.id, ids, watched, watched && auto ? auto.uuid : '');
       if (watched && (!previous || !hasTrackingEvidence(previous)) && previous?.localRecord?.followState !== 'no') {
         await this.recordFirstEpisodeDate(dateScope,item.id);
@@ -1164,6 +1166,11 @@ struct Index {
     } catch (error) { this.presentationStatus = '影视资料缓存暂不可用，仍可管理观看记录。'; }
   }
 
+  private publishMediaRecords(records: MediaRecord[]): boolean {
+    if (!this.mediaInput.replace(records)) { return false; }
+    this.mediaRecords=records;
+    return true;
+  }
   private onLibraryInputChanged(): void {
     this.libraryRevision++;
     this.onPresentationChanged();
@@ -1215,6 +1222,10 @@ struct Index {
     this.presentationPublished = revision;
     const changes = this.presentation.takeChanges();
     const priorTitles=this.titleSortRevision;
+    const priorShow=this.showTitleRevision,priorMovie=this.movieTitleRevision;
+    const priorShowMeta=this.showMetaRevision,priorMovieMeta=this.movieMetaRevision;
+    const priorEpisodes=this.episodeSearchRevision;
+    const dirty=new Set<string>();
     for (const row of changes.titles) {
       const prior = this.titleIndex.get(row.id);
       if ((prior?.text.title ?? '') !== row.text.title) {
@@ -1225,6 +1236,7 @@ struct Index {
         this.collectionMetaRevision++;
         if (row.id.startsWith('movie:')) { this.movieMetaRevision++; } else { this.showMetaRevision++; }
       }
+      if ((prior?.text.title??'')!==row.text.title || (prior?.posterUri??'')!==row.posterUri) { dirty.add(row.id); }
       this.titleIndex.set(row.id,row);
     }
     for (const row of changes.seasons) {
@@ -1241,17 +1253,46 @@ struct Index {
         if (!keys.has(key)) { this.episodeNameIndex.delete(key); this.episodeSearchRevision++; }
       }
       this.seasonKeys.set(seasonKey,Array.from(keys));
+      dirty.add(row.showId);
     }
-    this.presentationRevision = revision;
-    if (this.episodePage && this.selectedMedia) { this.updateEpisodePageRows(); }
-    if (priorTitles!==this.titleSortRevision) { this.refreshSearchLocal(); }
-    // A localized sort or query can reveal a different page. One more pass
-    // only after real cache changes converges to the newly visible artwork.
-    this.scheduleLazyRows();
+    // This state is only observed by the detail and the small recent-title header.
+    if (this.selectedMedia) {
+      if (changes.titles.some((row: TitlePresentation)=>row.id===this.selectedMedia?.id) ||
+          dirty.has(this.selectedMedia.id)) { this.presentationRevision=revision; }
+      if (this.episodePage && changes.seasons.some((row: SeasonPresentation)=>row.showId===this.selectedMedia?.id && row.season===this.localSeason)) { this.updateEpisodePageRows(); }
+      return;
+    }
+    const titleChanged=this.presentationLanguage==='zh' && (this.mediaMode==='show'?priorShow!==this.showTitleRevision:priorMovie!==this.movieTitleRevision);
+    const metaChanged=this.mediaMode==='show'?priorShowMeta!==this.showMetaRevision:priorMovieMeta!==this.movieMetaRevision;
+    const episodeChanged=this.presentationLanguage==='zh' && priorEpisodes!==this.episodeSearchRevision;
+    if (this.tab==='search' && this.presentationLanguage==='zh' && priorTitles!==this.titleSortRevision) { this.refreshSearchLocal(); }
+    if ((this.tab==='library' && titleChanged) || !this.scrollSlot()) { this.presentationRevision=revision; }
+    const structural=(this.tab==='library' && ((titleChanged && this.businessTitlesNeeded()) || (metaChanged && this.collectionNeedsMetadata()))) ||
+      (this.tab==='progress' && this.progressMode==='next' && ((titleChanged && (this.mediaMode==='show' || this.businessTitlesNeeded())) || (episodeChanged && this.mediaMode==='show' && !!this.nextQuery.trim()))) ||
+      (this.tab==='progress' && this.progressMode==='calendar' && (this.mediaMode==='show' ?
+        metaChanged || (!!this.calendarQuery.trim() && (titleChanged || episodeChanged)) : titleChanged && !!this.movieCalendarQuery.trim()));
+    if (structural || !this.refreshPresentationRows(Array.from(dirty))) { this.businessPresentationTasks=undefined; this.scheduleLazyRows(); }
   }
 
+  private refreshPresentationRows(ids: string[]): boolean {
+    if (!ids.length || !this.pageVisible) { return true; }
+    switch (this.scrollSlot()) {
+      case 'discover': return this.discoverRows.refreshDependencies(ids,(row: DiscoverItem[])=>this.discoverRowKey(row));
+      case 'search': return this.searchRows.refreshDependencies(ids,(row: Media)=>this.searchRowKey(row));
+      case 'show': return this.showRows.refreshDependencies(ids,(row: ProgressEntry)=>this.showRowKey(row));
+      case 'movie': return this.movieRowsSource.refreshDependencies(ids,(row: PersonalLibraryRow)=>this.movieRowKey(row));
+      case 'calendar': return this.calendarRows.refreshDependencies(ids,(row: CalendarEntry)=>this.calendarRowKey(row));
+      case 'movieCalendar': return this.movieCalendarRows.refreshDependencies(ids,(row: MovieCalendarItem)=>this.movieCalendarKey(row));
+      case 'library': return this.collectionRowsSource.refreshDependencies(ids,(row: CollectionGroup)=>this.collectionGroupKey(row));
+      default: return true;
+    }
+  }
+
+  private presentationReady(item: Media): boolean {
+    return this.selectedMedia?.id===item.id || !this.scrollSlot() ? (this.presentationRevision>=0 && this.presentationPublished>=0) : this.presentationPublished>=0;
+  }
   private displayTitle(item: Media): string {
-    return this.presentationLanguage === 'zh' && this.presentationRevision > 0 ?
+    return this.presentationLanguage === 'zh' && this.presentationReady(item) ?
       this.titleIndex.get(item.id)?.text.title || item.title : item.title;
   }
 
@@ -1263,17 +1304,17 @@ struct Index {
   }
 
   private displayEpisode(item: Media, season: number, id: number, original: string): string {
-    return this.presentationLanguage === 'zh' && this.presentationRevision > 0 ?
+    return this.presentationLanguage === 'zh' && this.presentationReady(item) ?
       this.episodeNameIndex.get(item.id + ':' + season + ':' + id) || original : original;
   }
 
   private displayOverview(item: Media, original: string): string {
     return this.presentationLanguage === 'zh' ?
-      (this.presentationRevision > 0 ? this.presentation?.overview(item.id) : '') || original : original;
+      (this.presentationReady(item) ? this.presentation?.overview(item.id) : '') || original : original;
   }
 
   private artwork(item: Media): string {
-    return this.presentationRevision > 0 ? this.titleIndex.get(item.id)?.posterUri ?? '' : '';
+    return this.presentationReady(item) ? this.titleIndex.get(item.id)?.posterUri ?? '' : '';
   }
 
   private matchesMedia(item: Media, query: string): boolean {
@@ -1635,7 +1676,7 @@ struct Index {
 
   private businessTitlesNeeded(): boolean {
     if (this.presentationLanguage!=='zh') { return false; }
-    if (this.tab==='library') { return !!this.collectionQuery.trim() || this.collectionOptions.sort==='title'; }
+    if (this.tab==='library') { const options=this.collectionFilter==='other'?defaultCollection():this.collectionOptions; return !!this.collectionQuery.trim() || options.sort==='title' || options.sort==='userRating'; }
     if (this.tab!=='progress') { return false; }
     if (this.progressMode==='next') {
       return this.mediaMode==='show' ? !!this.nextQuery.trim() || this.progressPrefs.sort==='title' :
@@ -1934,7 +1975,7 @@ struct Index {
       try {
         const records = await media.load();
         this.invalidateMovieCalendar();
-        this.mediaRecords = records;
+        this.publishMediaRecords(records);
         this.items = records.map((record: MediaRecord) => record.media);
         this.migrationStatus = '收藏数据库已就绪 · ' + records.length + ' 部；旧版 Preferences 保留。';
         this.resetCollection();
@@ -2630,7 +2671,7 @@ struct Index {
     try {
       const records = await adoptMediaCloud(store, binding, session, preview, row);
       this.invalidateMovieCalendar();
-      this.mediaRecords = records;
+      this.publishMediaRecords(records);
       this.items = records.map((record: MediaRecord) => record.media);
       this.resetCollection();
       this.threeWayStatus = '已采用云端状态并保存共同基线；仅修改所选本机状态域，未写入 Trakt。';
@@ -2639,7 +2680,7 @@ struct Index {
       try {
         const records = await store.load();
         this.invalidateMovieCalendar();
-        this.mediaRecords = records;
+        this.publishMediaRecords(records);
         this.items = records.map((record: MediaRecord) => record.media);
         this.resetCollection();
       } catch (failure) { this.ready = false; }
@@ -2947,11 +2988,13 @@ struct Index {
   private async readLibraryProjection(store: EpisodeStore, snapshot: CloudLibrary | undefined, uuid: string,
     clientId: string, fill: boolean, force: boolean, current: () => boolean): Promise<LibraryProjection> {
     const records = this.mediaRecords;
-    const recordKey = JSON.stringify(records);
+    const recordKey = this.mediaInput.version();
+    const readRevision=store.assertProjectionReadable();
+    const durableKey=store.committedProjectionKey();
     const key = projectionKey(clientId, uuid, snapshot?.generation ?? -1, snapshot?.activity ?? '',
-      store.readModelRevision(), recordKey);
+      0,JSON.stringify([durableKey,recordKey]));
     const cached = force ? undefined : this.projectionMemo.get(key, Date.now());
-    if (cached && current()) {
+    if (cached && current() && store.projectionReadable(readRevision)) {
       this.projectionHits++;
       this.performanceStatus = '全库计算 ' + this.projectionRuns + ' 次 · 缓存命中 ' + this.projectionHits + ' 次';
       return cached;
@@ -2963,12 +3006,11 @@ struct Index {
       (done: number, total: number): void => {
         if (fill) { this.cloudStatus = '计算个人库及补齐目录 ' + done + '/' + total; }
       }, this.showProjectionCache);
-    if (!current()) { throw new Error('Observation session changed'); }
-    const finalKey = projectionKey(clientId, uuid, snapshot?.generation ?? -1, snapshot?.activity ?? '',
-      store.readModelRevision(), JSON.stringify(this.mediaRecords));
+    if (!current() || recordKey!==this.mediaInput.version() || (!fill && !store.projectionReadable(readRevision))) { throw new Error('Observation session changed'); }
+    const finalKey=key;
     // The caller serializes edits with cloudBusy/localBusy. A missing or
     // failed catalog must be retried, not memoized as complete.
-    if (result.cacheable && recordKey === JSON.stringify(this.mediaRecords) && !result.matches.length) {
+    if (!fill && result.cacheable && store.projectionReadable(readRevision) && recordKey===this.mediaInput.version() && !result.matches.length) {
       this.projectionMemo.put(finalKey, result, result.computedAt, result.validUntil);
     }
     this.performanceStatus = '全库计算 ' + this.projectionRuns + ' 次 · 缓存命中 ' + this.projectionHits +
@@ -3019,12 +3061,14 @@ struct Index {
         // Local-first render, no network catalog fill and no checkpoint writes.
         // The existing cloudBusy gate remains active until fresh verification.
         try {
+          const initialFence=store.assertProjectionReadable();
+          const initialMediaVersion=this.mediaInput.version();
           const initial = await this.readLibraryProjection(store, restored, account.uuid, clientId, false, false, current);
           if (!current()) { throw new Error('Session changed'); }
           initialProjection = initial;
           initialSnapshot = restored;
-          initialRevision = store.readModelRevision();
-          initialRecords = JSON.stringify(this.mediaRecords);
+          initialRevision = initialFence;
+          initialRecords = initialMediaVersion;
           this.retainProgressCandidates(initial.next);
           this.nextShows = initial.next;
           this.libraryEvidence = initial.evidence;
@@ -3062,8 +3106,7 @@ struct Index {
         try {
           const records = await reconcileTitleObservation(mediaStore, store, session, account.uuid, snapshot, current);
           if (!current()) { throw new Error('Session changed'); }
-          if (JSON.stringify(records) !== JSON.stringify(this.mediaRecords)) {
-            this.mediaRecords = records;
+          if (this.publishMediaRecords(records)) {
             this.items = records.map((record: MediaRecord) => record.media);
           }
           const consent = await mediaStore.titleConsent();
@@ -3081,7 +3124,7 @@ struct Index {
           // Partial read coordination must not publish stale title records.
           const retained = await mediaStore.load();
           if (!current()) { throw new Error('Session changed'); }
-          this.mediaRecords = retained;
+          this.publishMediaRecords(retained);
           this.items = this.mediaRecords.map((record: MediaRecord) => record.media);
           this.titleQuickPending = false;
           this.titleQuickStatus = '影视状态协调未完成，请刷新。';
@@ -3092,7 +3135,7 @@ struct Index {
       // reuse even an incomplete first pass; repair is scheduled separately.
       const now = Date.now();
       const reuseInitial = initialProjection && initialSnapshot === snapshot &&
-        initialRevision === store.readModelRevision() && initialRecords === JSON.stringify(this.mediaRecords) &&
+        store.projectionReadable(initialRevision) && initialRecords === this.mediaInput.version() &&
         now >= initialProjection.computedAt && now < initialProjection.validUntil;
       const result = reuseInitial && initialProjection ? initialProjection :
         await this.readLibraryProjection(store, snapshot, account.uuid, clientId, false, force, current);
@@ -3179,7 +3222,7 @@ struct Index {
       const verified = scoped ? await store.saveTitleEdit(records, changes, uuid, this.clientId,
         new Date().toISOString(), this.titleQuickActive()) : await store.save(records);
       this.invalidateMovieCalendar();
-      this.mediaRecords = verified;
+      this.publishMediaRecords(verified);
       this.items = verified.map((record: MediaRecord) => record.media);
       try { await this.recordTitleDates(dateScope, beforeDates, changes); }
       catch (error) { this.collectionRuleStatus = '收藏已保存，但添加时间未能保存。'; }
@@ -4194,7 +4237,7 @@ struct Index {
       this.progressFlagScope,this.flagVersion('show'),this.hiddenVersion('show'),prefs.strategy,prefs.count,prefs.days,prefs.newAtTop]);
   }
   private progressSortKey(query: string): string {
-    return JSON.stringify([this.progressBusinessKey(),this.presentationLanguage,this.titleVersion('show'),
+    return JSON.stringify([this.progressBusinessKey(),this.presentationLanguage,this.presentationLanguage==='zh' ? this.titleVersion('show') : 0,
       query ? this.episodeSearchRevision : 0,this.progressPrefs.sort,this.progressPrefs.descending,this.nextFilter,query,
       this.progressPrefs.sort==='userRating' ? this.showRatingVersion : 0,
       this.progressPrefs.sort==='userRating' ? this.currentShowRatingKey() : '']);
@@ -5049,7 +5092,7 @@ struct Index {
 
   private movieSortKey(query: string, utc: string): string {
     return JSON.stringify([this.displayRevisions.movie,this.libraryRevision,this.currentProgressScope(),this.activeCloud()?.generation ?? -1,
-      this.presentationLanguage,this.titleVersion('movie'),this.progressFlagScope,this.flagVersion('movie'),this.hiddenVersion('movie'),
+      this.presentationLanguage,this.presentationLanguage==='zh' && (query || this.movieProgressOptions.sort==='title' || this.movieProgressOptions.sort==='userRating') ? this.titleVersion('movie') : 0,this.progressFlagScope,this.flagVersion('movie'),this.hiddenVersion('movie'),
       this.movieProgressOptions,this.movieRandomSeed,utc,query]);
   }
   private movieProgressRows(query: string = this.movieProgressQuery, live: boolean = false, prepare: boolean = false): PersonalLibraryRow[] {
@@ -5069,7 +5112,7 @@ struct Index {
       const movie = metadata.get(row.media.id);
       if (this.isHidden(row.media) || !movie || movie.localOnly || movie.dateUncertain || row.media.kind !== 'movie') { continue; }
       const translation = this.presentationLanguage === 'zh' ?
-        (this.presentationRevision > 0 ? this.titleIndex.get(row.media.id)?.text.title ?? '' : '') : '';
+        (this.presentationPublished>=0 ? this.titleIndex.get(row.media.id)?.text.title ?? '' : '') : '';
       sources.push({ row: row, translation: translation,
         metadata: { id: row.media.id, released: movie.released, year: movie.media.year,
           runtime: movie.runtime, rating: movie.rating, addedAt: movie.addedAt, userRating: movie.userRating } });
@@ -5490,7 +5533,7 @@ struct Index {
     }
   }
   private collectionNeedsMetadata(): boolean {
-    const options = this.collectionOptions;
+    const options = this.collectionFilter==='other'?defaultCollection():this.collectionOptions;
     return !!options.genres.length || !!options.networks.length || options.upcoming !== 'all' ||
       ['rating','runtime','newest'].includes(options.sort);
   }
@@ -5569,7 +5612,7 @@ struct Index {
     const options = this.collectionFilter === 'other' ? defaultCollection() : this.collectionOptions;
     return JSON.stringify([this.displayRevisions.collection,this.libraryRevision,this.collectionScope,this.currentProgressScope(),
       this.mediaMode,this.collectionFilter,this.collectionStatusFilter,this.collectionQuery,options,this.presentationLanguage,
-      this.titleVersion(this.mediaMode),this.metaVersion(this.mediaMode)]);
+      this.presentationLanguage==='zh' && (this.collectionQuery.trim() || options.sort==='title' || options.sort==='userRating') ? this.titleVersion(this.mediaMode) : 0,this.collectionNeedsMetadata() ? this.metaVersion(this.mediaMode) : 0]);
   }
   private collectionItems(prepare: boolean = false): PersonalLibraryRow[] {
     if (this.signedIn && !this.activeCloud()) { return []; }
@@ -5718,7 +5761,7 @@ struct Index {
       if (this.collectionFilter !== 'other') { this.collectionRuleControls() }
       if (this.collectionRuleStatus) { Text(this.collectionRuleStatus).fontSize(12).width('100%') }
       if (this.collectionFilter === 'hidden') { Text('仅本机隐藏，不删除历史、不写入 Trakt。').fontSize(12).width('100%') }
-      if (this.collectionFilter === 'mine' && this.collectionPage === 1 && !this.collectionQuery.trim() && this.recentCollectionRows().length) {
+      if (this.presentationRevision>=0 && this.collectionFilter === 'mine' && this.collectionPage === 1 && !this.collectionQuery.trim() && this.recentCollectionRows().length) {
         Text('最近添加（已记录时间）').fontSize(17).fontWeight(FontWeight.Medium).width('100%')
         ForEach(this.recentCollectionRows(), (row: PersonalLibraryRow) => {
           Text(this.displayTitle(row.media)).fontSize(13).width('100%').onClick(() => { this.openDetail(row.media); })

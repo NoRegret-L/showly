@@ -202,9 +202,9 @@ assert "await store.backupStates()" not in lib and "await store.journalIntents()
 assert lib.count("decodeIndexedProjection(")==1
 assert "if (changedDisk.length) { await store.saveProjectionRows(diskScope,changedDisk); }" in lib
 assert "summarizeAired(full,effective.ids,now)" in lib
-assert "store.readModelRevision() !== revision" in lib
+assert "!store.projectionReadable(revision)" in lib
 assert "JSON.stringify(row.episode)" not in comp
-assert "initialRevision === store.readModelRevision()" in page and "initialSnapshot === snapshot" in page
+assert "store.projectionReadable(initialRevision)" in page and "initialSnapshot === snapshot" in page
 assert "now >= initialProjection.computedAt && now < initialProjection.validUntil" in page
 assert "store.readQueryCount() - queryStart" in page
 assert "await readSyncAccount(session)" in page and "await readActivity(session)" in page

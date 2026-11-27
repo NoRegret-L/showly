@@ -51,7 +51,7 @@ export async function projectLibrary(store: EpisodeStore, records: MediaRecord[]
   current: () => boolean, progress: (done: number, total: number) => void,
   cache: ShowProjectionCache): Promise<LibraryProjection> {
   const readOnly = !fill;
-  const revision = store.readModelRevision();
+  const revision = store.assertProjectionReadable();
   const bound = await store.boundAccount();
   const localAllowed = allowLocalScope(!!cloud, bound, uuid);
   const checkpoints = cloud && localAllowed ? await store.readCheckpoints(uuid) : new Map<number, ReadCheckpoint>();
@@ -74,7 +74,7 @@ export async function projectLibrary(store: EpisodeStore, records: MediaRecord[]
   const parseStart = store.projectionScheduleParseCount();
   const schedules = await store.projectionCatalogs(targetIds);
   const scheduleParses = store.projectionScheduleParseCount() - parseStart;
-  if (!current() || store.readModelRevision() !== revision) { throw new Error('Projection inputs changed'); }
+  if (!current() || !store.projectionReadable(revision)) { throw new Error('Projection inputs changed'); }
   const byId: Map<string, EpisodeBackupState> = new Map<string, EpisodeBackupState>();
   for (const state of states) { byId.set(state.catalog.showId, state); }
   const remoteById: Map<string, RemoteShowObservation> = new Map<string, RemoteShowObservation>();
@@ -193,7 +193,7 @@ export async function projectLibrary(store: EpisodeStore, records: MediaRecord[]
     }
     prepared.push(work);
   }
-  if (!current() || (readOnly && store.readModelRevision() !== revision)) { throw new Error('Observation inputs changed'); }
+  if (!current() || (readOnly && !store.projectionReadable(revision))) { throw new Error('Observation inputs changed'); }
   if (pending.length) {
     computedShows = pending.length;
     workerBatches++;
@@ -205,7 +205,7 @@ export async function projectLibrary(store: EpisodeStore, records: MediaRecord[]
     } catch (error) {
       outputs = computeProjectionBatch(pending);
     }
-    if (!current() || (readOnly && store.readModelRevision() !== revision)) { throw new Error('Observation inputs changed'); }
+    if (!current() || (readOnly && !store.projectionReadable(revision))) { throw new Error('Observation inputs changed'); }
     for (let i = 0; i < pendingRows.length; i++) {
       const work = pendingRows[i];
       work.calculated = outputs[i];
@@ -256,10 +256,10 @@ export async function projectLibrary(store: EpisodeStore, records: MediaRecord[]
     progress(++done, targets.length);
   }
   cache.retain(retained);
-  if (!current() || (readOnly && store.readModelRevision() !== revision)) { throw new Error('Observation inputs changed'); }
+  if (!current() || (readOnly && !store.projectionReadable(revision))) { throw new Error('Observation inputs changed'); }
   if (changedDisk.length) { await store.saveProjectionRows(diskScope,changedDisk); }
   if (removedDisk.length) { await store.removeProjectionRows(diskScope,removedDisk); }
-  if (!current() || (readOnly && store.readModelRevision() !== revision)) { throw new Error('Observation inputs changed'); }
+  if (!current() || (readOnly && !store.projectionReadable(revision))) { throw new Error('Observation inputs changed'); }
   return { evidence: result, missing: missing, failed: failed, localAllowed: localAllowed, matches: matches, next: next, calendar: calendar,
     computedAt: now, validUntil: validUntil, cacheable: cacheable && !missing && !failed, computedShows: computedShows, reusedShows: reusedShows, diskHits: diskHits, scheduleParses: scheduleParses,
     diskParses: diskParses, diskWrites: changedDisk.length, workerBatches: workerBatches, repairTargets: repairTargets };
@@ -274,9 +274,11 @@ export interface DetailProjection {
 // render aired episodes; never save it into the eligible catalog on read.
 export async function projectDetail(store: EpisodeStore, full: FullEpisodeCatalog | undefined,
   showId: string, cloud: RemoteLibraryObservation | undefined, uuid: string, displayOnly: boolean = false): Promise<DetailProjection> {
+  const revision=store.assertProjectionReadable();
   const bound = await store.boundAccount();
   const localAllowed = allowLocalScope(!!cloud, bound, uuid);
   const local = localAllowed ? await store.read(showId) : undefined;
+  if (!store.projectionReadable(revision)) { throw new Error('Detail inputs changed'); }
   if (!full) {
     return { state: cloud ? undefined : local, localAllowed: localAllowed, complete: !cloud };
   }
@@ -295,6 +297,7 @@ export async function projectDetail(store: EpisodeStore, full: FullEpisodeCatalo
   const checkpoints = cloud && localAllowed ? await store.readCheckpoints(uuid,ids) : new Map<number, ReadCheckpoint>();
   const common = cloud && localAllowed ? await store.commonStates(uuid, 'episode',ids) : new Map<string, CommonEntry>();
   const remote = cloud?.shows.find((show: RemoteShowObservation) => show.id === showId);
+  if (!store.projectionReadable(revision)) { throw new Error('Detail inputs changed'); }
   const effective = resolveEpisodes(full, remote, !!cloud, localIds, decisions, checkpoints, common);
   return { state: effective.complete ? materializeEffective(eligibleCatalog(full, Date.now()), effective.ids) : undefined,
     localAllowed: localAllowed, complete: effective.complete };

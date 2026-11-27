@@ -101,7 +101,7 @@ assert lib.count("taskpool.execute(")==1
 assert "if (pending.length)" in lib
 assert "indexedProjectionMatches(prior,input,work.catalogKey,work.key)" in lib
 assert "if (calculated) {\n        work.diskReusable = metadataMatch;" in lib
-assert "store.readModelRevision() !== revision" in lib
+assert "!store.projectionReadable(revision)" in lib
 assert "await store.saveProjectionRows(diskScope,changedDisk)" in lib
 assert "await store.removeProjectionRows(diskScope,removedDisk)" in lib
 print("Indexed SQL scope, target lookup, single-row update, batch worker and safety wiring passed")

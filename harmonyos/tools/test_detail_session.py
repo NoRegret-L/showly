@@ -56,7 +56,7 @@ assert "await store.readCheckpoints(uuid,ids)" in projection and "await store.co
 assert "seen.has(entry.id)" in store
 assert "this.detailSession.read(scope,item.id,readRevision)" in page
 assert "projectDetail(store,full,item.id,snapshot,uuid,true)" in page
-assert "editRevision!==store.readModelRevision()" in page and "await store.mark(item.id" in page
+assert "!store.projectionReadable(editRevision)" in page and "await store.mark(item.id" in page
 assert "this.pauseDetail();" in page and "this.resumeDetail();" in page
 assert "this.closeSeasonPage()" in page and "this.detailScroller.scrollTo" in page
 assert "LazyForEach(this.source" in component and "@State confirming" in component

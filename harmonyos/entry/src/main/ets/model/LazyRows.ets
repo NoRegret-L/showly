@@ -1,3 +1,4 @@
+import { RowDependencies } from './RowDependencies';
 import { ScrollRows } from './ScrollAnchor';
 import { ListDiffInput, ListEdit, planListDiff, sameListOrder } from './ListDiff';
 export class LazyRows<T> implements IDataSource, ScrollRows {
@@ -7,9 +8,29 @@ export class LazyRows<T> implements IDataSource, ScrollRows {
   private keyById: Map<string,string> = new Map<string,string>();
   private listeners: DataChangeListener[] = [];
   private revision: number = 0;
+  private pendingRevision: number=0;
+  private dependencies: RowDependencies=new RowDependencies();
+  private dependenciesOf?: (row: T)=>string[];
+  constructor(dependenciesOf?: (row: T)=>string[]) { this.dependenciesOf=dependenciesOf; }
+  private rebuildDependencies(): void {
+    const extract=this.dependenciesOf;
+    this.dependencies.rebuild(this.ids,extract ? this.rows.map((row: T)=>extract(row)) : []);
+  }
+  // Native keys must change when rendered contents change. Row/anchor identity
+  // stays stable and unrelated native components retain their original keys.
+  refreshDependencies(ids: string[],key: (row: T)=>string): boolean {
+    if (this.pendingRevision!==0) { return false; }
+    for (const i of this.dependencies.affected(ids)) {
+      const next=key(this.rows[i]);
+      if (next===this.keys[i]) { continue; }
+      this.keys[i]=next; this.keyById.set(this.ids[i],next);
+      for (const listener of this.listeners) { listener.onDataChange(i); }
+    }
+    return true;
+  }
   totalCount(): number { return this.rows.length; }
   idAt(index: number): string { return this.ids[index] ?? ''; }
-  indexOfId(id: string): number { return this.ids.indexOf(id); }
+  indexOfId(id: string): number { return this.dependencies.indexOf(id); }
   getData(index: number): T { return this.rows[index]; }
   keyFor(id: string): string { return id + ':' + (this.keyById.get(id) ?? ''); }
   registerDataChangeListener(listener: DataChangeListener): void {
@@ -23,7 +44,7 @@ export class LazyRows<T> implements IDataSource, ScrollRows {
     return {oldIds:[...this.ids],oldKeys:[...this.keys],ids:[...ids],keys:[...keys]};
   }
   replace(rows: T[], ids: string[], keys: string[]): void {
-    this.revision++;
+    this.revision++; this.pendingRevision=0;
     this.apply(rows,ids,keys,planListDiff(this.input(ids,keys)));
   }
   async submit(rows: T[], ids: string[], keys: string[], differ: (input: ListDiffInput) => Promise<ListEdit[]>,
@@ -33,8 +54,10 @@ export class LazyRows<T> implements IDataSource, ScrollRows {
     // No worker transfer for a content-only delta or empty list transition.
     const structural = input.oldIds.length > 0 && ids.length > 0 && !sameListOrder(input.oldIds,ids);
     let edits: ListEdit[];
+    if (structural) { this.pendingRevision=revision; }
     try { edits = structural ? await differ(input) : planListDiff(input); }
     catch (error) { if (revision !== this.revision || !current()) { return false; } throw new Error((error as Error).message); }
+    finally { if (this.pendingRevision===revision) { this.pendingRevision=0; } }
     if (revision !== this.revision || !current()) { return false; }
     this.apply(rows,ids,keys,edits);
     return true;
@@ -44,6 +67,7 @@ export class LazyRows<T> implements IDataSource, ScrollRows {
       this.rows = [...rows]; this.ids = [...ids]; this.keys = [...keys];
       this.keyById.clear();
       ids.forEach((id: string,i: number) => { this.keyById.set(id,keys[i]); });
+      this.rebuildDependencies();
       for (const listener of this.listeners) { listener.onDataReloaded(); }
       return;
     }
@@ -72,5 +96,6 @@ export class LazyRows<T> implements IDataSource, ScrollRows {
     }
     // Non-rendered business fields may have changed even with the same key.
     this.rows = [...rows]; this.ids = [...ids]; this.keys = [...keys];
+    this.rebuildDependencies();
   }
 }
