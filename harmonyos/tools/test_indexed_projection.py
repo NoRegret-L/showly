@@ -100,7 +100,9 @@ assert "taskpool.execute(computeProjectionBatchTask, JSON.stringify(pending))" i
 assert lib.count("taskpool.execute(")==1
 assert "if (pending.length)" in lib
 assert "indexedProjectionMatches(prior,input,work.catalogKey,work.key)" in lib
-assert "if (calculated) {\n        work.diskReusable = metadataMatch;" in lib
+assert "if (work.calculated) { work.diskReusable=metadataMatch; }" in lib
+assert "work.diskReusable=!!work.calculated && cache.diskKnown(" in lib
+assert "store.readProjectionRows(diskScope,diskNeeded)" in lib
 assert "!store.projectionReadable(revision)" in lib
 assert "await store.saveProjectionRows(diskScope,changedDisk)" in lib
 assert "await store.removeProjectionRows(diskScope,removedDisk)" in lib

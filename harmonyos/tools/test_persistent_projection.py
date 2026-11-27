@@ -81,7 +81,9 @@ assert repair.index("await fetchFullEpisodeCatalog") < repair.index("store.readM
 assert "store.mark(" not in repair and "saveReadCheckpoints" not in repair
 # Indexed cache validates cold rows once and writes only changed rows.
 lib=projection.split("export async function projectLibrary(",1)[1].split("export interface DetailProjection",1)[0]
-assert lib.index("const prior = disk.get(row.media.id)") < lib.index("decodeIndexedProjection(prior,input,work.catalogKey,work.key)") < lib.index("work.diskReusable = true")
+assert lib.index("const prior=disk.get(id)") < lib.index("decodeIndexedProjection(prior,input,work.catalogKey,work.key)") < lib.index("diskHits++; work.diskReusable=true")
+assert lib.index("if (work.calculated) {\n          diskHits++; work.diskReusable=true") < lib.index("cache.put(id,work.key,now,work.calculated,work.catalogKey)")
+assert "if (work.diskReusable) { cache.markDiskKnown(id,work.key,work.catalogKey); }" in lib
 assert lib.count("decodeIndexedProjection(")==1
 assert "calculated && input && calculated.effective.complete && diskProjectionAllowed(input)" in lib
 assert "if (changedDisk.length && await store.saveProjectionRows(diskScope,changedDisk))" in lib
