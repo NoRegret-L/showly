@@ -77,7 +77,7 @@ cache=movie_rows.index("memo.put(key,rows,now,expiry);")
 result=movie_rows.index("return rows;")
 assert guard < hit < hit_return < compute < cache < result
 assert "this.runMovieSort(input,key,now,expiry)" in movie_rows
-assert worker.index("await movieDisplay(input)") < worker.index("key !== this.movieSortKey(input.query,input.utc)") < worker.index("memo.put(key,rows,now,expiry)")
+assert worker.index("await movieDisplay(input,this.sortJobs.consumer(slot,token))") < worker.index("key !== this.movieSortKey(input.query,input.utc)") < worker.index("memo.put(key,rows,now,expiry)")
 assert "this.sortJobs.current(slot,token)" in worker and "!this.movieCalendarCurrent()" in worker
 assert "this.movieSortKey(query,utc)" in movie_rows and "this.currentProgressScope(),this.activeCloud()?.generation" in source
 assert "this.displayRevisions.movie,this.libraryRevision" in source
