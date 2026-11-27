@@ -43,7 +43,7 @@ assert "@State discoverKind" not in source
 assert "@State calendarKind" not in source
 assert "this.mediaModeTabs()" in source
 assert "discoverRequest(kind,options,this.discoverCollectionSize())" in source
-assert "repo.load(clientId,request,force,publish)" in source
+assert "repo.load(clientId,request,force,publish,consumer)" in source
 assert "const kind = this.mediaMode;" in source
 assert "this.collectionPageGroups()" in source
 assert "this.movieProgressView()" in source
