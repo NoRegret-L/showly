@@ -4,7 +4,7 @@ import shutil, subprocess, tempfile
 root=Path(__file__).resolve().parents[1]/"entry/src/main/ets"
 with tempfile.TemporaryDirectory() as tmp:
     work=Path(tmp)
-    names=("Media","ShowCatalog","ThreeWay","RemoteObservation","EffectiveState","ProgressRules")
+    names=("Media","ShowCatalog","ThreeWay","RemoteObservation","EffectiveState","MediaPresentation","ProgressRules")
     for name in names: shutil.copyfile(root/"model"/(name+".ets"),work/(name+".ts"))
     subprocess.run(["tsc","--strict","--target","ES2020","--module","commonjs",*[n+".ts" for n in names]],cwd=work,check=True)
     (work/"test.cjs").write_text("""

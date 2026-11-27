@@ -12,6 +12,12 @@ export class ClientSettings {
     const value = this.storage.getSync('client_id', '');
     return typeof value === 'string' ? value : '';
   }
+  loadLanguage(): string { return this.storage.getSync('presentation_language', 'zh') === 'original' ? 'original' : 'zh'; }
+  async saveLanguage(language: string): Promise<void> {
+    if (language !== 'zh' && language !== 'original') { throw new Error('Invalid language'); }
+    await this.storage.put('presentation_language', language);
+    await this.storage.flush();
+  }
   loadMode(): string {
     return this.storage.getSync('media_mode', 'show') === 'movie' ? 'movie' : 'show';
   }

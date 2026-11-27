@@ -1,4 +1,4 @@
-# Showly HarmonyOS Preview v0.9.3e.2a.1
+# Showly HarmonyOS Preview v0.9.3e.2a.2
 
 Unofficial native ArkTS prototype, not a complete Showly port. Your app uses Trakt but is not endorsed or certified by Trakt.
 
@@ -179,3 +179,7 @@ Full-catalog progress projection using verified effective watch state, actual kn
 ## v0.9.3e.2a.1 — data-driven feature distribution (0.9.3.12, build 36)
 
 Progress renders actual ordered entries and nonempty Upcoming/On Hold headers at group boundaries, persists filters, and keeps pin/hold independent of candidate existence. Shared show actions reachable from collection, discovery and detail. My Shows uses one selected status list, eliminating duplicate cards across simultaneous groups. No sync writes changed. Recent-added timestamps and native notifications remain pending.
+
+## v0.9.3e.2a.2 — shared presentation metadata (0.9.3.13, build 37)
+
+Public SQLite metadata cache and shared persistent artwork retrieval; simplified Chinese/original language setting, title/season translations, image and localized title rendering in existing progress, calendar, collection, discovery, search and detail. Search/filter uses original and cached localized text, localized name ordering for progress. No Trakt write or personal-store migration. Trakt artwork retained; TMDB fallback and episode stills not yet implemented. See docs/PRESENTATION.md.

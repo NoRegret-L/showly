@@ -2,6 +2,7 @@ import { Media } from './Media';
 import { FullEpisodeCatalog, ScheduledEpisode, scheduleEpisodes } from './ShowCatalog';
 import { RemoteShowObservation, RemotePlayPosition } from './RemoteObservation';
 import { ReadCheckpoint } from './EffectiveState';
+import { compareTitles, matchesText } from './MediaPresentation';
 
 export interface ProgressEpisode {
   episode: ScheduledEpisode;
@@ -20,6 +21,8 @@ export interface ProgressSource {
   recentAt: number;
   rating?: number;
   randomOrder: number;
+  localizedTitle?: string;
+  episodeNames?: Map<number, string>;
 }
 export interface ProgressPreferences {
   strategy: string;
@@ -51,6 +54,8 @@ export interface ProgressRow {
   rating?: number;
   randomOrder: number;
   dateUnknown: boolean;
+  localizedTitle?: string;
+  localizedEpisode?: string;
 }
 const DAY = 86400000;
 // Upstream Config.NEW_BADGE_DURATION = DAYS.toMillis(3).
@@ -149,13 +154,11 @@ export function selectProgress(source: ProgressSource, prefs: ProgressPreference
   return { media: source.media, episode: next.episode, total: counted.length,
     completed: counted.filter((item: ProgressEpisode) => item.watched).length, upcoming: upcoming,
     fresh: fresh, pinned: pinned, held: held, group: group, recentAt: source.recentAt, rating: source.rating,
-    randomOrder: source.randomOrder, dateUnknown: prefs.strategy === 'last' && watched.length > dated.length };
+    randomOrder: source.randomOrder, dateUnknown: prefs.strategy === 'last' && watched.length > dated.length,
+    localizedTitle: source.localizedTitle, localizedEpisode: source.episodeNames?.get(next.episode.id) };
 }
 function title(row: ProgressRow): string {
-  return row.media.title.replace(/^the /i, '').toUpperCase();
-}
-function searchKey(value: string): string {
-  return value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+  return row.localizedTitle || row.media.title;
 }
 function order(a: ProgressRow, b: ProgressRow, prefs: ProgressPreferences): number {
   const sign = prefs.descending ? -1 : 1;
@@ -163,21 +166,21 @@ function order(a: ProgressRow, b: ProgressRow, prefs: ProgressPreferences): numb
     if (a.rating !== b.rating) { return a.rating === undefined ? 1 : -1; }
   }
   let value = 0;
-  if (prefs.sort === 'title') { value = title(a).localeCompare(title(b)); }
+  if (prefs.sort === 'title') { value = compareTitles(title(a), title(b), a.localizedTitle || b.localizedTitle ? 'zh' : 'original'); }
   else if (prefs.sort === 'recent') { value = a.recentAt - b.recentAt; }
   else if (prefs.sort === 'remaining') { value = (a.total - a.completed) - (b.total - b.completed); }
   else if (prefs.sort === 'newest') { value = time(a.episode.firstAired) - time(b.episode.firstAired); }
   else if (prefs.sort === 'rating') { value = (a.rating ?? 0) - (b.rating ?? 0); }
   else if (prefs.sort === 'random') { value = a.randomOrder - b.randomOrder; }
-  return sign * value || title(a).localeCompare(title(b)) || a.media.id.localeCompare(b.media.id);
+  return sign * value || compareTitles(title(a), title(b), a.localizedTitle || b.localizedTitle ? 'zh' : 'original') || a.media.id.localeCompare(b.media.id);
 }
 export function progressRows(sources: ProgressSource[], prefs: ProgressPreferences, flags: ProgressFlag[],
   now: number, filter: string, query: string): ProgressRow[] {
-  const q = searchKey(query.trim());
+  const q = query.trim();
   const result: ProgressRow[] = [];
   for (const source of sources) {
     const row = selectProgress(source, prefs, flags, now);
-    if (row && (!q || searchKey(row.media.title).includes(q) || searchKey(row.episode.title).includes(q))) { result.push(row); }
+    if (row && (!q || matchesText(q, row.media.title, row.localizedTitle ?? '') || matchesText(q, row.episode.title, row.localizedEpisode ?? ''))) { result.push(row); }
   }
   const grouped: ProgressRow[] = [];
   for (const group of ['pinned','new','aired','upcoming','hold']) {

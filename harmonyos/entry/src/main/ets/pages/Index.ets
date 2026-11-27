@@ -1,4 +1,6 @@
 import { common } from '@kit.AbilityKit';
+import { PresentationRepository } from '../data/PresentationRepository';
+import { TitlePresentation, SeasonPresentation, PresentationTask, localizedTitle, localizedEpisode, matchesText, compareTitles } from '../model/MediaPresentation';
 import { Media, mediaLabel, setWatched } from '../model/Media';
 import { LibraryStore } from '../data/LibraryStore';
 import { MediaStore } from '../data/MediaStore';
@@ -47,19 +49,31 @@ import { UpdateInfo, UpstreamInfo, checkRelease, checkUpstream } from '../data/R
 @Component
 struct Index {
   @State title: string = '';
+  @State presentationLanguage: string = 'zh';
+  @State presentationTitles: TitlePresentation[] = [];
+  @State presentationSeasons: SeasonPresentation[] = [];
+  @State presentationStatus: string = '';
+  @State languageBusy: boolean = false;
+  private presentation?: PresentationRepository;
+  private presentationRunning: boolean = false;
+  private presentationPending: boolean = false;
+  private presentationBlocked: boolean = false;
+  private presentationEpoch: number = 0;
+  private presentationRoute: string = '';
+  private presentationPublished: number = -1;
   @State updateBusy: boolean = false;
   @State updateStatus: string = '';
   @State availableUpdate?: UpdateInfo = undefined;
   @State upstreamInfo?: UpstreamInfo = undefined;
   @State upstreamStatus: string = '';
-  @State tab: string = 'progress';
-  @State mediaMode: string = 'show';
+  @State @Watch('onPresentationChanged') tab: string = 'progress';
+  @State @Watch('onPresentationChanged') mediaMode: string = 'show';
   @State modeBusy: boolean = false;
   @State modeStatus: string = '';
   private returnTab: string = 'progress';
-  @State movieProgressQuery: string = '';
-  @State movieProgressPage: number = 1;
-  @State collectionQuery: string = '';
+  @State @Watch('onPresentationChanged') movieProgressQuery: string = '';
+  @State @Watch('onPresentationChanged') movieProgressPage: number = 1;
+  @State @Watch('onPresentationChanged') collectionQuery: string = '';
   private episodeStore?: EpisodeStore;
   @State @Watch('onRecoveryGateChanged') syncBusy: boolean = false;
   @State syncStatus: string = '';
@@ -99,36 +113,36 @@ struct Index {
   @State uploadStatus: string = '';
   @State episodeReady: boolean = false;
   @State episodeInitStatus: string = '';
-  @State localSeries?: LocalSeriesState = undefined;
-  @State fullSchedule?: FullEpisodeCatalog = undefined;
-  @State schedulePage: number = 1;
-  @State localSeason: number = -1;
+  @State @Watch('onPresentationChanged') localSeries?: LocalSeriesState = undefined;
+  @State @Watch('onPresentationChanged') fullSchedule?: FullEpisodeCatalog = undefined;
+  @State @Watch('onPresentationChanged') schedulePage: number = 1;
+  @State @Watch('onPresentationChanged') localSeason: number = -1;
   @State @Watch('onRecoveryGateChanged') localBusy: boolean = false;
   @State localStatus: string = '';
   @State localRecent: Media[] = [];
-  @State progressMode: string = 'next';
-  @State nextShows: NextShow[] = [];
+  @State @Watch('onPresentationChanged') progressMode: string = 'next';
+  @State @Watch('onPresentationChanged') nextShows: NextShow[] = [];
   @State nextStatus: string = '';
-  @State progressPrefs: ProgressPreferences = defaultProgress();
-  @State progressFlags: ProgressFlag[] = [];
+  @State @Watch('onPresentationChanged') progressPrefs: ProgressPreferences = defaultProgress();
+  @State @Watch('onPresentationChanged') progressFlags: ProgressFlag[] = [];
   @State progressFlagScope: string = '';
   @State progressPrefsBusy: boolean = false;
   @State progressOptions: boolean = false;
   @State progressDaysInput: string = '30';
   @State progressOptionStatus: string = '';
-  @State nextFilter: string = 'all';
+  @State @Watch('onPresentationChanged') nextFilter: string = 'all';
   @State progressMenuId: string = '';
-  @State collectionStatusFilter: string = 'all';
-  @State nextQuery: string = '';
-  @State nextPage: number = 1;
+  @State @Watch('onPresentationChanged') collectionStatusFilter: string = 'all';
+  @State @Watch('onPresentationChanged') nextQuery: string = '';
+  @State @Watch('onPresentationChanged') nextPage: number = 1;
   @State calendarWeek: number = 0;
-  @State calendarPage: number = 1;
+  @State @Watch('onPresentationChanged') calendarPage: number = 1;
   @State calendarBusy: boolean = false;
   @State calendarStatus: string = '';
-  @State calendarData?: CalendarSnapshot = undefined;
-  @State movieCalendarData?: PersonalMovieSnapshot = undefined;
-  @State movieCalendarMode: string = 'future';
-  @State movieCalendarQuery: string = '';
+  @State @Watch('onPresentationChanged') calendarData?: CalendarSnapshot = undefined;
+  @State @Watch('onPresentationChanged') movieCalendarData?: PersonalMovieSnapshot = undefined;
+  @State @Watch('onPresentationChanged') movieCalendarMode: string = 'future';
+  @State @Watch('onPresentationChanged') movieCalendarQuery: string = '';
   private calendarRevision: number = 0;
   @State confirmSeason: number = -1;
   @State confirmWatched: boolean = true;
@@ -147,8 +161,8 @@ struct Index {
   @State trackingPage: number = 1;
   @State trackingQuery: string = '';
   private translationCache: Map<string, ChineseText> = new Map<string, ChineseText>();
-  @State collectionFilter: string = 'mine';
-  @State collectionPage: number = 1;
+  @State @Watch('onPresentationChanged') collectionFilter: string = 'mine';
+  @State @Watch('onPresentationChanged') collectionPage: number = 1;
   @State collectionGrid: boolean = true;
   @State collectionCards: DiscoverItem[] = [];
   @State collectionBusy: boolean = false;
@@ -164,26 +178,26 @@ struct Index {
   @State translationBusy: boolean = false;
   @State translationStatus: string = '';
   @State discoverMode: string = 'trending';
-  @State discoverItems: DiscoverItem[] = [];
+  @State @Watch('onPresentationChanged') discoverItems: DiscoverItem[] = [];
   @State discoverPage: number = 1;
   @State discoverPages: number = 0;
   @State discoverBusy: boolean = false;
   @State discoverStatus: string = '';
   private discoverRevision: number = 0;
-  @State selectedMedia?: Media = undefined;
+  @State @Watch('onPresentationChanged') selectedMedia?: Media = undefined;
   @State detail?: MediaDetail = undefined;
   @State detailBusy: boolean = false;
   @State detailStatus: string = '';
   @State posterUri: string = '';
   private detailRevision: number = 0;
-  @State clientId: string = '';
+  @State @Watch('onPresentationChanged') clientId: string = '';
   @State draftId: string = '';
   @State configuring: boolean = false;
   @State @Watch('onRecoveryGateChanged') setupBusy: boolean = false;
   @State settingsReady: boolean = false;
   @State setupStatus: string = '';
-  @State cloud?: CloudLibrary = undefined;
-  @State libraryEvidence: LibraryShowEvidence[] = [];
+  @State @Watch('onPresentationChanged') cloud?: CloudLibrary = undefined;
+  @State @Watch('onPresentationChanged') libraryEvidence: LibraryShowEvidence[] = [];
   private cloudUuid: string = '';
   private cloudFresh: boolean = false;
   @State cloudLocalAllowed: boolean = false;
@@ -199,14 +213,14 @@ struct Index {
   @StorageLink('traktAuthBusy') @Watch('onRecoveryGateChanged') authBusy: boolean = false;
   @StorageLink('traktSignedIn') @Watch('onObservationAuthChanged') signedIn: boolean = false;
   @State items: Media[] = [];
-  @State results: Media[] = [];
+  @State @Watch('onPresentationChanged') results: Media[] = [];
   @State ready: boolean = false;
   @State @Watch('onRecoveryGateChanged') saving: boolean = false;
   @State searching: boolean = false;
   @State libraryStatus: string = '';
   @State searchStatus: string = '';
   private mediaStore?: MediaStore;
-  @State mediaRecords: MediaRecord[] = [];
+  @State @Watch('onPresentationChanged') mediaRecords: MediaRecord[] = [];
   @State migrationStatus: string = '';
   @State mediaPreview?: MediaPreview = undefined;
   @State mediaPreviewStatus: string = '';
@@ -232,6 +246,7 @@ struct Index {
       this.settings = new ClientSettings(context);
       this.clientId = this.settings.load();
       this.mediaMode = normalizeMode(this.settings.loadMode());
+      this.presentationLanguage = this.settings.loadLanguage();
       this.progressPrefs = this.settings.loadProgress();
       this.progressDaysInput = this.progressPrefs.days.toString();
       this.nextFilter = effectiveProgressFilter(this.progressPrefs);
@@ -248,10 +263,13 @@ struct Index {
     }
     this.initializeMedia(context);
     this.initializeEpisodes(context);
+    this.initializePresentation(context);
   }
 
   onPageShow(): void {
     this.pageVisible = true;
+    this.presentationBlocked = false;
+    this.requestPresentation();
     this.startNetworkListener();
     if (this.backupBusy) { return; }
     this.requestMediaRecovery();
@@ -264,6 +282,8 @@ struct Index {
 
   onPageHide(): void {
     this.pageVisible = false;
+    this.presentationPending = false;
+    this.presentationEpoch++;
     this.recoveryPending = false;
     this.mediaRecoveryPending = false;
     this.titleQuickPending = false;
@@ -273,6 +293,8 @@ struct Index {
 
   aboutToDisappear(): void {
     this.pageVisible = false;
+    this.presentationPending = false;
+    this.presentationEpoch++;
     this.recoveryPending = false;
     this.mediaRecoveryPending = false;
     this.titleQuickPending = false;
@@ -342,6 +364,8 @@ struct Index {
   // A busy auth/DB/sync operation no longer drops the network-resume event.
   // Coalesce to a single pending event, not a periodic retry loop.
   private onObservationAuthChanged(): void {
+    this.presentationEpoch++;
+    this.presentationBlocked = false;
     this.progressFlags = [];
     this.progressFlagScope = '';
     this.progressMenuId = '';
@@ -697,9 +721,9 @@ struct Index {
         Text('待播或播出日期未确认的分集暂不可标记。').fontSize(12).width('100%')
         ForEach(this.extraSchedule().slice((this.schedulePage - 1) * this.collectionPageSize,
           this.schedulePage * this.collectionPageSize), (episode: ScheduledEpisode) => {
-          Text('S' + episode.season + 'E' + episode.number + ' · ' + episode.title +
+          Text('S' + episode.season + 'E' + episode.number + ' · ' + (this.selectedMedia ? this.displayEpisode(this.selectedMedia, episode.season, episode.id, episode.title) : episode.title) +
             ' · ' + scheduleLabel(episode, Date.now())).fontSize(13).width('100%')
-        }, (episode: ScheduledEpisode) => episode.id.toString())
+        }, (episode: ScheduledEpisode) => episode.id.toString() + ':' + (this.selectedMedia ? this.displayEpisode(this.selectedMedia, episode.season, episode.id, episode.title) : episode.title))
         if (this.extraSchedule().length > this.collectionPageSize) {
           Row({ space: 8 }) {
             Button('上一页').layoutWeight(1).enabled(this.schedulePage > 1).onClick(() => { this.schedulePage--; })
@@ -767,15 +791,15 @@ struct Index {
                   Row({ space: 8 }) {
                     Column({ space: 3 }) {
                       Text('第 ' + entry.episode.number + ' 集').fontSize(14).width('100%')
-                      if (entry.episode.title) {
-                        Text(entry.episode.title).fontSize(12).maxLines(2).width('100%')
+                      if (this.displayEpisode(item, season.number, entry.episode.id, entry.episode.title)) {
+                        Text(this.displayEpisode(item, season.number, entry.episode.id, entry.episode.title)).fontSize(12).maxLines(2).width('100%')
                           .fontColor($r('app.color.showly_secondary'))
                       }
                     }.layoutWeight(1)
                     Button(entry.watched ? '撤销已看' : '标记已看').fontSize(12).enabled(this.effectiveEditable && !this.cloudBusy && !this.localCatalogNeedsVerification && !this.localBusy && !this.syncBusy)
                       .onClick(() => { this.markLocal(item, [entry.episode.id], !entry.watched); })
                   }.width('100%')
-                }, (entry: LocalEpisodeState) => entry.episode.id + ':' + entry.watched)
+                }, (entry: LocalEpisodeState) => entry.episode.id + ':' + entry.watched + ':' + this.displayEpisode(item, season.number, entry.episode.id, entry.episode.title))
               }
             }.width('100%').padding(10).borderRadius(10).backgroundColor($r('app.color.showly_surface'))
           }, (season: LocalSeasonState) => season.number + ':' + season.completed)
@@ -783,6 +807,206 @@ struct Index {
         if (this.extraSchedule().length > 0) { this.scheduleView() }
       }
     }.width('100%')
+  }
+
+  private async initializePresentation(context: common.UIAbilityContext): Promise<void> {
+    try {
+      this.presentation = await PresentationRepository.open(context);
+      this.publishPresentation();
+      this.requestPresentation();
+    } catch (error) { this.presentationStatus = '影视资料缓存暂不可用，仍可管理观看记录。'; }
+  }
+
+  private publishPresentation(): void {
+    if (!this.presentation) { return; }
+    const revision = this.presentation.revision();
+    if (revision === this.presentationPublished) { return; }
+    this.presentationPublished = revision;
+    this.presentationTitles = this.presentation.titleRows();
+    this.presentationSeasons = this.presentation.seasonRows();
+    // A localized sort or query can reveal a different page. One more pass
+    // only after real cache changes converges to the newly visible artwork.
+    if (this.presentationRunning) { this.presentationPending = true; }
+  }
+
+  private displayTitle(item: Media): string {
+    return localizedTitle(item, this.presentationTitles, this.presentationLanguage);
+  }
+
+  private displayLabel(item: Media): string {
+    const title = this.displayTitle(item);
+    const year = item.year > 0 ? ' (' + item.year + ')' : '';
+    const kind = item.kind === 'movie' ? '电影' : item.kind === 'show' ? '剧集' : '手动';
+    return title + year + ' · ' + kind;
+  }
+
+  private displayEpisode(item: Media, season: number, id: number, original: string): string {
+    return localizedEpisode(item.id, season, id, original, this.presentationSeasons, this.presentationLanguage);
+  }
+
+  private displayOverview(item: Media, original: string): string {
+    return this.presentationLanguage === 'zh' ?
+      this.presentationTitles.find((row: TitlePresentation) => row.id === item.id)?.text.overview || original : original;
+  }
+
+  private artwork(item: Media): string {
+    return this.presentationTitles.find((row: TitlePresentation) => row.id === item.id)?.posterUri ?? '';
+  }
+
+  private matchesMedia(item: Media, query: string): boolean {
+    return matchesText(query, item.title, this.displayTitle(item));
+  }
+
+  private onPresentationChanged(): void {
+    const route = this.clientId + ':' + this.tab + ':' + this.mediaMode + ':' + this.progressMode + ':' + (this.selectedMedia?.id ?? '');
+    if (route !== this.presentationRoute) {
+      this.presentationRoute = route;
+      this.presentationEpoch++;
+      this.presentationBlocked = false;
+      this.presentationStatus = '';
+    }
+    this.requestPresentation();
+  }
+
+  private requestPresentation(): void {
+    if (!this.pageVisible || !this.presentation || this.presentationBlocked) { return; }
+    this.presentationPending = true;
+    if (!this.presentationRunning) { this.loadPresentation(); }
+  }
+
+  private addPresentationTask(tasks: PresentationTask[], item: Media, artwork: boolean, season: number = 0,
+    urls: string[] = []): void {
+    if (!canReadDetails(item)) { return; }
+    const found = tasks.find((task: PresentationTask) => task.media.id === item.id && task.season === season);
+    if (found) {
+      found.artwork = found.artwork || artwork;
+      if (!found.posterUrls.length && urls.length) { found.posterUrls = urls; }
+      return;
+    }
+    tasks.push({ media: item, artwork: artwork, season: season, posterUrls: urls });
+  }
+
+  private presentationTasks(): PresentationTask[] {
+    const tasks: PresentationTask[] = [];
+    const detail = this.selectedMedia;
+    if (detail) {
+      this.addPresentationTask(tasks, detail, true, this.localSeason > 0 ? this.localSeason : 0, this.detail?.posterUrls ?? []);
+      if (this.fullSchedule && detail.kind === 'show') {
+        for (const episode of this.extraSchedule().slice((this.schedulePage - 1) * this.collectionPageSize, this.schedulePage * this.collectionPageSize)) {
+          this.addPresentationTask(tasks, detail, false, episode.season);
+        }
+      }
+    } else if (this.tab === 'discover') {
+      for (const item of this.discoverItems) { this.addPresentationTask(tasks, item.media, true, 0, item.posterUrls); }
+    } else if (this.tab === 'search') {
+      for (const item of this.results) { this.addPresentationTask(tasks, item, true); }
+    } else if (this.tab === 'library') {
+      for (const row of this.collectionSlice()) { this.addPresentationTask(tasks, row.media, true); }
+      // A Chinese query must also check translations of candidates not yet visible.
+      if (this.collectionQuery.trim() && this.presentationLanguage === 'zh') {
+        for (const row of collectionRows(this.personalLibrary(), this.mediaMode, this.collectionFilter, this.collectionStatusFilter)) {
+          this.addPresentationTask(tasks, row.media, false);
+        }
+      }
+    } else if (this.tab === 'progress' && this.progressMode === 'next' && this.mediaMode === 'show') {
+      for (const entry of this.nextSlice()) {
+        if (entry.row) { this.addPresentationTask(tasks, entry.row.media, true, entry.row.episode.season); }
+      }
+      if (this.presentationLanguage === 'zh' && (this.nextQuery.trim() || this.progressPrefs.sort === 'title')) {
+        for (const row of this.progressData('')) {
+          this.addPresentationTask(tasks, row.media, false, row.episode.season);
+        }
+      }
+    } else if (this.tab === 'progress' && this.progressMode === 'next' && this.mediaMode === 'movie') {
+      for (const row of this.movieProgressRows().slice((this.movieProgressPage - 1) * this.collectionPageSize,
+        this.movieProgressPage * this.collectionPageSize)) { this.addPresentationTask(tasks, row.media, true); }
+      if (this.presentationLanguage === 'zh') {
+        for (const row of this.movieProgressRows('')) { this.addPresentationTask(tasks, row.media, false); }
+      }
+    } else if (this.tab === 'progress' && this.progressMode === 'calendar') {
+      if (this.mediaMode === 'show') {
+        for (const row of this.calendarSlice()) { this.addPresentationTask(tasks, row.media, true, row.season); }
+      } else {
+        for (const row of this.movieSlice()) { this.addPresentationTask(tasks, row.movie.media, true); }
+        if (this.movieCalendarQuery.trim() && this.presentationLanguage === 'zh') {
+          for (const row of this.movieRows(this.movieCalendarMode, '')) { this.addPresentationTask(tasks, row.media, false); }
+        }
+      }
+    }
+    return tasks;
+  }
+
+  private async loadPresentation(): Promise<void> {
+    const repo = this.presentation;
+    if (!repo || this.presentationRunning) { return; }
+    // Let state setters finish before collecting current-page tasks.
+    await Promise.resolve();
+    if (this.presentationRunning || !this.pageVisible || this.presentationBlocked) { return; }
+    this.presentationRunning = true;
+    try {
+      while (this.presentationPending && this.pageVisible && !this.presentationBlocked) {
+        this.presentationPending = false;
+        const client = this.clientId;
+        const language = this.presentationLanguage;
+        const tab = this.tab;
+        const mode = this.mediaMode;
+        const progress = this.progressMode;
+        const selected = this.selectedMedia?.id ?? '';
+        const epoch = this.presentationEpoch;
+        const current = (): boolean => this.pageVisible && this.presentationEpoch === epoch &&
+          this.clientId === client && this.presentationLanguage === language && this.tab === tab &&
+          this.mediaMode === mode && this.progressMode === progress && (this.selectedMedia?.id ?? '') === selected;
+        for (const task of this.presentationTasks()) {
+          if (!current()) { break; }
+          try {
+            await repo.title(task.media, client, language, task.artwork, task.posterUrls);
+            if (current()) { this.publishPresentation(); }
+            if (!current()) { break; }
+            if (task.season > 0) {
+              await repo.season(task.media, task.season, client, language);
+              if (current()) { this.publishPresentation(); }
+            }
+          } catch (error) {
+            this.publishPresentation();
+            if (current()) {
+              this.presentationStatus = '部分海报或译名暂不可用；下拉刷新可重试。';
+              this.presentationBlocked = true;
+            }
+            break;
+          }
+        }
+      }
+    } finally { this.presentationRunning = false; }
+  }
+
+  private async changePresentationLanguage(language: string): Promise<void> {
+    if (!this.settings || this.languageBusy || this.presentationLanguage === language) { return; }
+    this.languageBusy = true;
+    try {
+      await this.settings.saveLanguage(language);
+      this.presentationLanguage = language;
+      this.presentationEpoch++;
+      this.presentationBlocked = false;
+      this.presentationStatus = '';
+      this.nextPage = 1;
+      this.collectionPage = 1;
+      this.movieProgressPage = 1;
+      this.calendarPage = 1;
+      this.requestPresentation();
+    } catch (error) { this.presentationStatus = '影视资料语言保存失败。'; }
+    finally { this.languageBusy = false; }
+  }
+
+  @Builder
+  posterImage(item: Media, width: number, height: number) {
+    if (this.artwork(item)) {
+      Image(this.artwork(item)).width(width).height(height).objectFit(ImageFit.Cover).borderRadius(6)
+    } else {
+      Column() {
+        Text('海报').fontSize(11).fontColor($r('app.color.showly_secondary'))
+      }.width(width).height(height).justifyContent(FlexAlign.Center).borderRadius(6)
+        .backgroundColor($r('app.color.showly_placeholder'))
+    }
   }
 
   private context(): common.UIAbilityContext {
@@ -2523,7 +2747,18 @@ struct Index {
     this.results = [];
     this.searchStatus = '搜索中…';
     try {
-      this.results = await searchTrakt(this.title.trim(), this.clientId);
+      const client = this.clientId;
+      const query = this.title.trim();
+      const rows = await searchTrakt(query, client);
+      if (this.clientId !== client || this.title.trim() !== query) { return; }
+      const ids: Set<string> = new Set<string>(rows.map((item: Media) => item.id));
+      for (const row of this.personalLibrary()) {
+        if (isTraktMedia(row.media) && !ids.has(row.media.id) && this.matchesMedia(row.media, query)) {
+          rows.push(row.media);
+          ids.add(row.media.id);
+        }
+      }
+      this.results = rows;
       this.searchStatus = this.results.length === 0 ? '没有搜索结果' : '搜索完成';
     } catch (error) {
       this.searchStatus = '搜索失败：请检查网络、Client ID 或 Trakt API 权限与限额。';
@@ -2557,35 +2792,8 @@ struct Index {
       this.discoverItems = result.items;
       this.discoverPage = result.page;
       this.discoverPages = result.pages;
-      this.discoverStatus = result.items.length === 0 ? '没有影视结果' : '正在加载本页海报…';
-      const dir = this.context().cacheDir;
-      // The list already carries artwork: no per-title summary API fan-out.
-      // Download one image at a time, only for the requested page.
-      let missing = 0;
-      for (const item of result.items) {
-        if (revision !== this.discoverRevision || clientId !== this.clientId || this.tab !== 'discover') {
-          return;
-        }
-        let uri = '';
-        try {
-          const poster = await cachePoster(dir, item.media, item.posterUrls);
-          uri = poster.uri;
-        } catch (error) {
-          // One missing image must not remove the media card.
-        }
-        if (revision !== this.discoverRevision || clientId !== this.clientId) {
-          return;
-        }
-        if (!uri) {
-          missing++;
-        }
-        const loaded: DiscoverItem = { media: item.media, posterUrls: item.posterUrls,
-          posterUri: uri, rating: item.rating };
-        this.discoverItems = this.discoverItems.map((old: DiscoverItem) =>
-          old.media.id === item.media.id ? loaded : old);
-      }
-      this.discoverStatus = result.items.length === 0 ? '没有影视结果' :
-        (missing > 0 ? '已加载本页；' + missing + ' 张海报暂不可用' : '已加载本页海报');
+      this.discoverStatus = result.items.length === 0 ? '没有影视结果' : '榜单已更新';
+      this.requestPresentation();
     } catch (error) {
       if (revision === this.discoverRevision) {
         this.discoverStatus = '榜单读取失败，请检查网络、API 权限或调用限额后重试。';
@@ -2609,8 +2817,8 @@ struct Index {
   @Builder
   discoverCard(item: DiscoverItem) {
     Column({ space: 6 }) {
-      if (item.posterUri) {
-        Image(item.posterUri).width('100%').aspectRatio(0.667)
+      if (this.artwork(item.media)) {
+        Image(this.artwork(item.media)).width('100%').aspectRatio(0.667)
           .objectFit(ImageFit.Cover).borderRadius(10)
       } else {
         Column() {
@@ -2618,7 +2826,7 @@ struct Index {
         }.width('100%').aspectRatio(0.667)
           .justifyContent(FlexAlign.Center).backgroundColor($r('app.color.showly_placeholder')).borderRadius(10)
       }
-      Text(item.media.title).fontSize(15).fontWeight(FontWeight.Medium)
+      Text(this.displayTitle(item.media)).fontSize(15).fontWeight(FontWeight.Medium)
         .maxLines(2).textOverflow({ overflow: TextOverflow.Ellipsis }).width('100%')
       Text((item.media.year > 0 ? item.media.year.toString() : '年份未知') +
         (item.rating > 0 ? ' · ★ ' + item.rating.toFixed(1) : ''))
@@ -2648,7 +2856,7 @@ struct Index {
         Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.SpaceBetween }) {
           ForEach(this.discoverItems, (item: DiscoverItem) => {
             this.discoverCard(item)
-          }, (item: DiscoverItem) => item.media.id + ':' + item.posterUri)
+          }, (item: DiscoverItem) => item.media.id + ':' + this.artwork(item.media) + ':' + this.displayTitle(item.media))
         }.width('100%')
         Row({ space: 8 }) {
           Button('上一页').layoutWeight(1)
@@ -2820,13 +3028,27 @@ struct Index {
     finally { this.progressPrefsBusy = false; this.reloadProgressFlags(); }
   }
 
-  private nextFiltered(): ProgressRow[] {
+  private progressData(query: string): ProgressRow[] {
     if (this.signedIn && !this.activeCloud()) { return []; }
     const sources: ProgressSource[] = [];
-    for (const row of this.nextShows) { if (row.source) { sources.push(row.source); } }
+    for (const row of this.nextShows) {
+      const source = row.source;
+      if (!source) { continue; }
+      const names: Map<number, string> = new Map<number, string>();
+      if (this.presentationLanguage === 'zh') {
+        for (const item of source.episodes) {
+          names.set(item.episode.id, this.displayEpisode(source.media, item.episode.season, item.episode.id, item.episode.title));
+        }
+      }
+      sources.push({ media: source.media, episodes: source.episodes, recentAt: source.recentAt,
+        rating: source.rating, randomOrder: source.randomOrder,
+        localizedTitle: this.presentationLanguage === 'zh' ? this.displayTitle(source.media) : undefined,
+        episodeNames: names });
+    }
     const flags = this.progressFlagScope === this.currentProgressScope() ? this.progressFlags : [];
-    return progressRows(sources, this.progressPrefs, flags, Date.now(), this.nextFilter, this.nextQuery);
+    return progressRows(sources, this.progressPrefs, flags, Date.now(), this.nextFilter, query);
   }
+  private nextFiltered(): ProgressRow[] { return this.progressData(this.nextQuery); }
 
   private nextEntries(): ProgressEntry[] {
     return progressEntries(progressSections(this.nextFiltered(), this.progressPrefs));
@@ -3116,10 +3338,13 @@ struct Index {
   @Builder
   nextProgressCard(row: ProgressRow) {
     Column({ space: 6 }) {
-      Text(row.media.title).fontSize(17).fontWeight(FontWeight.Medium).width('100%')
+      Row({ space: 8 }) {
+        this.posterImage(row.media, 74, 111)
+        Column({ space: 6 }) {
+      Text(this.displayTitle(row.media)).fontSize(17).fontWeight(FontWeight.Medium).width('100%')
       Text((row.pinned ? '置顶 · ' : row.held ? '暂缓 · ' : '') +
         (row.fresh ? '新集 · ' : '') + 'S' + row.episode.season + 'E' + row.episode.number +
-        (row.episode.title ? ' · ' + row.episode.title : '')).fontSize(14).width('100%')
+        (this.displayEpisode(row.media, row.episode.season, row.episode.id, row.episode.title) ? ' · ' + this.displayEpisode(row.media, row.episode.season, row.episode.id, row.episode.title) : '')).fontSize(14).width('100%')
       Text((row.upcoming ? '待播 · ' : '播出 · ') + row.episode.firstAired.substring(0,10)).fontSize(12).width('100%')
       Text('已看 ' + row.completed + ' / ' + row.total + ' 集 · 剩余 ' + (row.total - row.completed) + ' 集')
         .fontSize(12).width('100%')
@@ -3127,6 +3352,8 @@ struct Index {
         Progress({ value: row.completed, total: row.total, type: ProgressType.Linear }).width('100%').color($r('app.color.showly_accent'))
       }
       if (row.dateUnknown) { Text('部分观看时间未知，按可验证记录推荐。').fontSize(12).width('100%') }
+        }.layoutWeight(1)
+      }.width('100%')
       Row({ space: 6 }) {
         Button('详情').layoutWeight(1).fontSize(12).enabled(!this.detailBusy)
           .onClick(() => { this.openDetail(row.media, false, row.episode.season); })
@@ -3179,7 +3406,7 @@ struct Index {
         }
       }, (entry: ProgressEntry) => entry.key + ':' + entry.collapsed + ':' + entry.count +
         ':' + (entry.row?.episode.id ?? 0) + ':' + (entry.row?.completed ?? 0) + ':' + (entry.row?.total ?? 0) +
-        ':' + entry.group + ':' + (entry.row?.fresh ?? false))
+        ':' + entry.group + ':' + (entry.row?.fresh ?? false) + ':' + (entry.row ? this.artwork(entry.row.media) + ':' + this.displayTitle(entry.row.media) + ':' + this.displayEpisode(entry.row.media, entry.row.episode.season, entry.row.episode.id, entry.row.episode.title) : ''))
       Row({ space: 8 }) {
         Button('上一页').layoutWeight(1).enabled(this.nextPage > 1).onClick(() => { this.nextPage--; })
         Text(this.nextPage + ' / ' + this.nextPages()).fontSize(13)
@@ -3203,7 +3430,7 @@ struct Index {
       rows.push({ media: row.media, released: found?.released ?? '', cloudWatched: row.watched,
         cloudWatchlist: row.queued, localOnly: false });
     }
-    return filterMovies(rows, mode, query, new Date());
+    return filterMovies(rows, mode, '', new Date()).filter((row: PersonalMovie) => this.matchesMedia(row.media, query) || row.released.includes(query.trim()));
   }
 
   private moviePages(): number {
@@ -3276,7 +3503,10 @@ struct Index {
               Column({ space: 6 }) {
                 Text(row.movie.released || '上映日期待确认').fontSize(13)
                   .fontColor($r('app.color.showly_secondary')).width('100%')
-                Text(row.movie.media.title).fontSize(17).fontWeight(FontWeight.Medium).width('100%')
+                Row({ space: 8 }) {
+                  this.posterImage(row.movie.media, 54, 81)
+                  Text(this.displayTitle(row.movie.media)).fontSize(17).fontWeight(FontWeight.Medium).layoutWeight(1)
+                }.width('100%')
                 Text(row.movie.cloudWatched && row.movie.cloudWatchlist ?
                   '已看 · 待看' : row.movie.cloudWatched ? '已看' : '待看')
                   .fontSize(12).width('100%')
@@ -3290,7 +3520,7 @@ struct Index {
                 }.width('100%')
               }.padding(12).width('100%').borderRadius(10).backgroundColor($r('app.color.showly_surface'))
             }.width('100%')
-          }, (row: MovieCalendarItem) => row.movie.media.id + ':' + row.movie.released + ':' + row.group + ':' + row.heading)
+          }, (row: MovieCalendarItem) => row.movie.media.id + ':' + row.movie.released + ':' + row.group + ':' + row.heading + ':' + this.artwork(row.movie.media) + ':' + this.displayTitle(row.movie.media))
           Row({ space: 8 }) {
             Button('上一页').layoutWeight(1).enabled(this.calendarPage > 1).onClick(() => { this.calendarPage--; })
             Text(this.calendarPage + ' / ' + this.moviePages()).fontSize(13)
@@ -3331,15 +3561,18 @@ struct Index {
               Column({ space: 6 }) {
                 Text(row.day + (row.time ? ' · ' + row.time : ' · 上映日期')).fontSize(13)
                   .fontColor($r('app.color.showly_secondary')).width('100%')
-                Text(row.media.title).fontSize(17).fontWeight(FontWeight.Medium).width('100%')
+                Row({ space: 8 }) {
+                  this.posterImage(row.media, 54, 81)
+                  Text(this.displayTitle(row.media)).fontSize(17).fontWeight(FontWeight.Medium).layoutWeight(1)
+                }.width('100%')
                 if (row.media.kind === 'show') {
-                  Text('S' + row.season + 'E' + row.number + (row.episodeTitle ? ' · ' + row.episodeTitle : ''))
+                  Text('S' + row.season + 'E' + row.number + (this.displayEpisode(row.media, row.season, Number(row.key.substring(8)), row.episodeTitle) ? ' · ' + this.displayEpisode(row.media, row.season, Number(row.key.substring(8)), row.episodeTitle) : ''))
                     .fontSize(14).width('100%')
                 }
                 Button('查看详情').fontSize(12).enabled(!this.detailBusy && !this.localBusy && !this.syncBusy)
                   .onClick(() => { this.openDetail(row.media, false, row.season); })
               }.padding(12).width('100%').borderRadius(10).backgroundColor($r('app.color.showly_surface'))
-            }, (row: CalendarEntry) => row.key)
+            }, (row: CalendarEntry) => row.key + ':' + this.artwork(row.media) + ':' + this.displayTitle(row.media) + ':' + this.displayEpisode(row.media, row.season, Number(row.key.substring(8)), row.episodeTitle))
             Row({ space: 8 }) {
               Button('上一页').layoutWeight(1).enabled(this.calendarPage > 1).onClick(() => { this.calendarPage--; })
               Text(this.calendarPage + ' / ' + this.calendarPages()).fontSize(13)
@@ -3353,13 +3586,12 @@ struct Index {
     }.width('100%')
   }
 
-  private movieProgressRows(): PersonalLibraryRow[] {
+  private movieProgressRows(query: string = this.movieProgressQuery): PersonalLibraryRow[] {
     const dates: MovieDate[] = this.movieCalendarCurrent() ? (this.movieCalendarData?.movies ?? [])
       .map((row: PersonalMovie): MovieDate => ({ id: row.media.id, released: row.released })) : [];
-    const query = this.movieProgressQuery.trim().toLowerCase();
     return releasedWatchlist(this.personalLibrary(), dates, localDay(new Date()))
-      .filter((row: PersonalLibraryRow) => !query || row.media.title.toLowerCase().includes(query))
-      .sort((a: PersonalLibraryRow, b: PersonalLibraryRow) => a.media.title.localeCompare(b.media.title));
+      .filter((row: PersonalLibraryRow) => this.matchesMedia(row.media, query))
+      .sort((a: PersonalLibraryRow, b: PersonalLibraryRow) => compareTitles(this.displayTitle(a.media), this.displayTitle(b.media), this.presentationLanguage));
   }
 
   @Builder
@@ -3386,12 +3618,13 @@ struct Index {
           ForEach(this.movieProgressRows().slice((this.movieProgressPage - 1) * this.collectionPageSize,
             this.movieProgressPage * this.collectionPageSize), (row: PersonalLibraryRow) => {
             Row({ space: 8 }) {
-              Text(row.media.title).layoutWeight(1).onClick(() => { this.openDetail(row.media); })
+              this.posterImage(row.media, 54, 81)
+              Text(this.displayTitle(row.media)).layoutWeight(1).onClick(() => { this.openDetail(row.media); })
               Button('标记已看').fontSize(12)
                 .enabled(this.canEditLibrary() && this.ready && !this.saving && !this.cloudBusy && !this.syncBusy)
                 .onClick(() => { this.changeMediaIntent(row.media, 'movie', 'yes'); })
             }.width('100%').padding(10).borderRadius(10).backgroundColor($r('app.color.showly_surface'))
-          }, (row: PersonalLibraryRow) => row.media.id)
+          }, (row: PersonalLibraryRow) => row.media.id + ':' + this.artwork(row.media) + ':' + this.displayTitle(row.media))
           Row({ space: 8 }) {
             Button('上一页').layoutWeight(1).enabled(this.movieProgressPage > 1).onClick(() => { this.movieProgressPage--; })
             Text(this.movieProgressPage + ' / ' + Math.max(1, Math.ceil(this.movieProgressRows().length / this.collectionPageSize))).fontSize(13)
@@ -3485,6 +3718,9 @@ struct Index {
   }
 
   private async refreshPage(): Promise<void> {
+    this.presentation?.retryArtwork();
+    this.presentationBlocked = false;
+    this.presentationStatus = '';
     try {
       if (this.selectedMedia) {
         await this.openDetail(this.selectedMedia, true);
@@ -3507,6 +3743,7 @@ struct Index {
       }
     } finally {
       this.refreshing = false;
+      this.requestPresentation();
     }
   }
 
@@ -3533,9 +3770,7 @@ struct Index {
   }
 
   private collectionSource(): PersonalLibraryRow[] {
-    const query = this.collectionQuery.trim().toLowerCase();
-    return this.personalLibrary().filter((row: PersonalLibraryRow) =>
-      !query || row.media.title.toLowerCase().includes(query));
+    return this.personalLibrary().filter((row: PersonalLibraryRow) => this.matchesMedia(row.media, this.collectionQuery));
   }
 
   private collectionItems(): PersonalLibraryRow[] {
@@ -3593,50 +3828,7 @@ struct Index {
   }
 
   private async loadCollectionPosters(): Promise<void> {
-    if (!this.clientId || this.collectionBusy || this.setupBusy || this.collectionFilter === 'hidden' || this.collectionFilter === 'lists') {
-      return;
-    }
-    const revision = ++this.collectionRevision;
-    const clientId = this.clientId;
-    const items = this.collectionSlice().map((row: PersonalLibraryRow): Media => row.media);
-    this.collectionBusy = true;
-    this.collectionStatus = '正在读取本页海报…';
-    this.collectionCards = items.map((media: Media): DiscoverItem => {
-      return { media: media, posterUri: '', posterUrls: [], rating: 0 };
-    });
-    try {
-      let unavailable = 0;
-      for (const item of items) {
-        if (revision !== this.collectionRevision || this.tab !== 'library' || clientId !== this.clientId) {
-          return;
-        }
-        let uri = '';
-        let rating = 0;
-        if (canReadDetails(item)) {
-          try {
-            const detail = await readDetails(item, clientId);
-            if (revision !== this.collectionRevision || clientId !== this.clientId) {
-              return;
-            }
-            rating = detail.rating;
-            const poster = await cachePoster(this.context().cacheDir, item, detail.posterUrls);
-            uri = poster.uri;
-          } catch (error) {
-            // Keep the title usable even when metadata or artwork fails.
-          }
-        }
-        if (revision !== this.collectionRevision || clientId !== this.clientId) {
-          return;
-        }
-        if (!uri) { unavailable++; }
-        const card: DiscoverItem = { media: item, posterUri: uri, posterUrls: [], rating: rating };
-        this.collectionCards = this.collectionCards.map((old: DiscoverItem) =>
-          old.media.id === item.id ? card : old);
-      }
-      this.collectionStatus = unavailable > 0 ? '本页加载完成；' + unavailable + ' 张海报不可用' : '本页海报已加载';
-    } finally {
-      if (revision === this.collectionRevision) { this.collectionBusy = false; }
-    }
+    this.requestPresentation();
   }
 
   @Builder
@@ -3708,7 +3900,7 @@ struct Index {
           Text(group.label).fontSize(19).fontWeight(FontWeight.Bold).width('100%')
           this.collectionGroupView(group)
         }.width('100%')
-      }, (group: CollectionGroup) => group.key + ':' + group.rows.map((row: PersonalLibraryRow) => row.media.id + ':' + businessLibraryLabel(row) + ':' + (this.collectionCards.find((card: DiscoverItem) => card.media.id === row.media.id)?.posterUri ?? '')).join(','))
+      }, (group: CollectionGroup) => group.key + ':' + group.rows.map((row: PersonalLibraryRow) => row.media.id + ':' + businessLibraryLabel(row) + ':' + this.artwork(row.media) + ':' + this.displayTitle(row.media)).join(','))
       Row({ space: 8 }) {
         Button('上一页').layoutWeight(1).enabled(!this.collectionBusy && this.collectionPage > 1)
           .onClick(() => { this.goCollectionPage(this.collectionPage - 1); })
@@ -3739,8 +3931,8 @@ struct Index {
         Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.SpaceBetween }) {
           ForEach(group.rows, (row: PersonalLibraryRow) => {
             Column({ space: 6 }) {
-              if (this.collectionCards.find((card: DiscoverItem) => card.media.id === row.media.id)?.posterUri) {
-                Image(this.collectionCards.find((card: DiscoverItem) => card.media.id === row.media.id)?.posterUri)
+              if (this.artwork(row.media)) {
+                Image(this.artwork(row.media))
                   .width('100%').aspectRatio(0.667).objectFit(ImageFit.Cover).borderRadius(10)
               } else {
                 Column() {
@@ -3748,7 +3940,7 @@ struct Index {
                 }.width('100%').aspectRatio(0.667).justifyContent(FlexAlign.Center)
                   .backgroundColor($r('app.color.showly_placeholder')).borderRadius(10)
               }
-              Text(mediaLabel(row.media)).fontSize(14).maxLines(2)
+              Text(this.displayLabel(row.media)).fontSize(14).maxLines(2)
                 .textOverflow({ overflow: TextOverflow.Ellipsis }).width('100%')
               Text(businessLibraryLabel(row)).fontSize(11).width('100%')
               this.showProgressActions(row.media)
@@ -3760,13 +3952,14 @@ struct Index {
             }.width('48%').padding({ bottom: 12 })
               .onClick(() => { this.openDetail(row.media); })
           }, (row: PersonalLibraryRow) => row.media.id + ':' + businessLibraryLabel(row) + ':' +
-            (this.collectionCards.find((card: DiscoverItem) => card.media.id === row.media.id)?.posterUri ?? ''))
+            this.artwork(row.media) + ':' + this.displayTitle(row.media))
         }.width('100%')
       } else {
         ForEach(group.rows, (row: PersonalLibraryRow) => {
           Row({ space: 8 }) {
+            this.posterImage(row.media, 54, 81)
             Column({ space: 4 }) {
-              Text(mediaLabel(row.media)).width('100%')
+              Text(this.displayLabel(row.media)).width('100%')
               Text(businessLibraryLabel(row)).fontSize(12).width('100%')
               this.showProgressActions(row.media)
             }.layoutWeight(1).onClick(() => { this.openDetail(row.media); })
@@ -3778,7 +3971,7 @@ struct Index {
             }
           }.width('100%')
         }, (row: PersonalLibraryRow) => row.media.id + ':' + businessLibraryLabel(row) + ':' +
-          (row.watched ? 'yes' : 'no'))
+          (row.watched ? 'yes' : 'no') + ':' + this.artwork(row.media) + ':' + this.displayTitle(row.media))
       }
     }.width('100%')
   }
@@ -3814,32 +4007,11 @@ struct Index {
   }
 
   private async translateDetail(item: Media): Promise<void> {
-    if (this.translationBusy || !this.clientId) { return; }
-    const revision = this.detailRevision;
-    const clientId = this.clientId;
-    const cacheKey = clientId + ':' + item.id;
-    const cached = this.translationCache.get(cacheKey);
-    if (cached) {
-      this.chineseTitle = cached.title;
-      this.chineseOverview = cached.overview;
-      this.translationStatus = cached.title || cached.overview ? '已应用可用中文翻译' : '暂无中文翻译，保留原文';
-      return;
-    }
-    this.translationBusy = true;
-    this.translationStatus = '正在读取中文译名…';
-    try {
-      const result = await readChinese(item, clientId);
-      if (revision === this.detailRevision && this.clientId === clientId) {
-        this.translationCache.set(cacheKey, result);
-        this.chineseTitle = result.title;
-        this.chineseOverview = result.overview;
-        this.translationStatus = result.title || result.overview ? '已应用可用中文翻译' : '暂无中文翻译，保留原文';
-      }
-    } catch (error) {
-      if (revision === this.detailRevision) { this.translationStatus = '中文翻译读取失败，保留原文'; }
-    } finally {
-      if (revision === this.detailRevision) { this.translationBusy = false; }
-    }
+    if (this.selectedMedia?.id !== item.id) { return; }
+    this.presentation?.retryArtwork();
+    this.presentationBlocked = false;
+    this.presentationStatus = '';
+    this.requestPresentation();
   }
 
   @Builder
@@ -3938,18 +4110,7 @@ struct Index {
       }
       this.detail = data;
       this.detailStatus = '';
-      this.translateDetail(item);
-      try {
-        const poster = await cachePoster(this.context().cacheDir, item, data.posterUrls);
-        if (revision === this.detailRevision && this.clientId === clientId) {
-          this.posterUri = poster.uri;
-          this.detailStatus = poster.status;
-        }
-      } catch (error) {
-        if (revision === this.detailRevision) {
-          this.detailStatus = '海报缓存失败，其他详情仍可查看。';
-        }
-      }
+      this.requestPresentation();
     } catch (error) {
       if (revision === this.detailRevision) {
         this.detailStatus = '详情读取失败，请检查网络或 Trakt API 权限后重试。';
@@ -4041,13 +4202,12 @@ struct Index {
   detailPage(item: Media) {
     Column({ space: 12 }) {
       Button('返回').onClick(() => { this.closeDetail(); if ((this.tab === 'library' || (this.tab === 'progress' && this.progressMode === 'next')) && !this.nextShows.length) { this.loadNextShows(); } })
-      Text(this.chineseTitle || (this.detail ? this.detail.title : item.title))
+      Text(this.displayTitle(item))
         .fontSize(26).fontWeight(FontWeight.Bold).width('100%')
-      if (this.posterUri) {
-        Image(this.posterUri)
+      if (this.artwork(item)) {
+        Image(this.artwork(item))
           .width(180).height(270).objectFit(ImageFit.Contain).borderRadius(10)
           .onError(() => {
-            this.posterUri = '';
             this.detailStatus = '海报已缓存，但鸿蒙 Image 组件解码或读取失败';
           })
       } else {
@@ -4073,10 +4233,10 @@ struct Index {
           Text('已播 ' + this.detail.airedEpisodes + ' 集').fontSize(14)
         }
         Text('剧情简介').fontSize(20).fontWeight(FontWeight.Medium).width('100%')
-        Text(this.chineseOverview || this.detail.overview || '暂无简介').fontSize(15).width('100%')
-        Button('重试中文资料').enabled(!this.translationBusy)
-          .onClick(() => { this.translateDetail(item); })
-        Text(this.translationStatus).fontSize(12)
+        Text(this.displayOverview(item, this.detail.overview) || '暂无简介').fontSize(15).width('100%')
+        if (this.presentationLanguage === 'zh') {
+          Button('重试中文资料').onClick(() => { this.translateDetail(item); })
+        }
       }
       if (isTraktMedia(item)) { this.mediaStateView(item) }
       if (item.kind === 'show') {
@@ -4192,6 +4352,7 @@ struct Index {
       Refresh({ refreshing: $$this.refreshing }) {
         Scroll() {
         Column({ space: 14 }) {
+          if (this.presentationStatus) { Text(this.presentationStatus).fontSize(12).width('100%') }
           if (this.selectedMedia) {
             this.detailPage(this.selectedMedia)
           } else if (this.tab === 'progress') {
@@ -4220,7 +4381,8 @@ struct Index {
         Text(this.searchStatus).fontSize(13)
         ForEach(this.results, (item: Media) => {
           Row({ space: 8 }) {
-            Text(mediaLabel(item)).layoutWeight(1)
+            this.posterImage(item, 54, 81)
+            Text(this.displayLabel(item)).layoutWeight(1)
               .onClick(() => { this.openDetail(item); })
             Button('详情').fontSize(12).enabled(!this.detailBusy && !this.setupBusy)
               .onClick(() => { this.openDetail(item); })
@@ -4228,11 +4390,18 @@ struct Index {
               .enabled(this.ready && !this.saving && !this.cloudBusy && this.canEditLibrary() && !this.isInLibrary(item))
               .onClick(() => { this.changeMediaIntent(item, 'watchlist', 'yes'); })
           }.width('100%')
-        }, (item: Media) => item.id)
+        }, (item: Media) => item.id + ':' + this.artwork(item) + ':' + this.displayTitle(item))
         Divider()
 
           } else {
             Text('账户与设置').fontSize(23).fontWeight(FontWeight.Bold)
+            Text('影视资料语言').fontSize(19).fontWeight(FontWeight.Medium).width('100%')
+            Row({ space: 6 }) {
+              Button(this.presentationLanguage === 'zh' ? '简体中文 ✓' : '简体中文').layoutWeight(1).enabled(!this.languageBusy)
+                .onClick(() => { this.changePresentationLanguage('zh'); })
+              Button(this.presentationLanguage === 'original' ? '原文 ✓' : '原文').layoutWeight(1).enabled(!this.languageBusy)
+                .onClick(() => { this.changePresentationLanguage('original'); })
+            }.width('100%')
             Text('外观').fontSize(19).fontWeight(FontWeight.Medium).width('100%')
             Row({ space: 8 }) {
               this.themeButton('跟随系统', 'system')

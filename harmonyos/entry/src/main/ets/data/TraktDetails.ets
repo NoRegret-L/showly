@@ -2,6 +2,7 @@ import { http } from '@kit.NetworkKit';
 import { fileIo, fileUri } from '@kit.CoreFileKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { Media } from '../model/Media';
+import { imageFormat } from '../model/MediaPresentation';
 
 interface TraktIds {
   trakt: number;
@@ -150,6 +151,18 @@ function networkError(code: number): string {
 
 // Only Trakt-owned HTTPS artwork hosts are accepted. Never attach API credentials.
 // Download into local cache first; no hotlinking, proxy, or TLS verification bypass.
+export function cachedPoster(cacheDir: string, item: Media, candidates: string[]): string {
+  if (!canReadDetails(item)) { return ''; }
+  for (const candidate of candidates) {
+    const url = normalizePoster(candidate);
+    if (!url) { continue; }
+    const imagePath = url.split('?')[0];
+    const filename = imagePath.substring(imagePath.lastIndexOf('/') + 1);
+    const path = cacheDir + '/showly_poster_' + item.kind + '_' + item.id.substring(item.kind.length + 1) + '_' + filename;
+    try { if (fileIo.accessSync(path) && fileIo.statSync(path).size > 0) { return fileUri.getUriFromPath(path); } } catch (error) {}
+  }
+  return '';
+}
 export async function cachePoster(cacheDir: string, item: Media, candidates: string[]): Promise<PosterResult> {
   if (!canReadDetails(item) || candidates.length === 0) {
     return { uri: '', status: 'Trakt API 未返回海报地址（images.poster 为空）' };
@@ -183,7 +196,7 @@ export async function cachePoster(cacheDir: string, item: Media, candidates: str
   try {
     response = await request.request(url, {
       method: http.RequestMethod.GET,
-      header: { 'User-Agent': 'Showly-HarmonyOS-Personal/0.7.0', 'Accept': 'image/webp' },
+      header: { 'User-Agent': 'Showly-HarmonyOS-Personal/0.7.0', 'Accept': 'image/webp,image/jpeg,image/png' },
       expectDataType: http.HttpDataType.ARRAY_BUFFER
     });
   } catch (error) {
@@ -200,10 +213,8 @@ export async function cachePoster(cacheDir: string, item: Media, candidates: str
   }
   const bytes = response.result;
   const signature = new Uint8Array(bytes);
-  if (signature.length < 12 || signature[0] !== 82 || signature[1] !== 73 ||
-      signature[2] !== 70 || signature[3] !== 70 || signature[8] !== 87 ||
-      signature[9] !== 69 || signature[10] !== 66 || signature[11] !== 80) {
-    return { uri: '', status: '海报 CDN 返回 HTTP 200，但内容不是有效 WebP 文件头 · ' + host };
+  if (!imageFormat(signature)) {
+    return { uri: '', status: '海报 CDN 未返回支持的图片文件头 · ' + host };
   }
   try {
     const file = fileIo.openSync(temp, fileIo.OpenMode.CREATE | fileIo.OpenMode.WRITE_ONLY | fileIo.OpenMode.TRUNC);

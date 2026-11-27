@@ -2,6 +2,7 @@ import { http } from '@kit.NetworkKit';
 import { TraktSession, traktAuth } from './TraktAuth';
 import { Media } from '../model/Media';
 import { canReadDetails } from './TraktDetails';
+import { chineseText, chineseEpisodeText, TranslationCandidate, SeasonPresentation, EpisodePresentation, validSeason } from '../model/MediaPresentation';
 
 export interface EpisodeProgress {
   number: number;
@@ -91,6 +92,7 @@ export async function readChinese(item: Media, clientId: string): Promise<Chines
       header: { 'Content-Type': 'application/json', 'trakt-api-version': '2', 'trakt-api-key': clientId },
       expectDataType: http.HttpDataType.STRING
     });
+    if (response.responseCode === 404) { return { title: '', overview: '' }; }
     if (response.responseCode !== 200 || typeof response.result !== 'string') {
       throw new Error('Translation HTTP ' + response.responseCode);
     }
@@ -98,11 +100,39 @@ export async function readChinese(item: Media, clientId: string): Promise<Chines
     if (!Array.isArray(rows)) {
       throw new Error('Invalid translations');
     }
-    const chinese = rows.filter((row: Translation) => row.language === 'zh');
-    const preferred = chinese.find((row: Translation) => row.country === 'cn') ?? chinese[0];
-    return { title: typeof preferred?.title === 'string' ? preferred.title : '',
-      overview: typeof preferred?.overview === 'string' ? preferred.overview : '' };
+    const text = chineseText(rows.map((row: Translation): TranslationCandidate => ({ title: row.title, overview: row.overview, language: row.language, country: row.country })));
+    return { title: text.title, overview: text.overview };
   } finally {
     request.destroy();
   }
+}
+
+interface SeasonTranslationIds { trakt: number; }
+interface RemoteSeasonTranslation { season: number; number: number; ids: SeasonTranslationIds; translations?: TranslationCandidate[]; }
+export async function readChineseSeason(item: Media, season: number, clientId: string): Promise<SeasonPresentation> {
+  if (!clientId || item.kind !== 'show' || !canReadDetails(item) || !Number.isSafeInteger(season) || season <= 0) {
+    throw new Error('Invalid season translation identity');
+  }
+  const request = http.createHttp();
+  try {
+    const response = await request.request('https://api.trakt.tv/shows/' + item.id.substring(5) +
+      '/seasons/' + season + '?translations=zh', {
+      method: http.RequestMethod.GET,
+      header: { 'Content-Type': 'application/json', 'trakt-api-version': '2', 'trakt-api-key': clientId },
+      expectDataType: http.HttpDataType.STRING
+    });
+    if (response.responseCode === 404) { return { showId: item.id, season: season, fetchedAt: Date.now(), episodes: [] }; }
+    if (response.responseCode !== 200 || typeof response.result !== 'string') { throw new Error('Season translation HTTP ' + response.responseCode); }
+    const rows = JSON.parse(response.result) as RemoteSeasonTranslation[];
+    if (!Array.isArray(rows)) { throw new Error('Invalid season translation response'); }
+    const episodes: EpisodePresentation[] = [];
+    for (const row of rows) {
+      if (!row || row.season !== season || !row.ids ||
+          (row.translations !== undefined && row.translations !== null && !Array.isArray(row.translations))) { throw new Error('Season translation identity mismatch'); }
+      episodes.push({ id: row.ids.trakt, number: row.number, text: chineseEpisodeText(row.translations ?? []) });
+    }
+    const result: SeasonPresentation = { showId: item.id, season: season, fetchedAt: Date.now(), episodes: episodes };
+    if (!validSeason(result)) { throw new Error('Invalid translated episode identity'); }
+    return result;
+  } finally { request.destroy(); }
 }
