@@ -4006,7 +4006,7 @@ struct Index {
           const title=this.titleIndex.get(source.media.id)?.text.title ?? '';
           if (title) { titles.push({key:source.media.id,title:title}); }
         }
-        for (const [id,title] of this.episodeNameIndex) { episodes.push({key:id,title:title}); }
+        this.episodeNameIndex.forEach((title: string,id: string): void => { episodes.push({key:id,title:title}); });
       }
       const hidden=this.currentCollectionState().hidden.map((row: HiddenEntry)=>row.media.id);
       const members=this.personalLibrary().filter((row: PersonalLibraryRow)=>row.media.kind==='show' &&

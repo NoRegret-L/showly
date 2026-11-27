@@ -102,7 +102,10 @@ const {mergeText}=require('./MediaPresentation.js');
 """,encoding="utf-8")
     subprocess.run(["node","test.cjs"],cwd=work,check=True)
 cloud=section(page,"  private async loadCloud(","  private async importCloud(")
-calendar=section(page,"  private async loadCalendar(","  private calendarRangeLabel(")
+calendar=section(page,"  private async loadCalendar(","  private async repairDeviceCalendar(")
+assert "readCalendar(" not in calendar
+assert "this.publishMovieSource(source)" in calendar and "const source=this.activeCloud()" in calendar
+assert "this.requestProjection()" in calendar and "this.requestObservation()" in calendar
 assert "movieDetails: cached.movieDetails" in cloud and "snapshot.movieDetails === undefined" in cloud
 assert "this.publishMovieSource(restored)" in cloud and "this.publishMovieSource(snapshot)" in cloud
 assert "await readSyncAccount(session)" in cloud and "await readActivity(session)" in cloud

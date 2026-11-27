@@ -98,7 +98,7 @@ export function calendarGroup(date: Date,today: Date,mode: string): string {
 }
 export function calendarJob(input: CalendarJobInput): CalendarJobOutput {
   const built=input.plan.pending.map((x: CalendarInput): CalendarBuilt=>({id:x.source.media.id,atoms:calendarAtoms(x)}));
-  const all=[...input.plan.retained];
+  const all: CalendarAtom[]=[...input.plan.retained];
   for (const row of built) { for (const atom of row.atoms) { all.push(atom); } }
   const hidden=new Set<string>(input.hidden), members=new Set<string>(input.members);
   const titles=new Map<string,string>(), episodes=new Map<string,string>();
