@@ -1,4 +1,4 @@
-import { StableDisplayOrder } from '../model/StableDisplayOrder';
+import { StableDisplayOrder, StableOrderChange } from '../model/StableDisplayOrder';
 import { PageDisplayRows } from '../model/PageDisplayRows';
 import { ProgressTitleOrder } from '../model/ProgressTitleOrder';
 import { PresentationQueues, FramePublication } from '../model/PresentationQueue';
@@ -29,7 +29,7 @@ import { TitleConsent, TitleChange, TitleIntent, titleEdit } from '../model/Titl
 import { runTitleQuick, reconcileTitleObservation } from '../data/TitleQuickSync';
 import { BackupData, RestorePlan, createBackup, exportBackup, selectBackup, planRestore, restoreBackup } from '../data/LocalBackup';
 import { MediaRecord, migrateLegacy, isTraktMedia, applyLegacyEdit, setMediaIntent, inLocalWatchlist, followShow } from '../model/MediaState';
-import { PersonalLibraryRow, LibraryShowEvidence, buildPersonalLibrary, filterPersonalLibrary, businessLibraryLabel, isPersonalMember } from '../model/PersonalLibrary';
+import { PersonalLibraryRow, LibraryShowEvidence, PersonalLibraryIndex, PersonalLibraryChange, buildPersonalLibrary, filterPersonalLibrary, businessLibraryLabel, isPersonalMember } from '../model/PersonalLibrary';
 import { MediaPreview, MediaDifference, buildMediaPreview } from '../data/TraktMediaPreview';
 import { syncSelectedMedia, reconcilePendingMedia } from '../data/TraktMediaSync';
 import { checkpointEpisodes, checkpointMedia, adoptEpisodeCloud, adoptMediaCloud } from '../data/ThreeWaySync';
@@ -84,6 +84,15 @@ interface CollectionIndexes {
   recent: Map<string,number>;
   ratings: Map<string,number>;
   movies: Map<string,PersonalMovie>;
+}
+interface PendingMediaDelta {
+  changes?:PersonalLibraryChange[];
+  movieQueryScope:string;
+  movieAllScope:string;
+  collectionScope:string;
+  now:number;
+  utc:string;
+  version:string;
 }
 class RestoreScrollFrame extends FrameCallback {
   private action: ()=>void;
@@ -140,6 +149,8 @@ struct Index {
   private hiddenIndex: Set<string> = new Set<string>();
   private flagIndex: Map<string,ProgressFlag> = new Map<string,ProgressFlag>();
   private libraryIndex: Map<string,PersonalLibraryRow> = new Map<string,PersonalLibraryRow>();
+  private personalLibraryIndex:PersonalLibraryIndex=new PersonalLibraryIndex();
+  private pendingMediaDelta?:PendingMediaDelta;
   private hiddenShowKey: string = '';
   private hiddenMovieKey: string = '';
   private showFlagKey: string = '';
@@ -420,6 +431,7 @@ struct Index {
   private searchCandidateKey: string = '';
   private searchCandidates: SearchCandidate[] = [];
   private searchTitleIndex=new SearchCandidateTitles();
+  private searchStoredIds:Set<string>=new Set<string>();
   private movieTitleOrder=new StableDisplayOrder<MovieProgressSource>((x:MovieProgressSource)=>x.row);
   private movieAllTitleOrder=new StableDisplayOrder<MovieProgressSource>((x:MovieProgressSource)=>x.row);
   private collectionTitleOrder=new StableDisplayOrder<CollectionCandidate>((x:CollectionCandidate)=>x.row);
@@ -635,7 +647,7 @@ struct Index {
     this.displayRevisions.reset();
     this.collectionIndexMemos.clear();
     this.movieMetadataMemo.clear();
-    this.libraryIndex.clear();
+    this.libraryIndex.clear();this.personalLibraryIndex.clear();
     this.libraryMemo.clear();
     this.sortJobs.clear();
     this.invalidateLazyWork();
@@ -1188,14 +1200,131 @@ struct Index {
   }
 
   private publishMediaRecords(records: MediaRecord[]): boolean {
+    const prior=this.pendingMediaDelta,now=Date.now(),utc=new Date(now).toISOString().substring(0,10);
+    const movieQueryScope=prior?.movieQueryScope??this.movieSortKey(this.movieProgressQuery,utc,false);
+    const movieAllScope=prior?.movieAllScope??this.movieSortKey('',utc,false);
+    const collectionScope=prior?.collectionScope??this.collectionSortKey(false);
     if (!this.mediaInput.replace(records)) { return false; }
+    const changes=this.personalLibraryIndex.updateRecords(this.mediaInput.recordsById(),this.mediaInput.libraryChangedIds(),
+      this.mediaInput.canApplyIncremental()&&!this.mediaInput.libraryOrderChanged(),this.cloud,this.libraryEvidence,this.cloudLocalAllowed);
+    if(changes){
+      for(const change of changes){if(change.row){this.libraryIndex.set(change.id,change.row);}else{this.libraryIndex.delete(change.id);}}
+    }else{this.personalLibraryIndex.clear();this.libraryIndex.clear();}
+    this.pendingMediaDelta={changes:changes,movieQueryScope:movieQueryScope,movieAllScope:movieAllScope,
+      collectionScope:collectionScope,now:now,utc:utc,version:this.mediaInput.version()};
     this.mediaRecords=records;
     return true;
   }
   private onLibraryInputChanged(): void {
-    this.libraryRevision++;
-    this.onPresentationChanged();
+    this.libraryRevision++;this.libraryMemo.clear();
+    const pending=this.pendingMediaDelta;this.pendingMediaDelta=undefined;
+    let handled=false;
+    if(pending?.changes){
+      this.updateSearchCandidatesForLibraryChanges(pending.changes);
+      handled=this.applyMediaRecordDisplayDelta(pending);
+      this.mediaInput.acknowledgeLibrary(pending.version);
+    }else if(pending){this.personalLibraryIndex.clear();this.libraryIndex.clear();}
+    if(!handled){this.onPresentationChanged();}
     this.refreshSearchLocal();
+  }
+  private updateSearchCandidatesForLibraryChanges(changes:PersonalLibraryChange[]):void{
+    if(!this.searchCandidateSource){return;}
+    const scope=this.currentSearchAccount();
+    const priorKey=JSON.stringify([scope,this.libraryRevision-1,this.cloudLocalAllowed,this.activeCloud()?.generation??-1,
+      this.activeCloud()?.activity??'',this.presentationLanguage]);
+    if(this.searchCandidateKey!==priorKey){return;}
+    for(const change of changes){
+      if(this.searchStoredIds.has(change.id)){continue;}
+      if(change.row&&isTraktMedia(change.row.media)){
+        const old=this.searchTitleIndex.get(change.id);
+        this.searchTitleIndex.upsert({media:publicSearchRecord(change.row.media).media,votes:old?.votes??0,
+          localized:this.presentationLanguage==='zh'?this.titleIndex.get(change.id)?.text.title??'':''});
+      }else{this.searchTitleIndex.remove(change.id);}
+    }
+    this.searchCandidateKey=JSON.stringify([scope,this.libraryRevision,this.cloudLocalAllowed,this.activeCloud()?.generation??-1,
+      this.activeCloud()?.activity??'',this.presentationLanguage]);
+  }
+  private applyMediaRecordDisplayDelta(pending:PendingMediaDelta):boolean{
+    const changes=pending.changes??[],metadata=this.movieCalendarCurrent()?this.movieMetadataIndex():new Map<string,PersonalMovie>();
+    const movieChanges:StableOrderChange<MovieProgressSource>[]=[];
+    for(const change of changes){
+      const row=change.row;let item:MovieProgressSource|undefined;
+      if(row&&row.media.kind==='movie'&&!this.isHidden(row.media)){
+        const movie=metadata.get(change.id);
+        if(movie&&!movie.localOnly&&!movie.dateUncertain){
+          item={row:row,metadata:{id:row.media.id,released:movie.released,year:movie.media.year,runtime:movie.runtime,
+            rating:movie.rating,addedAt:movie.addedAt,userRating:movie.userRating},
+            translation:this.presentationLanguage==='zh'?this.titleIndex.get(row.media.id)?.text.title??'':''};
+        }
+      }
+      movieChanges.push({id:change.id,item:item,ordinal:change.ordinal});
+    }
+    const flags=this.progressFlagScope===this.currentProgressScope()?this.progressFlags:[];
+    const pins=new Set<string>(flags.filter((flag:ProgressFlag)=>flag.pinned).map((flag:ProgressFlag)=>flag.id));
+    let movieHandled=false,collectionHandled=false,needsFull=false;
+    if(this.movieCalendarCurrent()){
+      const movieCases:[StableDisplayOrder<MovieProgressSource>,string,string,string,RevisionMemo<PersonalLibraryRow[]>][]=[
+        [this.movieTitleOrder,pending.movieQueryScope,this.movieSortKey(this.movieProgressQuery,pending.utc,false),
+          this.movieSortKey(this.movieProgressQuery,pending.utc,false,false),this.movieMemo],
+        [this.movieAllTitleOrder,pending.movieAllScope,this.movieSortKey('',pending.utc,false),
+          this.movieSortKey('',pending.utc,false,false),this.movieAllMemo]
+      ];
+      for(let i=0;i<movieCases.length;i++){
+        const [order,before,after,basis,memo]=movieCases[i],query=i===0?this.movieProgressQuery:'';
+        const result=order.applyChanges(before,after,basis,pending.now,order.validUntil(),movieChanges,
+          (value:MovieProgressSource)=>movieSortEligible(value,pending.utc,query),
+          (a:MovieProgressSource,b:MovieProgressSource)=>compareMovieSources(a,b,this.movieProgressOptions,pins,this.movieRandomSeed));
+        if(!result){continue;}
+        if(order.hasDirty()){needsFull=true;}
+        memo.put(this.movieSortKey(query,pending.utc),result.rows,pending.now,order.validUntil());
+        if(query===this.movieProgressQuery&&this.pageVisible&&this.tab==='progress'&&this.progressMode==='next'&&this.mediaMode==='movie'&&!this.selectedMedia){
+          if(result.structural){needsFull=true;}
+          else{
+            let patched=true;
+            for(const patch of result.patches){if(patch.kind==='update'&&patch.row&&!this.movieRowsSource.patchRow(patch.id,patch.row,this.movieRowKey(patch.row))){patched=false;}}
+            movieHandled=patched;if(!patched){needsFull=true;}
+          }
+        }
+      }
+    }
+    if(this.collectionFilter==='mine'||this.collectionFilter==='queue'){
+      const before=pending.collectionScope,after=this.collectionSortKey(false),basis=this.collectionSortKey(false,false);
+      const collectionChanges:StableOrderChange<CollectionCandidate>[]=[];
+      for(const change of changes){
+        let candidate:CollectionCandidate|undefined;
+        if(change.row){
+          const members=collectionMembers([change.row],this.currentCollectionState(),this.mediaMode,this.collectionFilter,this.collectionStatusFilter);
+          if(members.length){candidate=this.collectionCandidateForRow(members[0],this.collectionFilter);}
+        }
+        collectionChanges.push({id:change.id,item:candidate,ordinal:change.ordinal});
+      }
+      const options=this.collectionOptions;
+      const result=this.collectionTitleOrder.applyChanges(before,after,basis,pending.now,this.collectionTitleOrder.validUntil(),collectionChanges,
+        (value:CollectionCandidate)=>collectionSortEligible(value,options,this.collectionFilter,this.collectionQuery,pending.now),
+        (a:CollectionCandidate,b:CollectionCandidate)=>compareCollectionCandidates(a,b,options,this.collectionFilter));
+      if(result){
+        if(this.collectionTitleOrder.hasDirty()){needsFull=true;}
+        this.collectionItemsMemo.put(this.collectionSortKey(),result.rows,pending.now,this.collectionTitleOrder.validUntil());
+        if(this.pageVisible&&this.tab==='library'&&!this.selectedMedia){
+          if(result.structural){needsFull=true;}
+          else{
+            let patched=true;
+            for(const patch of result.patches){if(patch.kind==='update'&&patch.row&&!this.patchCollectionDisplayRow(patch.row)){patched=false;}}
+            collectionHandled=patched;if(!patched){needsFull=true;}
+          }
+        }
+      }
+    }
+    if(this.pageVisible&&this.tab==='progress'&&this.mediaMode==='movie'&&this.progressMode==='next'&&!this.selectedMedia){return movieHandled&&!needsFull;}
+    if(this.pageVisible&&this.tab==='library'&&!this.selectedMedia&&(this.collectionFilter==='mine'||this.collectionFilter==='queue')){return collectionHandled&&!needsFull;}
+    return false;
+  }
+  private patchCollectionDisplayRow(row:PersonalLibraryRow):boolean{
+    const index=this.collectionRowsSource.indexOfId(row.media.id);if(index<0){return false;}
+    const group=this.collectionRowsSource.getData(index);
+    const rows=group.rows.map((item:PersonalLibraryRow)=>item.media.id===row.media.id?row:item);
+    const next:CollectionGroup={key:group.key,label:group.label,rows:rows};
+    return this.collectionRowsSource.patchRow(group.key,next,this.collectionGroupKey(next));
   }
 
   private onShowsChanged(): void {
@@ -1511,7 +1640,7 @@ struct Index {
     }
     if (!residency.search || pressure) {
       this.invalidateSearchLocal();
-      this.searchCandidateSource=undefined; this.searchCandidateKey=''; this.searchCandidates=[]; this.searchTitleIndex.clear();
+      this.searchCandidateSource=undefined; this.searchCandidateKey=''; this.searchCandidates=[]; this.searchTitleIndex.clear(); this.searchStoredIds.clear();
       if (!residency.search) { this.searchRows.replace([],[],[]); }
       else { this.refreshSearchLocal(); }
     }
@@ -3063,7 +3192,7 @@ struct Index {
     this.displayRevisions.reset();
     this.collectionIndexMemos.clear();
     this.movieMetadataMemo.clear();
-    this.libraryIndex.clear();
+    this.libraryIndex.clear();this.personalLibraryIndex.clear();
     this.libraryMemo.clear();
     this.sortJobs.clear();
     this.invalidateLazyWork();
@@ -3893,7 +4022,8 @@ struct Index {
           this.activeCloud()?.activity ?? '',language]);
         if (this.searchCandidateSource!==stored || this.searchCandidateKey!==key) {
           const merged=new Map<string,SearchRecord>();
-          for (const row of stored) { if (validSearchRecord(row)) { merged.set(row.media.id,row); } }
+          this.searchStoredIds.clear();
+          for (const row of stored) { if (validSearchRecord(row)) { merged.set(row.media.id,row); this.searchStoredIds.add(row.media.id); } }
           // Current private library is an ephemeral input, never persisted here.
           if (scope && scope===this.currentSearchAccount()) {
             for (const row of this.personalLibrary()) {
@@ -5253,7 +5383,8 @@ struct Index {
     }
     const pins=new Set<string>(flags.filter((f:ProgressFlag)=>f.pinned).map((f:ProgressFlag)=>f.id));
     const reconciled=order.reconcile(this.movieSortKey(query,utc,false),this.movieSortKey(query,utc,false,false),now,expiry,sources,sameMovieSource,
-      (x:MovieProgressSource)=>movieSortEligible(x,utc,query),(a:MovieProgressSource,b:MovieProgressSource)=>compareMovieSources(a,b,this.movieProgressOptions,pins,this.movieRandomSeed));
+      (x:MovieProgressSource)=>movieSortEligible(x,utc,query),(a:MovieProgressSource,b:MovieProgressSource)=>compareMovieSources(a,b,this.movieProgressOptions,pins,this.movieRandomSeed),
+      (id:string)=>this.personalLibraryIndex.ordinal(id));
     if(reconciled){memo.put(key,reconciled,now,expiry);return reconciled;}
     const input: MovieSortInput = {sources:sources,flags:flags,options:this.movieProgressOptions,utc:utc,query:query,seed:this.movieRandomSeed};
     this.runMovieSort(input,key,now,expiry);
@@ -5272,7 +5403,8 @@ struct Index {
           Date.now() < now || Date.now() >= expiry) { return; }
       const memo = input.query ? this.movieMemo : this.movieAllMemo;
       const order=input.query?this.movieTitleOrder:this.movieAllTitleOrder;
-      order.seed(this.movieSortKey(input.query,input.utc,false),now,expiry,input.sources,rows,this.movieSortKey(input.query,input.utc,false,false));
+      order.seed(this.movieSortKey(input.query,input.utc,false),now,expiry,input.sources,rows,this.movieSortKey(input.query,input.utc,false,false),
+        (id:string)=>this.personalLibraryIndex.ordinal(id));
       memo.put(key,rows,now,expiry);
     } catch (error) { if (!(error instanceof ReadCancelled)) { throw new Error((error as Error).message); } }
     finally {
@@ -5526,16 +5658,24 @@ struct Index {
       this.cloudUuid, cloud?.generation ?? -1, cloud?.activity ?? '']);
     const now = Date.now();
     const cached = this.libraryMemo.get(key, now);
-    if (cached) { return cached; }
+    if (cached&&this.personalLibraryIndex.matches(cloud,this.libraryEvidence,this.cloudLocalAllowed)) { return cached; }
     const cloudShows = (cloud?.shows ?? []).map((show: ShowProgress): LibraryShowEvidence => {
       const media: Media = { id: show.id, title: show.title, kind: 'show', year: show.year ?? 0, watched: false };
       return { media: media, watchedEpisodes: show.watchedEpisodes };
     });
     const localShows = this.libraryEvidence.filter((show: LibraryShowEvidence) => cloud ? show.merged === true : !show.merged);
-    const rows = buildPersonalLibrary(cloud && !this.cloudLocalAllowed ? [] : this.mediaRecords,
-      cloud?.watchedMovies ?? [], cloud?.watchlist ?? [], cloudShows, localShows);
-    this.libraryIndex.clear();
-    for (const row of rows) { this.libraryIndex.set(row.media.id,row); }
+    let rows:PersonalLibraryRow[];
+    if(this.personalLibraryIndex.matches(cloud,this.libraryEvidence,this.cloudLocalAllowed)){
+      rows=this.personalLibraryIndex.rowsView();
+    }else{
+      const records=cloud&&!this.cloudLocalAllowed?[]:this.mediaRecords;
+      rows=buildPersonalLibrary(records,cloud?.watchedMovies??[],cloud?.watchlist??[],cloudShows,localShows);
+      this.personalLibraryIndex.seed(records,cloud?.watchedMovies??[],cloud?.watchlist??[],cloudShows,localShows,
+        cloud,this.libraryEvidence,this.cloudLocalAllowed,rows);
+      this.libraryIndex.clear();
+      for(const row of rows){this.libraryIndex.set(row.media.id,row);}
+      this.mediaInput.acknowledgeLibrary(this.mediaInput.version());
+    }
     this.libraryMemo.put(key, rows, now, Number.MAX_SAFE_INTEGER);
     return rows;
   }
@@ -5719,16 +5859,16 @@ struct Index {
     memo.put(key,indexes,now,Number.MAX_SAFE_INTEGER);
     return indexes;
   }
+  private collectionCandidateForRow(row:PersonalLibraryRow,section:string,indexes:CollectionIndexes=this.collectionIndexes(section)):CollectionCandidate{
+    const metadata=this.titleIndex.get(row.media.id),movie=indexes.movies.get(row.media.id);
+    if(!this.collectionRandomKeys.has(row.media.id)){this.collectionRandomKeys.set(row.media.id,Math.random());}
+    return {row:row,translation:this.presentationLanguage==='zh'?metadata?.text.title??'':'',
+      meta:metadata?.collection,added:indexes.times.get(row.media.id),recent:indexes.recent.get(row.media.id),
+      userRating:indexes.ratings.get(row.media.id)??movie?.userRating,randomOrder:this.collectionRandomKeys.get(row.media.id)??0};
+  }
   private collectionCandidates(rows: PersonalLibraryRow[], section: string): CollectionCandidate[] {
-    const indexes = this.collectionIndexes(section);
-    return rows.map((row: PersonalLibraryRow): CollectionCandidate => {
-      const metadata = this.titleIndex.get(row.media.id);
-      const movie = indexes.movies.get(row.media.id);
-      if (!this.collectionRandomKeys.has(row.media.id)) { this.collectionRandomKeys.set(row.media.id,Math.random()); }
-      return { row: row, translation: this.presentationLanguage === 'zh' ? metadata?.text.title ?? '' : '',
-        meta: metadata?.collection, added: indexes.times.get(row.media.id), recent: indexes.recent.get(row.media.id),
-        userRating: indexes.ratings.get(row.media.id) ?? movie?.userRating, randomOrder: this.collectionRandomKeys.get(row.media.id) ?? 0 };
-    });
+    const indexes=this.collectionIndexes(section);
+    return rows.map((row:PersonalLibraryRow)=>this.collectionCandidateForRow(row,section,indexes));
   }
   private recentCollectionRows(): PersonalLibraryRow[] {
     const now = Date.now();
@@ -5770,7 +5910,8 @@ struct Index {
     }
     const reconciled=this.collectionTitleOrder.reconcile(this.collectionSortKey(false),this.collectionSortKey(false,false),now,expiry,candidates,sameCollectionCandidate,
       (x:CollectionCandidate)=>collectionSortEligible(x,options,this.collectionFilter,this.collectionQuery,now),
-      (a:CollectionCandidate,b:CollectionCandidate)=>compareCollectionCandidates(a,b,options,this.collectionFilter));
+      (a:CollectionCandidate,b:CollectionCandidate)=>compareCollectionCandidates(a,b,options,this.collectionFilter),
+      (id:string)=>this.collectionFilter==='mine'||this.collectionFilter==='queue'?this.personalLibraryIndex.ordinal(id):undefined);
     if(reconciled){this.collectionItemsMemo.put(key,reconciled,now,expiry);return reconciled;}
     const input: CollectionSortInput = {candidates:candidates,options:options,section:this.collectionFilter,query:this.collectionQuery,now:now};
     this.runCollectionSort(input,key,expiry);
@@ -5786,7 +5927,8 @@ struct Index {
       if (!this.sortJobs.current(slot,token) || !this.pageVisible || this.selectedMedia || this.tab !== 'library' ||
           epoch !== this.presentationEpoch || key !== this.collectionSortKey() ||
           (this.signedIn && !this.activeCloud()) || Date.now() < input.now || Date.now() >= expiry) { return; }
-      this.collectionTitleOrder.seed(this.collectionSortKey(false),input.now,expiry,input.candidates,rows,this.collectionSortKey(false,false));
+      this.collectionTitleOrder.seed(this.collectionSortKey(false),input.now,expiry,input.candidates,rows,this.collectionSortKey(false,false),
+        (id:string)=>this.collectionFilter==='mine'||this.collectionFilter==='queue'?this.personalLibraryIndex.ordinal(id):undefined);
       this.collectionItemsMemo.put(key,rows,input.now,expiry);
     } catch (error) { if (!(error instanceof ReadCancelled)) { throw new Error((error as Error).message); } }
     finally {

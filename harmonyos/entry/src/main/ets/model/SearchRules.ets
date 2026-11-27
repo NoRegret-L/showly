@@ -71,8 +71,19 @@ export class SearchCandidateTitles {
   clear():void{this.rows=[];this.positions.clear();}
   seed(rows:SearchCandidate[]):void{
     this.clear();this.rows=rows;
-    for(let i=0;i<rows.length;i++){this.positions.set(rows[i].media.id,i);}
+    for(let i=0;i<rows.length;i++){if(this.positions.has(rows[i].media.id)){this.clear();return;}this.positions.set(rows[i].media.id,i);}
   }
+  get(id:string):SearchCandidate|undefined{const pos=this.positions.get(id);return pos===undefined?undefined:this.rows[pos];}
+  private reindex(from:number):void{for(let i=from;i<this.rows.length;i++){this.positions.set(this.rows[i].media.id,i);}}
+  upsert(row:SearchCandidate):void{
+    const id=row.media.id,pos=this.positions.get(id);
+    if(pos!==undefined){const old=this.rows[pos];if(old.media===row.media&&old.votes===row.votes&&old.localized===row.localized){return;}
+      this.rows[pos]=row;this.patches++;return;}
+    let lo=0,hi=this.rows.length;
+    while(lo<hi){const mid=Math.floor((lo+hi)/2);if(this.rows[mid].media.id<id){lo=mid+1;}else{hi=mid;}}
+    this.rows.splice(lo,0,row);this.reindex(lo);this.patches++;
+  }
+  remove(id:string):void{const pos=this.positions.get(id);if(pos===undefined){return;}this.rows.splice(pos,1);this.positions.delete(id);this.reindex(pos);this.patches++;}
   patch(id:string,title:string):void{
     const pos=this.positions.get(id);if(pos===undefined){return;}
     const old=this.rows[pos];if(old.localized===title){return;}
