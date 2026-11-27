@@ -48,6 +48,11 @@ jobs:
             echo "No change from observation baseline." >> "$GITHUB_STEP_SUMMARY"
           fi
 
+      - name: Validate source release versions
+        if: ${{ inputs.mode == 'build' || hashFiles('harmonyos/build-profile.json5') != '' }}
+        run: |
+          python3 -c 'import sys; from pathlib import Path; sys.path.insert(0, "harmonyos/tools"); from prepare_preview_release import validate_source; validate_source(Path("harmonyos")); print("Source release version checks passed")'
+
       - name: Install Linux dependencies
         run: |
           sudo apt-get update

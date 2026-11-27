@@ -18,14 +18,7 @@ def load_json(path):
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def main():
-    p = argparse.ArgumentParser()
-    for name in ("source", "hap-dir", "upstream", "output"):
-        p.add_argument("--" + name, type=Path, required=True)
-    p.add_argument("--commit", required=True)
-    p.add_argument("--run", required=True)
-    args = p.parse_args()
-    root = args.source / "harmonyos"
+def validate_source(root):
     app = load_json(root / "AppScope/app.json5")["app"]
     version, code = app["versionName"], app["versionCode"]
     require(isinstance(version, str) and re.fullmatch(r"\d+\.\d+\.\d+(?:\.\d+)?", version), "Invalid version")
@@ -39,6 +32,18 @@ def main():
     require(f"APP_VERSION: string = '{version}';" in info, "Update version mismatch")
     require(f"APP_VERSION_CODE: number = {code};" in info, "Update versionCode mismatch")
     require(f"UPSTREAM_BASELINE: string = '{baseline}';" in info, "Upstream baseline mismatch")
+    return app, version, code, baseline
+
+
+def main():
+    p = argparse.ArgumentParser()
+    for name in ("source", "hap-dir", "upstream", "output"):
+        p.add_argument("--" + name, type=Path, required=True)
+    p.add_argument("--commit", required=True)
+    p.add_argument("--run", required=True)
+    args = p.parse_args()
+    root = args.source / "harmonyos"
+    app, version, code, baseline = validate_source(root)
     revision = args.upstream.read_text().strip().split()
     require(len(revision) == 2 and revision[1] == "refs/heads/master", "Unexpected upstream record")
     upstream = revision[0]
