@@ -106,6 +106,7 @@ with tempfile.TemporaryDirectory() as tmp:
     harness="""import { ReadEpisodeIdentity, ReadJournalEvent, validReadIds, replayWatchedIds } from './BatchEpisodeRead';
 import { FullEpisodeCatalog, validateFullCatalog } from './ShowCatalog';
 import { ScheduleReadCache, SQLITE_BIND_LIMIT, bindPlaceholders } from './IndexedProjection';
+import { CommitFence } from './CommitFence';
 type Cell=string|number|null;
 class FixtureResult {
   private index=-1;
@@ -119,7 +120,9 @@ class FixtureResult {
 }
 """+types+validators+"""
 export class BatchHarness {
-  private projectionRevision=0;
+  private projectionFence=new CommitFence();
+  assertProjectionReadable(): number { return this.projectionFence.assertReadable(); }
+  projectionReadable(revision: number): boolean { return this.projectionFence.readable(revision); }
   private projectionSchedules=new ScheduleReadCache();
   public scheduleParses(){return this.projectionSchedules.parseCount();}
   public count=0;
@@ -127,7 +130,7 @@ export class BatchHarness {
   constructor(private fixture: Record<string,Cell[][]>) {}
   async queryRead(sql:string,args:(string|number)[]=[]):Promise<FixtureResult>{
     this.count++;
-    if(this.changeAt===this.count)this.projectionRevision++;
+    if(this.changeAt===this.count){const token=this.projectionFence.begin();this.projectionFence.finish(token,true,['show:1']);}
     if(sql.startsWith('SELECT show_id,payload FROM episode_schedule WHERE show_id IN (')) {
       if(sql.split('?').length-1!==args.length || args.length>999)throw Error('Invalid bindings');
       return new FixtureResult(this.fixture['SELECT show_id,payload FROM episode_schedule WHERE show_id IN ('].filter(row=>args.includes(row[0] as string)));
