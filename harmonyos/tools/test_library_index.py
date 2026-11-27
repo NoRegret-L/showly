@@ -8,12 +8,13 @@ with tempfile.TemporaryDirectory() as tmp:
     for path in (root/"model").glob("*.ets"):
         shutil.copyfile(path,work/(path.stem+".ts"))
     subprocess.run(["tsc","--strict","--target","ES2020","--module","commonjs",
-        "MediaInputVersion.ts","PersonalLibrary.ts","StableDisplayOrder.ts"],cwd=work,check=True)
+        "MediaInputVersion.ts","PersonalLibrary.ts","StableDisplayOrder.ts","SearchRules.ts"],cwd=work,check=True)
     (work/"test.cjs").write_text("""
 const assert=require('node:assert/strict');
 const {MediaInputVersion}=require('./MediaInputVersion');
 const {buildPersonalLibrary,PersonalLibraryIndex}=require('./PersonalLibrary');
 const {StableDisplayOrder}=require('./StableDisplayOrder');
+const {SearchCandidateTitles}=require('./SearchRules');
 const media=(id,kind='movie',watched=false)=>({id,kind,title:'Title '+id,year:2026,watched});
 const makeRecord=(i)=>({media:media('movie:'+i,'movie',false),movieState:'unknown',watchlistState:i%3===0?'yes':'unknown'});
 const makeEvidence=(id,watchedEpisodes,merged)=>({media:media(id,'show'),watchedEpisodes,merged:merged,sections:['watching']});
@@ -51,9 +52,9 @@ for(const size of [393,10000]){
   assert.equal(index.updateRecords(input.recordsById(),input.libraryChangedIds(),input.canApplyIncremental(),cloud,evidence,true),undefined);
   assert.deepEqual(index.rowsView(),full());
 }
-const row=(id,sort)=>({media:{id:id,kind:'movie',title:id,year:2026,watched:false},sort:sort});
+const row=(id)=>({media:{id:id,kind:'movie',title:id,year:2026,watched:false},localRecord:undefined,queued:false,watched:false,localEpisodes:-1,cloudEpisodes:-1});
 const orderOf=new Map([['a',{segment:0,position:0}],['b',{segment:0,position:1}],['c',{segment:0,position:2}],['d',{segment:0,position:3}]]);
-const compare=(a,b)=>a.sort-b.sort,eligible=()=>true,source=[{row:row('a',2),sort:2},{row:row('b',1),sort:1},{row:row('c',2),sort:2}];
+const compare=(a,b)=>a.sort-b.sort,eligible=()=>true,source=[{row:row('a'),sort:2},{row:row('b'),sort:1},{row:row('c'),sort:2}];
 const full=()=>source.slice().sort((a,b)=>compare(a,b)||orderOf.get(a.row.media.id).position-orderOf.get(b.row.media.id).position).map(x=>x.row);
 const display=new StableDisplayOrder(x=>x.row);
 display.seed('s0',0,1000,source,full(),'basis',id=>orderOf.get(id));
@@ -61,19 +62,23 @@ let changed={...source[1],row:{...source[1].row,watched:true}};
 source[1]=changed;
 let delta=display.applyChanges('s0','s1','basis',1,1000,[{id:'b',item:changed,ordinal:orderOf.get('b')}],eligible,compare);
 assert(delta);assert.equal(delta.structural,false);assert.equal(delta.patches[0].kind,'update');assert.deepEqual(delta.rows,full());
-const added={row:row('d',2),sort:2};
+const added={row:row('d'),sort:2};
 source.push(added);
 delta=display.applyChanges('s1','s2','basis',2,1000,[{id:'d',item:added,ordinal:orderOf.get('d')}],eligible,compare);
 assert(delta);assert(delta.structural);assert.deepEqual(delta.rows,full());
 source.splice(0,1);
 delta=display.applyChanges('s2','s3','basis',3,1000,[{id:'a'}],eligible,compare);
 assert(delta);assert(delta.structural);assert.deepEqual(delta.rows,full());
-const moved={...source[0],sort:0,row:{...source[0].row,watched:false}};
-source[0]=moved;
-delta=display.applyChanges('s3','s4','basis',4,1000,[{id:'b',item:moved,ordinal:orderOf.get('b')}],eligible,compare);
+const moved={...source[1],sort:0,row:{...source[1].row,watched:false}};
+source[1]=moved;
+delta=display.applyChanges('s3','s4','basis',4,1000,[{id:'c',item:moved,ordinal:orderOf.get('c')}],eligible,compare);
 assert(delta);assert(delta.structural);assert.deepEqual(delta.rows,full());
 console.log('393/10k personal-library: 100 commit-scoped add/remove/state updates, cloud fallback, stable identity and reorder fallback passed');
-console.log('StableDisplayOrder direct update/insert/remove/move: full comparator parity and in-place patch passed');
+const candidates=new SearchCandidateTitles();
+candidates.seed([{media:row('show:1').media,votes:0,localized:''}]);
+const addedSearch={media:row('movie:1').media,votes:0,localized:''};candidates.upsert(addedSearch);
+assert.equal(candidates.get('movie:1'),addedSearch);candidates.remove('movie:1');assert.equal(candidates.get('movie:1'),undefined);
+console.log('StableDisplayOrder direct update/insert/remove/move and ID-scoped search upsert/remove passed');
 """,encoding="utf-8")
     subprocess.run(["node","test.cjs"],cwd=work,check=True)
 page=(root/"pages"/"Index.ets").read_text()
