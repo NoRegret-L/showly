@@ -84,7 +84,7 @@ lib=projection.split("export async function projectLibrary(",1)[1].split("export
 assert lib.index("const prior = disk.get(row.media.id)") < lib.index("decodeIndexedProjection(prior,input,work.catalogKey,work.key)") < lib.index("work.diskReusable = true")
 assert lib.count("decodeIndexedProjection(")==1
 assert "calculated && input && calculated.effective.complete && diskProjectionAllowed(input)" in lib
-assert "if (changedDisk.length) { await store.saveProjectionRows(diskScope,changedDisk); }" in lib
+assert "if (changedDisk.length && await store.saveProjectionRows(diskScope,changedDisk))" in lib
 assert "CREATE TABLE IF NOT EXISTS progress_projection_row_v2" in store
 assert "readProjectionCache(" not in lib and "encodePersistedProjection(" not in lib
 for builder,ds in [("nextShowsView","showRows"),("movieProgressView","movieRowsSource")]:

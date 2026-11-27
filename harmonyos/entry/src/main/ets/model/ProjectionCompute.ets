@@ -1,3 +1,4 @@
+import { AiredSummary, summarizeAired } from './BatchEpisodeRead';
 import { FullEpisodeCatalog, ScheduledEpisode, scheduleEpisodes, showSections } from './ShowCatalog';
 import { RemoteShowObservation } from './RemoteObservation';
 import { CommonEntry } from './ThreeWay';
@@ -20,6 +21,7 @@ export interface ProjectionOutput {
   sections: string[];
   source?: ProgressSource;
   validUntil: number;
+  summary?: AiredSummary;
 }
 export function computeProjection(input: ProjectionInput): ProjectionOutput {
   const checkpoints = new Map<number, ReadCheckpoint>();
@@ -40,7 +42,7 @@ export function computeProjection(input: ProjectionInput): ProjectionOutput {
   }
   return { effective: effective, sections: effective.complete ? showSections(input.full, effective.ids, input.now) : [],
     source: effective.complete ? progressSource(input.full, effective.ids, input.remote, input.timed, checkpoints, input.cloudActive) : undefined,
-    validUntil: validUntil };
+    validUntil: validUntil, summary:effective.complete ? summarizeAired(input.full,effective.ids,input.now) : undefined };
 }
 
 export interface ShowMemoEntry {
@@ -48,6 +50,7 @@ export interface ShowMemoEntry {
   from: number;
   output: ProjectionOutput;
   catalogKey?: string;
+  diskKnown?: boolean;
 }
 // Exact input equality, no heuristic threshold. Only in-memory read models.
 export class ShowProjectionCache {
@@ -60,6 +63,13 @@ export class ShowProjectionCache {
   get(id: string, key: string, now: number, catalogKey: string = ''): ProjectionOutput | undefined {
     const entry = this.entries.get(id);
     return entry && entry.key === key && (entry.catalogKey ?? '') === catalogKey && now >= entry.from && now < entry.output.validUntil ? entry.output : undefined;
+  }
+  diskKnown(id: string,key: string,now: number,catalogKey: string): boolean {
+    return !!this.get(id,key,now,catalogKey) && this.entries.get(id)?.diskKnown===true;
+  }
+  markDiskKnown(id: string,key: string,catalogKey: string): void {
+    const row=this.entries.get(id);
+    if (row && row.key===key && (row.catalogKey??'')===catalogKey) { row.diskKnown=true; }
   }
   put(id: string, key: string, now: number, output: ProjectionOutput, catalogKey: string = ''): void {
     this.entries.set(id, { key: key, from: now, output: output, catalogKey: catalogKey });
@@ -110,6 +120,9 @@ export function readPersistedShow(entry: ShowMemoEntry | undefined, input: Proje
         row.episode.firstAired !== ep.firstAired || row.watched !== watched.has(ep.id) ||
         !Number.isFinite(row.watchedAt)) { return undefined; }
   }
+  // Disk rows are untrusted derived data. Reconstruct the summary once from
+  // validated episode inputs, not from a persisted summary supplied by disk.
+  out.summary=summarizeAired(input.full,out.effective.ids,input.now);
   return out;
 }
 export function decodePersistedProjection(raw: string, scope: string): Map<string, ShowMemoEntry> {

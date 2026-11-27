@@ -1,4 +1,4 @@
-import { FullEpisodeCatalog, validateFullCatalog } from './ShowCatalog';
+import { FullEpisodeCatalog, validateFullCatalog, scheduleEpisodes } from './ShowCatalog';
 import { ProjectionInput, ProjectionOutput, diskProjectionAllowed, readPersistedShow, persistShow } from './ProjectionCompute';
 
 // Historical SQLite default host-parameter limit, not a tuning knob.
@@ -9,6 +9,7 @@ export function bindPlaceholders(count: number): string {
 interface ScheduleEntry {
   raw: string;
   value: FullEpisodeCatalog;
+  positions?: Set<string>;
 }
 export class ScheduleReadCache {
   private entries: Map<string, ScheduleEntry> = new Map<string, ScheduleEntry>();
@@ -26,6 +27,14 @@ export class ScheduleReadCache {
   key(full: FullEpisodeCatalog): string {
     const old = this.entries.get(full.media.id);
     return old && old.value === full ? old.raw : JSON.stringify(full);
+  }
+  positions(full: FullEpisodeCatalog): Set<string> {
+    const old=this.entries.get(full.media.id);
+    if (old && old.value===full && old.positions) { return old.positions; }
+    const positions=new Set<string>();
+    for (const ep of scheduleEpisodes(full)) { positions.add(ep.season+':'+ep.number); }
+    if (old && old.value===full) { old.positions=positions; }
+    return positions;
   }
   retain(ids: Set<string>): void {
     for (const id of this.entries.keys()) { if (!ids.has(id)) { this.entries.delete(id); } }

@@ -15,7 +15,7 @@ def sql_for(name):
     return re.findall(r"this\.queryRead\('([^']+)'",method(name))
 bound_sql,=sql_for("boundAccount")
 baseline_sql,=sql_for("cloudBaseline")
-catalog_sql,event_sql=sql_for("projectionLocalInputs")
+catalog_sql,scoped_catalog_sql,event_sql,scoped_event_sql=sql_for("projectionLocalInputs")
 schedule_prefix,=sql_for("projectionCatalogs")
 schedule_sql=schedule_prefix+','.join('?' for _ in range(393))+') ORDER BY show_id'
 db=sqlite3.connect(":memory:")
@@ -135,6 +135,11 @@ export class BatchHarness {
       if(sql.split('?').length-1!==args.length || args.length>999)throw Error('Invalid bindings');
       return new FixtureResult(this.fixture['SELECT show_id,payload FROM episode_schedule WHERE show_id IN ('].filter(row=>args.includes(row[0] as string)));
     }
+    if(sql.includes(' WHERE c.show_id=? ORDER BY c.show_id') || sql.includes(' WHERE show_id=? ORDER BY seq')) {
+      if(args.length!==1)throw Error('Invalid scoped query');
+      const fullSql=sql.replace(' WHERE c.show_id=?','').replace(' WHERE show_id=?','');
+      return new FixtureResult(this.fixture[fullSql].filter(row=>row[0]===args[0]));
+    }
     if(!Object.prototype.hasOwnProperty.call(this.fixture,sql))throw Error('Unexpected SQL '+sql);
     if(args.length && (args.length!==1 || args[0]!=='account-A'))throw Error('Unexpected scope');
     return new FixtureResult(this.fixture[sql]);
@@ -203,7 +208,7 @@ lib=projection.split("export async function projectLibrary(",1)[1].split("export
 assert "store.projectionLocalInputs(bound)" in lib and "store.projectionCatalogs(" in lib
 assert "await store.backupStates()" not in lib and "await store.journalIntents()" not in lib and "await store.fullCatalog(" not in lib
 assert lib.count("decodeIndexedProjection(")==1
-assert "if (changedDisk.length) { await store.saveProjectionRows(diskScope,changedDisk); }" in lib
+assert "if (changedDisk.length && await store.saveProjectionRows(diskScope,changedDisk))" in lib
 assert "summarizeAired(full,effective.ids,now)" in lib
 assert "!store.projectionReadable(revision)" in lib
 assert "JSON.stringify(row.episode)" not in comp

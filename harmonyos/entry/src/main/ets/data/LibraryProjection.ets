@@ -54,9 +54,9 @@ export async function projectLibrary(store: EpisodeStore, records: MediaRecord[]
   const revision = store.assertProjectionReadable();
   const bound = await store.boundAccount();
   const localAllowed = allowLocalScope(!!cloud, bound, uuid);
-  const checkpoints = cloud && localAllowed ? await store.readCheckpoints(uuid) : new Map<number, ReadCheckpoint>();
-  const common = cloud && localAllowed ? await store.commonStates(uuid, 'episode') : new Map<string, CommonEntry>();
-  const inputs = localAllowed ? await store.projectionLocalInputs(bound) : undefined;
+  const checkpoints = cloud && localAllowed ? (readOnly ? await store.projectionCheckpoints(uuid) : await store.readCheckpoints(uuid)) : new Map<number, ReadCheckpoint>();
+  const common = cloud && localAllowed ? (readOnly ? await store.projectionCommonStates(uuid) : await store.commonStates(uuid, 'episode')) : new Map<string, CommonEntry>();
+  const inputs = localAllowed ? (readOnly ? await store.projectionReadInputs(bound) : await store.projectionLocalInputs(bound)) : undefined;
   const states: EpisodeBackupState[] = inputs?.states ?? [];
   const intents: JournalIntent[] = inputs?.intents ?? [];
   const local: LibraryShowEvidence[] = states.map((state: EpisodeBackupState): LibraryShowEvidence => {
@@ -72,7 +72,7 @@ export async function projectLibrary(store: EpisodeStore, records: MediaRecord[]
   const targets = members.filter((row: PersonalLibraryRow) => row.media.kind === 'show' && (hasTrackingEvidence(row) || row.queued));
   const targetIds = new Set<string>(targets.map((row: PersonalLibraryRow) => row.media.id));
   const parseStart = store.projectionScheduleParseCount();
-  const schedules = await store.projectionCatalogs(targetIds);
+  const schedules = readOnly ? await store.projectionReadCatalogs(targetIds) : await store.projectionCatalogs(targetIds);
   const scheduleParses = store.projectionScheduleParseCount() - parseStart;
   if (!current() || !store.projectionReadable(revision)) { throw new Error('Projection inputs changed'); }
   const byId: Map<string, EpisodeBackupState> = new Map<string, EpisodeBackupState>();
@@ -102,7 +102,7 @@ export async function projectLibrary(store: EpisodeStore, records: MediaRecord[]
   cache.begin(JSON.stringify([clientId, uuid, cloud?.generation ?? -1, localAllowed]));
   const retained = new Set<string>();
   const diskScope = persistentProjectionScope(clientId, uuid, !!cloud, localAllowed);
-  const disk = await store.readProjectionRows(diskScope,targetIds);
+  const diskNeeded=new Set<string>();
   const changedDisk: IndexedProjectionRow[] = [];
   const removedDisk: string[] = [];
   const prepared: PreparedProjection[] = [];
@@ -123,10 +123,7 @@ export async function projectLibrary(store: EpisodeStore, records: MediaRecord[]
     let full = schedules.get(row.media.id);
     const stale = !!show?.updatedAt && !!full && Date.parse(show.updatedAt) > full.fetchedAt;
     // Existing missing positions also force repair, even when activity is unchanged.
-    const positions: Set<string> = new Set<string>();
-    if (full) {
-      for (const episode of scheduleEpisodes(full)) { positions.add(episode.season + ':' + episode.number); }
-    }
+    const positions: Set<string> = full ? store.projectionPositions(full) : new Set<string>();
     const unmatched = (show?.positions ?? []).some((pos: RemotePlayPosition) => pos.season > 0 && !positions.has(pos.season + ':' + pos.number));
     const needsRepair = !full || stale || unmatched || !full.status;
     if (needsRepair) { repairTargets.push(row.media); }
@@ -169,31 +166,36 @@ export async function projectLibrary(store: EpisodeStore, records: MediaRecord[]
       work.input = input;
       work.key = showProjectionStateKey(input);
       work.catalogKey = store.projectionCatalogKey(full);
-      let calculated = cache.get(row.media.id,work.key,now,work.catalogKey);
-      const prior = disk.get(row.media.id);
-      const metadataMatch = indexedProjectionMatches(prior,input,work.catalogKey,work.key);
-      if (calculated) {
-        work.diskReusable = metadataMatch;
-      } else if (prior && metadataMatch) {
-        diskParses++;
-        calculated = decodeIndexedProjection(prior,input,work.catalogKey,work.key);
-        if (calculated) {
-          diskHits++;
-          work.diskReusable = true;
-          cache.put(row.media.id,work.key,now,calculated,work.catalogKey);
-        }
-      }
-      if (calculated) {
-        work.calculated = calculated;
-        reusedShows++;
-      } else {
-        pending.push(input);
-        pendingRows.push(work);
-      }
-    }
+      work.calculated=cache.get(row.media.id,work.key,now,work.catalogKey);
+      work.diskReusable=!!work.calculated && cache.diskKnown(row.media.id,work.key,now,work.catalogKey);
+      if (!work.diskReusable) { diskNeeded.add(row.media.id); }
+    } else { diskNeeded.add(row.media.id); }
     prepared.push(work);
   }
+  const disk=await store.readProjectionRows(diskScope,diskNeeded);
   if (!current() || (readOnly && !store.projectionReadable(revision))) { throw new Error('Observation inputs changed'); }
+  for (const work of prepared) {
+    const input=work.input;
+    if (!input) { continue; }
+    const id=work.row.media.id;
+    const prior=disk.get(id);
+    if (!work.diskReusable) {
+      const metadataMatch=indexedProjectionMatches(prior,input,work.catalogKey,work.key);
+      if (work.calculated) { work.diskReusable=metadataMatch; }
+      else if (prior && metadataMatch) {
+        diskParses++;
+        work.calculated=decodeIndexedProjection(prior,input,work.catalogKey,work.key);
+        if (work.calculated) {
+          diskHits++; work.diskReusable=true;
+          cache.put(id,work.key,now,work.calculated,work.catalogKey);
+        }
+      }
+    }
+    if (work.calculated) {
+      if (work.diskReusable) { cache.markDiskKnown(id,work.key,work.catalogKey); }
+      reusedShows++;
+    } else { pending.push(input); pendingRows.push(work); }
+  }
   if (pending.length) {
     computedShows = pending.length;
     workerBatches++;
@@ -237,7 +239,7 @@ export async function projectLibrary(store: EpisodeStore, records: MediaRecord[]
     let progressRow: NextShow | undefined;
     const lastSeq = latest.get(row.media.id) ?? 0;
     if (full && effective?.complete) {
-      const summary = summarizeAired(full,effective.ids,now);
+      const summary = calculated?.summary ?? summarizeAired(full,effective.ids,now);
       progressRow = { media: { id: full.media.id, kind: 'show', title: full.media.title,
         year: full.media.year, watched: false }, total: summary.total, completed: summary.completed,
         nextSeason: summary.nextSeason, nextNumber: summary.nextNumber, nextTitle: summary.nextTitle, lastSeq: lastSeq };
@@ -257,7 +259,9 @@ export async function projectLibrary(store: EpisodeStore, records: MediaRecord[]
   }
   cache.retain(retained);
   if (!current() || (readOnly && !store.projectionReadable(revision))) { throw new Error('Observation inputs changed'); }
-  if (changedDisk.length) { await store.saveProjectionRows(diskScope,changedDisk); }
+  if (changedDisk.length && await store.saveProjectionRows(diskScope,changedDisk)) {
+    for (const row of changedDisk) { cache.markDiskKnown(row.id,row.key,row.catalogKey); }
+  }
   if (removedDisk.length) { await store.removeProjectionRows(diskScope,removedDisk); }
   if (!current() || (readOnly && !store.projectionReadable(revision))) { throw new Error('Observation inputs changed'); }
   return { evidence: result, missing: missing, failed: failed, localAllowed: localAllowed, matches: matches, next: next, calendar: calendar,
@@ -294,8 +298,8 @@ export async function projectDetail(store: EpisodeStore, full: FullEpisodeCatalo
     });
   // Validate the whole persisted account payload, materialize only relevant entries.
   const ids=displayOnly ? new Set<number>(scheduleEpisodes(full).map((ep: ScheduledEpisode)=>ep.id)) : undefined;
-  const checkpoints = cloud && localAllowed ? await store.readCheckpoints(uuid,ids) : new Map<number, ReadCheckpoint>();
-  const common = cloud && localAllowed ? await store.commonStates(uuid, 'episode',ids) : new Map<string, CommonEntry>();
+  const checkpoints = cloud && localAllowed ? (displayOnly ? await store.projectionCheckpoints(uuid,ids) : await store.readCheckpoints(uuid,ids)) : new Map<number, ReadCheckpoint>();
+  const common = cloud && localAllowed ? (displayOnly ? await store.projectionCommonStates(uuid,ids) : await store.commonStates(uuid, 'episode',ids)) : new Map<string, CommonEntry>();
   const remote = cloud?.shows.find((show: RemoteShowObservation) => show.id === showId);
   if (!store.projectionReadable(revision)) { throw new Error('Detail inputs changed'); }
   const effective = resolveEpisodes(full, remote, !!cloud, localIds, decisions, checkpoints, common);

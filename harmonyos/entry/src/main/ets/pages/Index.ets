@@ -613,6 +613,7 @@ struct Index {
     this.discoverMemo.clear();
     this.projectionMemo.clear();
     this.showProjectionCache.clear();
+    this.episodeStore?.releaseProjectionReadCache();
     this.libraryRevision++;
     this.displayRevisions.reset();
     this.collectionIndexMemos.clear();
@@ -1497,6 +1498,7 @@ struct Index {
       this.episodeNameIndex.clear(); this.seasonKeys.clear(); this.episodeSearchRevision++;
       this.presentationAttempts.retry();
     }
+    if (pressure || !this.pageVisible) { this.episodeStore?.releaseProjectionReadCache(); }
     if (pressure) {
       this.sortJobs.clear(); this.invalidateLazyWork();
       this.movieMetadataMemo.clear(); this.movieMemo.clear(); this.movieAllMemo.clear();
@@ -2964,6 +2966,7 @@ struct Index {
     this.discoverMemo.clear();
     this.projectionMemo.clear();
     this.showProjectionCache.clear();
+    this.episodeStore?.releaseProjectionReadCache();
     this.libraryRevision++;
     this.displayRevisions.reset();
     this.collectionIndexMemos.clear();

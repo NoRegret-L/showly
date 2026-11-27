@@ -1,3 +1,4 @@
+import { ProjectionInputIndex } from '../model/ProjectionDelta';
 import { CommitFence } from '../model/CommitFence';
 import { SeasonSlice } from '../model/DetailSession';
 import { ReadCancel, ConsumerReadFlight } from '../model/ReadFlight';
@@ -236,10 +237,123 @@ export class EpisodeStore {
     try { const value=await work(); success=true; return value; }
     finally { this.projectionFence.finish(token,success,ids,!success && !atomic); }
   }
+  // Derived, process-local read indexes only. Original evidence remains the
+  // sole authority for mutation/synchronization; all global writes evict them.
+  private localInputIndex=new ProjectionInputIndex<EpisodeBackupState,JournalIntent>(
+    (state: EpisodeBackupState)=>state.catalog.showId,
+    (intent: JournalIntent)=>intent.showId,(intent: JournalIntent)=>intent.episodeId);
+  private inputBound: string | undefined=undefined;
+  private inputDirty: Set<string>=new Set<string>();
+  private scheduleIndex: Map<string,FullEpisodeCatalog | undefined>=new Map<string,FullEpisodeCatalog | undefined>();
+  private evidenceBound: string='';
+  private checkpointIndex?: Map<number,ReadCheckpoint>;
+  private commonIndex?: Map<string,CommonEntry>;
+  private baselineIndex?: Set<number>;
+  private readResidency: number=0;
+  releaseProjectionReadCache(): void {
+    this.readResidency++; this.inputBound=undefined; this.inputDirty.clear();
+    this.localInputIndex.clear(); this.scheduleIndex.clear();
+    this.projectionSchedules.retain(new Set<string>());
+    this.evidenceBound=''; this.checkpointIndex=undefined; this.commonIndex=undefined; this.baselineIndex=undefined;
+  }
+  private consumeProjectionChanges(revision: number): void {
+    if (!this.projectionReadable(revision)) { throw new Error('Projection inputs changed'); }
+    if (this.projectionGlobalChanged()) { this.releaseProjectionReadCache(); }
+    else {
+      for (const id of this.projectionChangedIds()) {
+        this.inputDirty.add(id); this.scheduleIndex.delete(id);
+      }
+    }
+    this.clearProjectionChanges(revision);
+  }
+  private checkReadSnapshot(revision: number,residency: number): void {
+    if (!this.projectionReadable(revision) || residency!==this.readResidency) { throw new Error('Projection inputs changed'); }
+  }
+  private async prepareEvidence(uuid: string,revision: number,residency: number): Promise<void> {
+    if (this.evidenceBound===uuid && this.checkpointIndex && this.commonIndex) { return; }
+    const checkpoints=await this.readCheckpoints(uuid);
+    const common=await this.commonStates(uuid,'episode');
+    this.checkReadSnapshot(revision,residency);
+    this.evidenceBound=uuid; this.checkpointIndex=checkpoints; this.commonIndex=common;
+  }
+  async projectionCheckpoints(uuid: string,ids?: Set<number>): Promise<Map<number,ReadCheckpoint>> {
+    const revision=this.assertProjectionReadable(); this.consumeProjectionChanges(revision);
+    const residency=this.readResidency;
+    if (await this.boundAccount()!==uuid) { throw new Error('Invalid read checkpoint scope'); }
+    await this.prepareEvidence(uuid,revision,residency); this.checkReadSnapshot(revision,residency);
+    const result=new Map<number,ReadCheckpoint>();
+    const source=this.checkpointIndex;
+    if (!source) { throw new Error('Missing checkpoint index'); }
+    if (ids) { for (const id of ids) { const row=source.get(id); if (row) { result.set(id,row); } } }
+    else { return source; }
+    return result;
+  }
+  async projectionCommonStates(uuid: string,ids?: Set<number>): Promise<Map<string,CommonEntry>> {
+    const revision=this.assertProjectionReadable(); this.consumeProjectionChanges(revision);
+    const residency=this.readResidency;
+    if (await this.boundAccount()!==uuid) { throw new Error('Invalid baseline scope'); }
+    await this.prepareEvidence(uuid,revision,residency); this.checkReadSnapshot(revision,residency);
+    const result=new Map<string,CommonEntry>();
+    const source=this.commonIndex;
+    if (!source) { throw new Error('Missing common index'); }
+    if (ids) { for (const id of ids) { const key=id.toString(); const row=source.get(key); if (row) { result.set(key,row); } } }
+    else { return source; }
+    return result;
+  }
+  async projectionReadInputs(bound: string): Promise<ProjectionLocalInputs> {
+    const revision=this.assertProjectionReadable(); this.consumeProjectionChanges(revision);
+    const residency=this.readResidency;
+    if (await this.boundAccount()!==bound) { throw new Error('Account binding changed'); }
+    this.checkReadSnapshot(revision,residency);
+    if (this.inputBound!==bound) {
+      this.localInputIndex.clear(); this.inputBound=undefined; this.baselineIndex=undefined;
+    }
+    const baseline=this.baselineIndex??new Set<number>(bound?await this.cloudBaseline(bound):[]);
+    this.checkReadSnapshot(revision,residency);
+    if (this.inputBound===bound) {
+      try {
+        for (const id of Array.from(this.inputDirty)) {
+          const delta=await this.projectionLocalInputs(bound,id,baseline);
+          this.checkReadSnapshot(revision,residency);
+          this.localInputIndex.replaceShow(id,delta.states,delta.intents);
+          this.inputDirty.delete(id);
+        }
+        return {states:this.localInputIndex.states(),intents:this.localInputIndex.intents()};
+      } catch (error) {
+        // A partially applied read index is never returned. Full validation
+        // either reconstructs it or fails closed on malformed evidence.
+        this.localInputIndex.clear(); this.inputBound=undefined;
+        this.checkReadSnapshot(revision,residency);
+      }
+    }
+    const full=await this.projectionLocalInputs(bound,undefined,baseline);
+    this.checkReadSnapshot(revision,residency);
+    this.localInputIndex.replaceAll(full.states,full.intents);
+    this.baselineIndex=baseline; this.inputBound=bound; this.inputDirty.clear();
+    return full;
+  }
+  async projectionReadCatalogs(ids: Set<string>): Promise<Map<string,FullEpisodeCatalog>> {
+    const revision=this.assertProjectionReadable(); this.consumeProjectionChanges(revision);
+    const residency=this.readResidency;
+    const missing=new Set<string>();
+    for (const id of ids) { if (!this.scheduleIndex.has(id)) { missing.add(id); } }
+    if (missing.size) {
+      const delta=await this.projectionCatalogs(missing,false);
+      this.checkReadSnapshot(revision,residency);
+      for (const id of missing) { this.scheduleIndex.set(id,delta.get(id)); }
+    }
+    this.checkReadSnapshot(revision,residency);
+    const result=new Map<string,FullEpisodeCatalog>();
+    for (const id of ids) { const full=this.scheduleIndex.get(id); if (full) { result.set(id,full); } }
+    for (const id of this.scheduleIndex.keys()) { if (!ids.has(id)) { this.scheduleIndex.delete(id); } }
+    this.projectionSchedules.retain(new Set<string>(result.keys()));
+    return result;
+  }
   private readQueries: number = 0;
   private projectionSchedules: ScheduleReadCache = new ScheduleReadCache();
   projectionScheduleParseCount(): number { return this.projectionSchedules.parseCount(); }
   projectionCatalogKey(full: FullEpisodeCatalog): string { return this.projectionSchedules.key(full); }
+  projectionPositions(full: FullEpisodeCatalog): Set<string> { return this.projectionSchedules.positions(full); }
   readQueryCount(): number { return this.readQueries; }
   private async queryRead(sql: string, args: relationalStore.ValueType[] = []): Promise<relationalStore.ResultSet> {
     this.readQueries++;
@@ -387,7 +501,7 @@ export class EpisodeStore {
     return result;
   }
 
-  async saveProjectionRows(scope: string, rows: IndexedProjectionRow[]): Promise<void> {
+  async saveProjectionRows(scope: string, rows: IndexedProjectionRow[]): Promise<boolean> {
     const limit = Math.floor(SQLITE_BIND_LIMIT / 7);
     try {
       for (let start = 0; start < rows.length; start += limit) {
@@ -400,7 +514,8 @@ export class EpisodeStore {
         }
         await this.db.executeSql('INSERT OR REPLACE INTO progress_projection_row_v2(scope,show_id,catalog_key,state_key,computed_at,valid_until,payload) VALUES ' + values.join(','),args);
       }
-    } catch (error) { /* optional cache; missing rows recompute */ }
+      return true;
+    } catch (error) { return false; /* optional cache; missing rows recompute */ }
   }
 
   async removeProjectionRows(scope: string, ids: string[]): Promise<void> {
@@ -415,7 +530,7 @@ export class EpisodeStore {
   }
 
   // Indexed target read. The DB remains authoritative on every read.
-  async projectionCatalogs(ids: Set<string>): Promise<Map<string, FullEpisodeCatalog>> {
+  async projectionCatalogs(ids: Set<string>,retain: boolean=true): Promise<Map<string, FullEpisodeCatalog>> {
     const result = new Map<string, FullEpisodeCatalog>();
     const targets = Array.from(ids);
     for (let start = 0; start < targets.length; start += SQLITE_BIND_LIMIT) {
@@ -429,19 +544,21 @@ export class EpisodeStore {
         }
       } finally { rows.close(); }
     }
-    this.projectionSchedules.retain(new Set<string>(result.keys()));
+    if (retain) { this.projectionSchedules.retain(new Set<string>(result.keys())); }
     return result;
   }
 
   // Read-only batch for a projection already protected by the page's
   // cloudBusy/localBusy gate. Do not use it to authorize a write.
-  async projectionLocalInputs(bound: string): Promise<ProjectionLocalInputs> {
+  async projectionLocalInputs(bound: string,showScope?: string,sharedBaseline?: Set<number>): Promise<ProjectionLocalInputs> {
     const revision = this.assertProjectionReadable();
     if (await this.boundAccount() !== bound) { throw new Error('Account binding changed'); }
     const catalogs = new Map<string, EpisodeCatalog>();
     const restored = new Map<string, number[]>();
     const episodes = new Map<string, Map<number, LocalEpisode>>();
-    const rows = await this.queryRead('SELECT c.show_id,c.catalog,r.episode_ids FROM episode_catalog c LEFT JOIN episode_restore_baseline r ON r.show_id=c.show_id ORDER BY c.show_id');
+    const rows = showScope===undefined ?
+      await this.queryRead('SELECT c.show_id,c.catalog,r.episode_ids FROM episode_catalog c LEFT JOIN episode_restore_baseline r ON r.show_id=c.show_id ORDER BY c.show_id') :
+      await this.queryRead('SELECT c.show_id,c.catalog,r.episode_ids FROM episode_catalog c LEFT JOIN episode_restore_baseline r ON r.show_id=c.show_id WHERE c.show_id=? ORDER BY c.show_id',[showScope]);
     try {
       while (rows.goToNextRow()) {
         const id = rows.getString(0);
@@ -458,10 +575,12 @@ export class EpisodeStore {
         }
       }
     } finally { rows.close(); }
-    const baseline = new Set<number>(bound ? await this.cloudBaseline(bound) : []);
+    const baseline = sharedBaseline??new Set<number>(bound ? await this.cloudBaseline(bound) : []);
     const events = new Map<string, ReadJournalEvent[]>();
     const latest = new Map<number, JournalIntent>();
-    const journal = await this.queryRead('SELECT show_id,episode_ids,watched,seq,auto_uuid,changed_at FROM episode_event ORDER BY seq');
+    const journal = showScope===undefined ?
+      await this.queryRead('SELECT show_id,episode_ids,watched,seq,auto_uuid,changed_at FROM episode_event ORDER BY seq') :
+      await this.queryRead('SELECT show_id,episode_ids,watched,seq,auto_uuid,changed_at FROM episode_event WHERE show_id=? ORDER BY seq',[showScope]);
     try {
       while (journal.goToNextRow()) {
         const showId = journal.getString(0);
