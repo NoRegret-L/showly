@@ -117,9 +117,18 @@ assert "readCollectionRatings(session,'movie',source.activity)" in page
 assert "SELECT show_id,season,payload FROM presentation_season" not in repo
 assert "SELECT payload FROM presentation_season WHERE show_id=? AND season=?" in repo
 assert "await repo.hydrateSeason(" in page
-assert "this.presentation.takeChanges()" in page and "this.titleIndex.clear()" not in page and "this.episodeNameIndex.clear()" not in page
+publish=section(page,"  private publishPresentation(","  private displayTitle(")
+release=section(page,"  private releaseInactiveCaches(","  private scheduleLazyRows(")
+assert "this.presentation.takeChanges()" in publish
+assert "this.titleIndex.clear()" not in page
+assert "this.episodeNameIndex.clear()" not in publish
+assert "this.episodeNameIndex.clear()" in release and "this.presentation?.releaseTransient()" in release
+assert page.count("this.episodeNameIndex.clear()")==1
 assert "await Promise.all([" in section(page,"  private async loadPresentation(","  private ") 
-assert "this.titleWrites.set(id,task)" in repo and "const old = this.titles.get(id)" in repo
+patch=section(repo,"  private async saveTitlePatch(","  async hydrateSeason(")
+assert "this.titleWrites.set(id,task)" in patch and "const old = await this.readTitle(id,version)" in patch
+assert "const previous = this.titleWrites.get(id)" in patch and "version!==this.residency" in patch
+assert patch.index("const old = await this.readTitle(id,version)") < patch.index("INSERT OR REPLACE INTO presentation_title")
 assert "summaryFlights.run(" in detail and "posterFlights.run(" in detail
 assert "if (epoch === summaryEpoch)" in detail
 assert "ratingFlights.run(" in lib and "await readActivity(session)" in section(lib,"async function readRatingsVerified(","async function readObservationCollections(")
