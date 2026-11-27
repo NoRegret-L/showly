@@ -6,6 +6,11 @@ export class MediaInputVersion {
   private keys: Map<string,string>=new Map<string,string>();
   private ids: string[]=[];
   private changes: string[]=[];
+  private projectionPending:Set<string>=new Set<string>();
+  private projectionGlobal:boolean=true;
+  projectionChangedIds():string[]{return Array.from(this.projectionPending);}
+  projectionOrderChanged():boolean{return this.projectionGlobal;}
+  acknowledgeProjection(version:string):void{if(version===this.version()){this.projectionPending.clear();this.projectionGlobal=false;}}
   version(): string { return this.serial.toString(); }
   changedIds(): string[] { return [...this.changes]; }
   replace(records: MediaRecord[]): boolean {
@@ -23,6 +28,10 @@ export class MediaInputVersion {
     if (!order) { for (let i=0;i<ids.length;i++) { if (ids[i]!==this.ids[i]) { order=true; break; } } }
     this.changes=Array.from(changed);
     if (!order && !changed.size) { return false; }
+    const oldCommon=this.ids.filter((id:string)=>next.has(id));
+    const newCommon=ids.filter((id:string)=>this.keys.has(id));
+    if(oldCommon.length!==newCommon.length||oldCommon.some((id:string,i:number)=>id!==newCommon[i])||next.size!==ids.length){this.projectionGlobal=true;this.projectionPending.clear();}
+    if(!this.projectionGlobal){for(const id of changed){this.projectionPending.add(id);}}
     this.ids=ids; this.keys=next; this.serial++;
     return true;
   }

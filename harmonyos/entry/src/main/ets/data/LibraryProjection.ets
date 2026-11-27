@@ -1,5 +1,6 @@
+import { MediaInputVersion } from '../model/MediaInputVersion';
 import { hiTraceMeter } from '@kit.PerformanceAnalysisKit';
-import { replaceProjectionRows, sameProjectionMembers, utf8ProjectionBytes } from '../model/ProjectionRows';
+import { mergeProjectionMembers, scopedProjectionMembers, ProjectionMemberOrder, utf8ProjectionBytes } from '../model/ProjectionRows';
 import { taskpool } from '@kit.ArkTS';
 import { CalendarSource } from '../model/CalendarRules';
 import { summarizeAired } from '../model/BatchEpisodeRead';
@@ -293,74 +294,83 @@ export class LibraryProjectionSession {
   private scopeKey:string='';
   private epoch:number=0;
   private traceId:number=0;
+  private memberOrder:ProjectionMemberOrder=new ProjectionMemberOrder();
   private members:Set<string>=new Set<string>();
-  private nextMembers:Set<string>=new Set<string>();
   private byRecord:Map<string,MediaRecord[]>=new Map<string,MediaRecord[]>();
   private byRemote:Map<string,RemoteShowObservation>=new Map<string,RemoteShowObservation>();
   private byQueue:Map<string,Media>=new Map<string,Media>();
   clear():void{
     this.epoch++;this.prior=undefined;this.store=undefined;this.records=undefined;this.cloud=undefined;this.scopeKey='';
-    this.members.clear();this.nextMembers.clear();this.byRecord.clear();this.byRemote.clear();this.byQueue.clear();
+    this.members.clear();this.byRecord.clear();this.byRemote.clear();this.byQueue.clear();
   }
   private seed(store:EpisodeStore,records:MediaRecord[],cloud:RemoteLibraryObservation|undefined,key:string,result:LibraryProjection):void{
     this.clear();this.store=store;this.records=records;this.cloud=cloud;this.scopeKey=key;this.prior=result;
     for(const row of result.evidence){this.members.add(row.media.id);}
-    for(const row of result.next){this.nextMembers.add(row.media.id);}
+    this.memberOrder=this.orderFor(records,cloud,result.localAllowed);
     for(const row of records){let list=this.byRecord.get(row.media.id);if(!list){list=[];this.byRecord.set(row.media.id,list);}list.push(row);}
     for(const row of cloud?.shows??[]){this.byRemote.set(row.id,row);}
     for(const row of cloud?.watchlist??[]){this.byQueue.set(row.id,row);}
   }
-  private select(ids:Set<string>):ProjectionScope{
+  private orderFor(records:MediaRecord[],cloud:RemoteLibraryObservation|undefined,localAllowed:boolean):ProjectionMemberOrder{
+    const order=new ProjectionMemberOrder();
+    order.seed(localAllowed?records.map((r:MediaRecord)=>r.media.id):[],(cloud?.watchlist??[]).map((r:Media)=>r.id),(cloud?.shows??[]).map((r:RemoteShowObservation)=>r.id));
+    return order;
+  }
+  private select(ids:Set<string>,snapshot:MediaRecord[]):ProjectionScope{
     const records:MediaRecord[]=[],shows:RemoteShowObservation[]=[],watchlist:Media[]=[];
+    const byRecord=snapshot===this.records?this.byRecord:new Map<string,MediaRecord[]>();
+    if(snapshot!==this.records){for(const row of snapshot){if(ids.has(row.media.id)){let list=byRecord.get(row.media.id);if(!list){list=[];byRecord.set(row.media.id,list);}list.push(row);}}}
     for(const id of ids){
-      for(const row of this.byRecord.get(id)??[]){records.push(row);}
+      for(const row of byRecord.get(id)??[]){records.push(row);}
       const remote=this.byRemote.get(id);if(remote){shows.push(remote);}
       const queued=this.byQueue.get(id);if(queued){watchlist.push(queued);}
     }
     return {ids:ids,records:records,shows:shows,watchlist:watchlist};
   }
   async read(store:EpisodeStore,records:MediaRecord[],cloud:RemoteLibraryObservation|undefined,uuid:string,clientId:string,fill:boolean,force:boolean,
-    current:()=>boolean,progress:(done:number,total:number)=>void,cache:ShowProjectionCache):Promise<LibraryProjection>{
-    const revision=store.assertProjectionReadable(),now=Date.now(),epoch=this.epoch;
-    const valid=():boolean=>current()&&this.epoch===epoch;
+    current:()=>boolean,progress:(done:number,total:number)=>void,cache:ShowProjectionCache,mediaVersion:MediaInputVersion):Promise<LibraryProjection>{
+    const revision=store.assertProjectionReadable(),now=Date.now(),epoch=this.epoch,recordVersion=mediaVersion.version();
+    const valid=():boolean=>current()&&this.epoch===epoch&&mediaVersion.version()===recordVersion;
     const key=JSON.stringify([clientId,uuid,cloud?.generation??-1]);
     const prior=this.prior,trace=++this.traceId;
     let tracing=false;
     try{hiTraceMeter.startTrace('Showly.LibraryProjection',trace);tracing=true;}catch(error){}
     try{
       const ids=new Set<string>(store.libraryChangedIds());
-      if(!fill&&!force&&prior&&this.store===store&&this.records===records&&this.cloud===cloud&&this.scopeKey===key&&
-        !store.libraryGlobalChanged()&&ids.size>0&&now>=prior.computedAt&&now<prior.validUntil&&
-        Array.from(ids).every((id:string)=>this.members.has(id))){
-        const scope=this.select(ids);
+      for(const id of mediaVersion.projectionChangedIds()){ids.add(id);}
+      if(!fill&&!force&&prior&&this.store===store&&this.cloud===cloud&&this.scopeKey===key&&
+        !store.libraryGlobalChanged()&&!mediaVersion.projectionOrderChanged()&&ids.size>0&&now>=prior.computedAt&&now<prior.validUntil){
+        const scope=this.select(ids,records);
+        const order=records===this.records?this.memberOrder:this.orderFor(records,cloud,prior.localAllowed);
         const delta=await projectLibrary(store,records,cloud,uuid,clientId,false,valid,progress,cache,scope);
         if(!valid()||!store.projectionReadable(revision)){throw new Error('Projection inputs changed');}
-        const expectedNext=new Set<string>();
-        for(const id of ids){if(this.nextMembers.has(id)){expectedNext.add(id);}}
-        // Keep the exact original target order. A membership transition or a
-        // fresh checkpoint requires the full validated path, not a splice guess.
+        let oldAffected=0;for(const id of ids){if(this.members.has(id)){oldAffected++;}}
+        // A fresh checkpoint still requires full validated publication. Membership
+        // additions/removals use original union source precedence.
         if(delta.cacheable&&!delta.matches.length&&delta.localAllowed===prior.localAllowed&&
           delta.computedAt>=prior.computedAt&&delta.computedAt<prior.validUntil&&
-          sameProjectionMembers(delta.evidence,ids,(row:LibraryShowEvidence)=>row.media.id)&&
-          sameProjectionMembers(delta.calendar,ids,(row:CalendarSource)=>row.media.id)&&
-          sameProjectionMembers(delta.next,expectedNext,(row:NextShow)=>row.media.id)){
+          scopedProjectionMembers(delta.evidence,ids,(row:LibraryShowEvidence)=>row.media.id)&&
+          scopedProjectionMembers(delta.calendar,ids,(row:CalendarSource)=>row.media.id)&&
+          scopedProjectionMembers(delta.next,ids,(row:NextShow)=>row.media.id)){
           const result:LibraryProjection={
-            evidence:replaceProjectionRows(prior.evidence,delta.evidence,ids,(row:LibraryShowEvidence)=>row.media.id),
-            next:replaceProjectionRows(prior.next,delta.next,ids,(row:NextShow)=>row.media.id),
-            calendar:replaceProjectionRows(prior.calendar,delta.calendar,ids,(row:CalendarSource)=>row.media.id),
+            evidence:mergeProjectionMembers(prior.evidence,delta.evidence,ids,(row:LibraryShowEvidence)=>row.media.id,order),
+            next:mergeProjectionMembers(prior.next,delta.next,ids,(row:NextShow)=>row.media.id,order),
+            calendar:mergeProjectionMembers(prior.calendar,delta.calendar,ids,(row:CalendarSource)=>row.media.id,order),
             missing:0,failed:0,localAllowed:delta.localAllowed,matches:[],computedAt:delta.computedAt,
             validUntil:Math.min(prior.validUntil,delta.validUntil),cacheable:true,
-            computedShows:delta.computedShows,reusedShows:prior.evidence.length-ids.size+delta.reusedShows,
+            computedShows:delta.computedShows,reusedShows:prior.evidence.length-oldAffected+delta.reusedShows,
             diskHits:delta.diskHits,scheduleParses:delta.scheduleParses,diskParses:delta.diskParses,diskWrites:delta.diskWrites,
             workerBatches:delta.workerBatches,visitedShows:delta.visitedShows,workerInputBytes:delta.workerInputBytes,repairTargets:[]
           };
-          this.prior=result;store.acknowledgeLibrary(revision);return result;
+          if(records!==this.records){this.seed(store,records,cloud,key,result);}
+          else{this.prior=result;for(const id of ids){this.members.delete(id);}for(const row of delta.evidence){this.members.add(row.media.id);}}
+          store.acknowledgeLibrary(revision);mediaVersion.acknowledgeProjection(recordVersion);return result;
         }
       }
       const result=await projectLibrary(store,records,cloud,uuid,clientId,fill,valid,progress,cache);
       if(!valid()||(!fill&&!store.projectionReadable(revision))){throw new Error('Projection inputs changed');}
       if(!fill&&result.cacheable&&!result.matches.length&&store.projectionReadable(revision)){
-        this.seed(store,records,cloud,key,result);store.acknowledgeLibrary(revision);
+        this.seed(store,records,cloud,key,result);store.acknowledgeLibrary(revision);mediaVersion.acknowledgeProjection(recordVersion);
       }else{this.clear();}
       return result;
     }finally{if(tracing){try{hiTraceMeter.finishTrace('Showly.LibraryProjection',trace);}catch(error){}}}

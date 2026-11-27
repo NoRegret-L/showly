@@ -132,3 +132,16 @@ export function businessLibraryLabel(row: PersonalLibraryRow): string {
 export function isPersonalMember(row: PersonalLibraryRow): boolean {
   return row.queued || row.watched || hasTrackingEvidence(row);
 }
+
+function sameMedia(a:Media,b:Media):boolean{
+  return a===b||(a.id===b.id&&a.kind===b.kind&&a.title===b.title&&a.year===b.year&&a.watched===b.watched);
+}
+function sameRecord(a?:MediaRecord,b?:MediaRecord):boolean{
+  return a===b||!!a&&!!b&&sameMedia(a.media,b.media)&&a.movieState===b.movieState&&a.watchlistState===b.watchlistState&&a.followState===b.followState&&a.restoredWatchlist===b.restoredWatchlist;
+}
+export function sameLibraryRow(a:PersonalLibraryRow,b:PersonalLibraryRow):boolean{
+  return a===b||sameMedia(a.media,b.media)&&sameRecord(a.localRecord,b.localRecord)&&
+    a.queued===b.queued&&a.watched===b.watched&&a.localEpisodes===b.localEpisodes&&a.cloudEpisodes===b.cloudEpisodes&&
+    a.merged===b.merged&&a.effectiveWatched===b.effectiveWatched&&a.effectiveTotal===b.effectiveTotal&&
+    (a.sections===b.sections||!!a.sections&&!!b.sections&&a.sections.length===b.sections.length&&a.sections.every((x:string,i:number)=>x===b.sections?.[i]));
+}

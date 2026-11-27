@@ -80,3 +80,25 @@ export class SearchCandidateTitles {
   }
   patchCount():number{return this.patches;}
 }
+
+// Columnar wire format preserves every SearchCandidate field and input order.
+// It removes repeated JSON field names, not search semantics.
+export interface SearchColumns {id:string[];kind:string[];title:string[];year:number[];watched:boolean[];votes:number[];localized:string[];}
+export interface SearchWire {catalog:SearchColumns;remote:SearchColumns;query:string;suggestions:boolean;options:SearchOptions;}
+function packSearchRows(rows:SearchCandidate[]):SearchColumns{
+  const result:SearchColumns={id:[],kind:[],title:[],year:[],watched:[],votes:[],localized:[]};
+  for(const row of rows){result.id.push(row.media.id);result.kind.push(row.media.kind);result.title.push(row.media.title);result.year.push(row.media.year);
+    result.watched.push(row.media.watched);result.votes.push(row.votes);result.localized.push(row.localized);}
+  return result;
+}
+function unpackSearchRows(rows:SearchColumns):SearchCandidate[]{
+  const result:SearchCandidate[]=[];
+  for(let i=0;i<rows.id.length;i++){result.push({media:{id:rows.id[i],kind:rows.kind[i],title:rows.title[i],year:rows.year[i],watched:rows.watched[i]},votes:rows.votes[i],localized:rows.localized[i]});}
+  return result;
+}
+export function packSearch(input:SearchInput):SearchWire{
+  return {catalog:packSearchRows(input.catalog),remote:packSearchRows(input.remote),query:input.query,suggestions:input.suggestions,options:input.options};
+}
+export function unpackSearch(input:SearchWire):SearchInput{
+  return {catalog:unpackSearchRows(input.catalog),remote:unpackSearchRows(input.remote),query:input.query,suggestions:input.suggestions,options:input.options};
+}

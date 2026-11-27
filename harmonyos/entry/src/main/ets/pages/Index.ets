@@ -17,7 +17,7 @@ import { DisplayRevisions, LatestDisplayJobs } from '../model/DisplayJobs';
 import { ProgressSortInput, MovieSortInput, CollectionSortInput } from '../model/DisplaySort';
 import { diffDisplay, showDisplay, movieDisplay, collectionDisplay } from '../data/DisplayTasks';
 import { ViewportTasks, addPresentationTask } from '../model/ViewportTasks';
-import { CollectionCandidate, CollectionOptions, CollectionState, HiddenEntry, defaultCollection, emptyCollectionState, collectionMembers, recentCollection, recordCollectionDate, transitionCollectionDates, hideMedia, collectionSortEligible, compareCollectionCandidates } from '../model/CollectionRules';
+import { CollectionCandidate, CollectionOptions, CollectionState, HiddenEntry, defaultCollection, emptyCollectionState, collectionMembers, recentCollection, recordCollectionDate, transitionCollectionDates, hideMedia, collectionSortEligible, compareCollectionCandidates, sameCollectionCandidate } from '../model/CollectionRules';
 import { PresentationAttempts, PresentationFailure, presentationFailure } from '../model/PresentationPolicy';
 import { presentationGate } from '../data/PresentationHttp';
 import { PresentationRepository } from '../data/PresentationRepository';
@@ -40,7 +40,7 @@ import { CandidateInput, CandidateBatch, CandidateResult, ProgressCandidateIndex
 import { CacheLifecycle, cacheResidency, memoryEvents } from '../model/CacheLifecycle';
 import { computeCandidateDisplay } from '../data/ProgressCandidateTask';
 import { ShowProjectionCache } from '../model/ProjectionCompute';
-import { MovieProgressOptions, MovieProgressSource, defaultMovieProgress, validMovieProgress, movieProgressRows as projectMovieProgress, clearMoviePin, movieSortEligible, compareMovieSources } from '../model/MovieProgressRules';
+import { MovieProgressOptions, MovieProgressSource, defaultMovieProgress, validMovieProgress, movieProgressRows as projectMovieProgress, clearMoviePin, movieSortEligible, compareMovieSources, sameMovieSource } from '../model/MovieProgressRules';
 import { ProgressSource, ProgressPreferences, ProgressFlag, ProgressRow, defaultProgress, validProgress, toggleProgressFlag, selectProgress, sortProgressCandidates, ProgressEntry, progressSections, progressEntries, progressPage, effectiveProgressFilter } from '../model/ProgressRules';
 import { CalendarSource, CalendarInput, CalendarEntry, CalendarIndex, CalendarText, CalendarJobInput, calendarClockKey, calendarExpiry, calendarPageRows, calendarTitleHidden } from '../model/CalendarRules';
 import { calendarDisplay } from '../data/CalendarTask';
@@ -3114,7 +3114,7 @@ struct Index {
       ():boolean=>current()&&recordKey===this.mediaInput.version(),
       (done: number, total: number): void => {
         if (fill) { this.cloudStatus = '计算个人库及补齐目录 ' + done + '/' + total; }
-      }, this.showProjectionCache);
+      }, this.showProjectionCache,this.mediaInput);
     if (!current() || recordKey!==this.mediaInput.version() || (!fill && !store.projectionReadable(readRevision))) { throw new Error('Observation session changed'); }
     const finalKey=key;
     // The caller serializes edits with cloudBusy/localBusy. A missing or
@@ -5209,8 +5209,8 @@ struct Index {
       .onScrollIndex((start: number,end: number,center: number)=>{ this.onListScroll('calendar',start); })
   }
 
-  private movieSortKey(query: string, utc: string, includeTitles:boolean=true): string {
-    return JSON.stringify([this.displayRevisions.movie,this.libraryRevision,this.currentProgressScope(),this.activeCloud()?.generation ?? -1,
+  private movieSortKey(query: string, utc: string, includeTitles:boolean=true,includeBusiness:boolean=true): string {
+    return JSON.stringify([includeBusiness?this.displayRevisions.movie:0,includeBusiness?this.libraryRevision:0,this.currentProgressScope(),this.activeCloud()?.generation ?? -1,
       this.presentationLanguage,includeTitles && this.presentationLanguage==='zh' && (query || this.movieProgressOptions.sort==='title' || this.movieProgressOptions.sort==='userRating') ? this.titleVersion('movie') : 0,this.progressFlagScope,this.flagVersion('movie'),this.hiddenVersion('movie'),
       this.movieProgressOptions,this.movieRandomSeed,utc,query]);
   }
@@ -5251,6 +5251,10 @@ struct Index {
       memo.put(key,rows,now,expiry);
       return rows;
     }
+    const pins=new Set<string>(flags.filter((f:ProgressFlag)=>f.pinned).map((f:ProgressFlag)=>f.id));
+    const reconciled=order.reconcile(this.movieSortKey(query,utc,false),this.movieSortKey(query,utc,false,false),now,expiry,sources,sameMovieSource,
+      (x:MovieProgressSource)=>movieSortEligible(x,utc,query),(a:MovieProgressSource,b:MovieProgressSource)=>compareMovieSources(a,b,this.movieProgressOptions,pins,this.movieRandomSeed));
+    if(reconciled){memo.put(key,reconciled,now,expiry);return reconciled;}
     const input: MovieSortInput = {sources:sources,flags:flags,options:this.movieProgressOptions,utc:utc,query:query,seed:this.movieRandomSeed};
     this.runMovieSort(input,key,now,expiry);
     return [];
@@ -5268,7 +5272,7 @@ struct Index {
           Date.now() < now || Date.now() >= expiry) { return; }
       const memo = input.query ? this.movieMemo : this.movieAllMemo;
       const order=input.query?this.movieTitleOrder:this.movieAllTitleOrder;
-      order.seed(this.movieSortKey(input.query,input.utc,false),now,expiry,input.sources,rows);
+      order.seed(this.movieSortKey(input.query,input.utc,false),now,expiry,input.sources,rows,this.movieSortKey(input.query,input.utc,false,false));
       memo.put(key,rows,now,expiry);
     } catch (error) { if (!(error instanceof ReadCancelled)) { throw new Error((error as Error).message); } }
     finally {
@@ -5737,9 +5741,9 @@ struct Index {
     return rows;
   }
   private collectionSource(): PersonalLibraryRow[] { return this.collectionBase(); }
-  private collectionSortKey(includeTitles:boolean=true): string {
+  private collectionSortKey(includeTitles:boolean=true,includeBusiness:boolean=true): string {
     const options = this.collectionFilter === 'other' ? defaultCollection() : this.collectionOptions;
-    return JSON.stringify([this.displayRevisions.collection,this.libraryRevision,this.collectionScope,this.currentProgressScope(),
+    return JSON.stringify([includeBusiness?this.displayRevisions.collection:0,includeBusiness?this.libraryRevision:0,this.collectionScope,this.currentProgressScope(),
       this.mediaMode,this.collectionFilter,this.collectionStatusFilter,this.collectionQuery,options,this.presentationLanguage,
       includeTitles && this.presentationLanguage==='zh' && (this.collectionQuery.trim() || options.sort==='title' || options.sort==='userRating') ? this.titleVersion(this.mediaMode) : 0,this.collectionNeedsMetadata() ? this.metaVersion(this.mediaMode) : 0]);
   }
@@ -5764,6 +5768,10 @@ struct Index {
         if (date >= now) { expiry = Math.min(expiry,date === now ? date + 1 : date); }
       }
     }
+    const reconciled=this.collectionTitleOrder.reconcile(this.collectionSortKey(false),this.collectionSortKey(false,false),now,expiry,candidates,sameCollectionCandidate,
+      (x:CollectionCandidate)=>collectionSortEligible(x,options,this.collectionFilter,this.collectionQuery,now),
+      (a:CollectionCandidate,b:CollectionCandidate)=>compareCollectionCandidates(a,b,options,this.collectionFilter));
+    if(reconciled){this.collectionItemsMemo.put(key,reconciled,now,expiry);return reconciled;}
     const input: CollectionSortInput = {candidates:candidates,options:options,section:this.collectionFilter,query:this.collectionQuery,now:now};
     this.runCollectionSort(input,key,expiry);
     return [];
@@ -5778,7 +5786,7 @@ struct Index {
       if (!this.sortJobs.current(slot,token) || !this.pageVisible || this.selectedMedia || this.tab !== 'library' ||
           epoch !== this.presentationEpoch || key !== this.collectionSortKey() ||
           (this.signedIn && !this.activeCloud()) || Date.now() < input.now || Date.now() >= expiry) { return; }
-      this.collectionTitleOrder.seed(this.collectionSortKey(false),input.now,expiry,input.candidates,rows);
+      this.collectionTitleOrder.seed(this.collectionSortKey(false),input.now,expiry,input.candidates,rows,this.collectionSortKey(false,false));
       this.collectionItemsMemo.put(key,rows,input.now,expiry);
     } catch (error) { if (!(error instanceof ReadCancelled)) { throw new Error((error as Error).message); } }
     finally {

@@ -1,4 +1,4 @@
-import { PersonalLibraryRow } from './PersonalLibrary';
+import { PersonalLibraryRow, sameLibraryRow } from './PersonalLibrary';
 import { ProgressFlag } from './ProgressRules';
 import { matchesText } from './MediaPresentation';
 import { isTraktMedia } from './MediaState';
@@ -78,4 +78,10 @@ export function compareMovieSources(a:MovieProgressSource,b:MovieProgressSource,
 }
 export function clearMoviePin(flags: ProgressFlag[], id: string): ProgressFlag[] {
   return flags.filter((flag: ProgressFlag) => flag.id !== id);
+}
+
+export function sameMovieSource(a:MovieProgressSource,b:MovieProgressSource):boolean{
+  const x=a.metadata,y=b.metadata;
+  return sameLibraryRow(a.row,b.row)&&a.translation===b.translation&&x.id===y.id&&x.released===y.released&&x.year===y.year&&
+    x.runtime===y.runtime&&x.rating===y.rating&&x.addedAt===y.addedAt&&x.userRating===y.userRating;
 }

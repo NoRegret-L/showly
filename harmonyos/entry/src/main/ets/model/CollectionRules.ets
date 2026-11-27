@@ -1,6 +1,6 @@
 import { Media, CollectionDate } from './Media';
 import { isTraktMedia } from './MediaState';
-import { PersonalLibraryRow, hasTrackingEvidence } from './PersonalLibrary';
+import { PersonalLibraryRow, hasTrackingEvidence, sameLibraryRow } from './PersonalLibrary';
 import { collectionRows } from './NavigationModel';
 import { CollectionMeta, matchesText } from './MediaPresentation';
 
@@ -129,4 +129,11 @@ export function recentCollection(items: CollectionCandidate[], amount: number): 
   return items.filter((x: CollectionCandidate) => x.added !== undefined)
     .sort((a: CollectionCandidate,b: CollectionCandidate) => numeric(a.added,b.added,true))
     .slice(0,amount).map((x: CollectionCandidate) => x.row);
+}
+
+export function sameCollectionCandidate(a:CollectionCandidate,b:CollectionCandidate):boolean{
+  const x=a.meta,y=b.meta;
+  return sameLibraryRow(a.row,b.row)&&a.translation===b.translation&&a.added===b.added&&a.recent===b.recent&&
+    a.userRating===b.userRating&&a.randomOrder===b.randomOrder&&(x===y||!!x&&!!y&&x.network===y.network&&x.release===y.release&&
+    x.rating===y.rating&&x.runtime===y.runtime&&x.genres.length===y.genres.length&&x.genres.every((g:string,i:number)=>g===y.genres[i]));
 }
