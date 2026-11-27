@@ -1,4 +1,4 @@
-# Showly HarmonyOS Preview v0.9.3e.2d.8
+# Showly HarmonyOS Preview v0.9.3e.2d.9
 
 Unofficial native ArkTS prototype, not a complete Showly port. Your app uses Trakt but is not endorsed or certified by Trakt.
 
@@ -219,3 +219,6 @@ See [Local calendar](docs/CALENDAR_LOCAL.md).
 
 ## v0.9.3e.2d.8 — presentation resource scheduling (0.9.3.25, build 49)
 See [Presentation scheduling](docs/PRESENTATION_SCHEDULING.md).
+
+## v0.9.3e.2d.9 — local-first search (0.9.3.26, build 50)
+See [Search read model](docs/SEARCH_LOCAL.md).
