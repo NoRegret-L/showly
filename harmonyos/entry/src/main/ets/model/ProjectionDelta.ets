@@ -4,7 +4,12 @@ export class ProjectionInputIndex<S,I> {
   private stateByShow: Map<string,S>=new Map<string,S>();
   private intentByShow: Map<string,I[]>=new Map<string,I[]>();
   private owner: Map<number,string>=new Map<number,string>();
-  constructor(private stateId: (state:S)=>string,private showId: (intent:I)=>string,private episodeId: (intent:I)=>number) {}
+  private stateId: (state:S)=>string;
+  private showId: (intent:I)=>string;
+  private episodeId: (intent:I)=>number;
+  constructor(stateId: (state:S)=>string,showId: (intent:I)=>string,episodeId: (intent:I)=>number) {
+    this.stateId=stateId; this.showId=showId; this.episodeId=episodeId;
+  }
   clear(): void { this.stateByShow.clear(); this.intentByShow.clear(); this.owner.clear(); }
   replaceAll(states: S[],intents: I[]): void {
     this.clear();
