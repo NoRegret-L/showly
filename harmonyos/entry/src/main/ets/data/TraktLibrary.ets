@@ -1,5 +1,7 @@
 import { http } from '@kit.NetworkKit';
-import { Media, CollectionDate } from '../model/Media';
+import { Media, CollectionDate, PersonalMovie, PersonalMovieSnapshot, validReleaseDate } from '../model/Media';
+import { ReadFlight } from '../model/ReadFlight';
+export { PersonalMovie, PersonalMovieSnapshot, validReleaseDate } from '../model/Media';
 import { TraktSession, traktAuth } from './TraktAuth';
 import { RemotePlayPosition, RemoteMovieObservation, RemoteLibraryObservation, RemoteShowObservation, validateObservation } from '../model/RemoteObservation';
 
@@ -110,10 +112,12 @@ async function readPage(session: TraktSession, path: string, page: number): Prom
   }
 }
 
-async function readAll(session: TraktSession, path: string): Promise<SyncItem[]> {
+async function readAll(session: TraktSession, path: string, allowed?: () => boolean): Promise<SyncItem[]> {
+  if (allowed && !allowed()) { throw new Error('Read group stopped'); }
   const first = await readPage(session, path, 1);
   const result: SyncItem[] = [...first.items];
   for (let page = 2; page <= first.pages; page++) {
+    if (allowed && !allowed()) { throw new Error('Read group stopped'); }
     const next = await readPage(session, path, page);
     if (next.pages !== first.pages || next.total !== first.total || next.items.length === 0) {
       throw new Error('Library changed while reading; retry');
@@ -187,7 +191,15 @@ function showProgress(rows: SyncItem[]): ShowProgress[] {
 }
 
 export interface CollectionRating { id: string; value: number; }
+const ratingFlights = new ReadFlight<CollectionRating[]>();
 export async function readCollectionRatings(session: TraktSession, kind: string, activity: string): Promise<CollectionRating[]> {
+  ensureCurrent(session);
+  const result = await ratingFlights.run(JSON.stringify([session.clientId,session.generation,kind,activity]),
+    () => readRatingsVerified(session,kind,activity));
+  ensureCurrent(session);
+  return result;
+}
+async function readRatingsVerified(session: TraktSession, kind: string, activity: string): Promise<CollectionRating[]> {
   if (kind !== 'show' && kind !== 'movie') { throw new Error('Invalid rating kind'); }
   if (await readActivity(session) !== activity) { throw new Error('Activity changed'); }
   const rows = await readAll(session, 'sync/ratings/' + (kind === 'show' ? 'shows' : 'movies'));
@@ -205,17 +217,41 @@ export async function readCollectionRatings(session: TraktSession, kind: string,
   ensureCurrent(session);
   return ratings;
 }
+async function readObservationCollections(session: TraktSession): Promise<SyncItem[][]> {
+  let failure: Error | undefined;
+  const read = async (path: string): Promise<SyncItem[]> => {
+    try { return await readAll(session,path,() => !failure); }
+    catch (error) { if (!failure) { failure = error as Error; } return []; }
+  };
+  // The four existing independent domains overlap their I/O; each still
+  // paginates sequentially. On failure stop new pages and drain in-flight reads.
+  const groups: SyncItem[][] = await Promise.all([
+    read('sync/watched/movies?extended=full'),
+    read('sync/watched/shows?extended=progress'),
+    read('sync/watchlist/movies?extended=full'),
+    read('sync/watchlist/shows')
+  ]);
+  if (failure) { throw failure; }
+  ensureCurrent(session);
+  return groups;
+}
 export async function readCloudLibrary(session: TraktSession): Promise<CloudLibrary> {
   const before = await readActivity(session);
-  const movieRows = await readAll(session, 'sync/watched/movies');
+  // Four independent read-only collections under the same before/after activity fence.
+  // Do not coalesce activity reads or write/receipt verification requests.
+  const groups = await readObservationCollections(session);
+  const movieRows = groups[0];
   const movies = uniqueTitles(movieRows, 'movie', true);
   const moviePlays = movieRows.map((row: SyncItem): RemoteMovieObservation => {
     return { id: titleToMedia(row, 'movie', true).id, plays: row.plays ?? 0,
       lastWatchedAt: row.last_watched_at ?? '' };
   });
-  const shows = showProgress(await readAll(session, 'sync/watched/shows?extended=progress'));
-  const queueMovieRows = await readAll(session, 'sync/watchlist/movies');
-  const queueShowRows = await readAll(session, 'sync/watchlist/shows');
+  const shows = showProgress(groups[1]);
+  const queueMovieRows = groups[2];
+  const queueShowRows = groups[3];
+  const movieDetails = new Map<string, PersonalMovie>();
+  appendPersonalMovies(movieDetails,movieRows,true);
+  appendPersonalMovies(movieDetails,queueMovieRows,false);
   const queuedMovies = uniqueTitles(queueMovieRows, 'movie', false);
   const queuedShows = uniqueTitles(queueShowRows, 'show', false);
   const queueDates: CollectionDate[] = [];
@@ -231,7 +267,7 @@ export async function readCloudLibrary(session: TraktSession): Promise<CloudLibr
     throw new Error('Trakt activity changed during import; retry');
   }
   const snapshot: CloudLibrary = { generation: session.generation, activity: after, observedAt: Date.now(),
-    watchlist: [...queuedMovies, ...queuedShows], watchedMovies: movies, shows: shows, moviePlays: moviePlays, queueDates: queueDates };
+    watchlist: [...queuedMovies, ...queuedShows], watchedMovies: movies, shows: shows, moviePlays: moviePlays, queueDates: queueDates, movieDetails: Array.from(movieDetails.values()) };
   validateObservation(snapshot);
   return snapshot;
 }
@@ -279,32 +315,6 @@ export async function readWatchlistKind(session: TraktSession, kind: string): Pr
   return uniqueTitles(await readAll(session, 'sync/watchlist/' + (kind === 'movie' ? 'movies' : 'shows')), kind, false);
 }
 
-export interface PersonalMovie {
-  media: Media;
-  released: string;
-  cloudWatched: boolean;
-  cloudWatchlist: boolean;
-  localOnly: boolean;
-  runtime?: number;
-  rating?: number;
-  addedAt?: number;
-  userRating?: number;
-  dateUncertain?: boolean;
-}
-export interface PersonalMovieSnapshot {
-  generation: number;
-  activity: string;
-  movies: PersonalMovie[];
-  ratingsComplete?: boolean;
-}
-
-// Release dates are calendar dates, not UTC instants. Reject rollover dates.
-export function validReleaseDate(value?: string): string {
-  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) { return ''; }
-  const ms = Date.parse(value + 'T00:00:00Z');
-  return Number.isFinite(ms) && new Date(ms).toISOString().substring(0, 10) === value ? value : '';
-}
-
 function appendPersonalMovies(target: Map<string, PersonalMovie>, rows: SyncItem[], watched: boolean): void {
   const seen: Set<string> = new Set<string>();
   for (const row of rows) {
@@ -325,7 +335,7 @@ function appendPersonalMovies(target: Map<string, PersonalMovie>, rows: SyncItem
       cloudWatchlist: !watched || (prior?.cloudWatchlist ?? false), localOnly: false,
       runtime: typeof runtime === 'number' && Number.isFinite(runtime) && runtime >= 0 ? runtime : prior?.runtime,
       rating: typeof rating === 'number' && Number.isFinite(rating) && rating >= 0 && rating <= 10 ? rating : prior?.rating,
-      addedAt: Number.isFinite(added) ? added : prior?.addedAt, dateUncertain: uncertain };
+      addedAt: Number.isFinite(added) && added > 0 ? added : prior?.addedAt, dateUncertain: uncertain };
     target.set(media.id, item);
   }
 }

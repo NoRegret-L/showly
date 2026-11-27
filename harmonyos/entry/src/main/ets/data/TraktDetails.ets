@@ -2,6 +2,7 @@ import { http } from '@kit.NetworkKit';
 import { fileIo, fileUri } from '@kit.CoreFileKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { Media } from '../model/Media';
+import { ReadFlight } from '../model/ReadFlight';
 import { CollectionMeta, imageFormat } from '../model/MediaPresentation';
 
 interface TraktIds {
@@ -39,6 +40,9 @@ export interface MediaDetail {
 }
 let posterWriteSequence: number = 0;
 const summaries: Map<string, MediaDetail> = new Map<string, MediaDetail>();
+const summaryFlights = new ReadFlight<MediaDetail>();
+const posterFlights = new ReadFlight<PosterResult>();
+let summaryEpoch = 0;
 
 export function canReadDetails(item: Media): boolean {
   return (item.kind === 'show' || item.kind === 'movie') &&
@@ -54,6 +58,10 @@ export async function readDetails(item: Media, clientId: string, reload: boolean
   if (cached && !reload) {
     return cached;
   }
+  const epoch = summaryEpoch;
+  return summaryFlights.run(JSON.stringify([epoch,clientId,item.id]), () => fetchDetails(item,clientId,key,epoch));
+}
+async function fetchDetails(item: Media, clientId: string, key: string, epoch: number): Promise<MediaDetail> {
   const id = item.id.substring(item.kind.length + 1);
   const request = http.createHttp();
   try {
@@ -87,7 +95,7 @@ export async function readDetails(item: Media, clientId: string, reload: boolean
       airedEpisodes: typeof data.aired_episodes === 'number' ? data.aired_episodes : 0,
       posterUrls: Array.isArray(poster) ? poster.filter((value: string) => typeof value === 'string' && value.length > 0) : []
     };
-    summaries.set(key, result);
+    if (epoch === summaryEpoch) { summaries.set(key, result); }
     return result;
   } finally {
     request.destroy();
@@ -95,6 +103,7 @@ export async function readDetails(item: Media, clientId: string, reload: boolean
 }
 
 export function clearDetailMemory(): void {
+  summaryEpoch++;
   summaries.clear();
 }
 
@@ -173,6 +182,9 @@ export function cachedPoster(cacheDir: string, item: Media, candidates: string[]
   return '';
 }
 export async function cachePoster(cacheDir: string, item: Media, candidates: string[]): Promise<PosterResult> {
+  return posterFlights.run(JSON.stringify([cacheDir,item.id,candidates]), () => downloadPoster(cacheDir,item,candidates));
+}
+async function downloadPoster(cacheDir: string, item: Media, candidates: string[]): Promise<PosterResult> {
   if (!canReadDetails(item) || candidates.length === 0) {
     return { uri: '', status: 'Trakt API 未返回海报地址（images.poster 为空）' };
   }

@@ -1,4 +1,4 @@
-import { Media, CollectionDate } from './Media';
+import { Media, CollectionDate, PersonalMovie, validReleaseDate } from './Media';
 import { FullEpisodeCatalog, ScheduledEpisode, scheduleEpisodes, showSections } from './ShowCatalog';
 
 export interface RemotePlayPosition {
@@ -29,6 +29,8 @@ export interface RemoteLibraryObservation {
   shows: RemoteShowObservation[];
   moviePlays: RemoteMovieObservation[];
   queueDates?: CollectionDate[];
+  // Display metadata only. Never used to establish membership or authorize writes.
+  movieDetails?: PersonalMovie[];
 }
 export interface EpisodeDecision {
   episodeId: number;
@@ -70,6 +72,26 @@ export function validateObservation(snapshot: RemoteLibraryObservation): void {
   for (const item of snapshot.watchedMovies) {
     if (!validMedia(item, 'movie') || movies.has(item.id)) { throw new Error('Invalid observed movie'); }
     movies.add(item.id);
+  }
+  if (snapshot.movieDetails !== undefined) {
+    if (!Array.isArray(snapshot.movieDetails)) { throw new Error('Invalid movie details'); }
+    const ids = new Set<string>();
+    const members = new Set<string>(movies);
+    for (const item of snapshot.watchlist) { if (item.kind === 'movie') { members.add(item.id); } }
+    for (const row of snapshot.movieDetails) {
+      if (!row || !validMedia(row.media,'movie') || ids.has(row.media.id) || !members.has(row.media.id) ||
+          row.cloudWatched !== movies.has(row.media.id) || row.cloudWatchlist !== queued.has(row.media.id) ||
+          row.localOnly !== false || typeof row.released !== 'string' ||
+          (row.released !== '' && validReleaseDate(row.released) !== row.released) ||
+          typeof row.dateUncertain !== 'boolean' || row.userRating !== undefined ||
+          (row.runtime !== undefined && (!Number.isFinite(row.runtime) || row.runtime < 0)) ||
+          (row.rating !== undefined && (!Number.isFinite(row.rating) || row.rating < 0 || row.rating > 10)) ||
+          (row.addedAt !== undefined && (!Number.isFinite(row.addedAt) || row.addedAt <= 0))) {
+        throw new Error('Invalid movie details entry');
+      }
+      ids.add(row.media.id);
+    }
+    if (ids.size !== members.size) { throw new Error('Incomplete movie details'); }
   }
   const plays: Set<string> = new Set<string>();
   for (const item of snapshot.moviePlays) {

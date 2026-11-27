@@ -2,7 +2,7 @@ import { common } from '@kit.AbilityKit';
 import { LazyRows } from '../model/LazyRows';
 import { CollectionCandidate, CollectionOptions, CollectionState, HiddenEntry, defaultCollection, emptyCollectionState, collectionMembers, projectCollection, recentCollection, recordCollectionDate, transitionCollectionDates, hideMedia } from '../model/CollectionRules';
 import { PresentationRepository } from '../data/PresentationRepository';
-import { TitlePresentation, SeasonPresentation, PresentationTask, matchesText } from '../model/MediaPresentation';
+import { TitlePresentation, PresentationTask, matchesText } from '../model/MediaPresentation';
 import { Media, CollectionDate, mediaLabel, setWatched } from '../model/Media';
 import { LibraryStore } from '../data/LibraryStore';
 import { MediaStore } from '../data/MediaStore';
@@ -21,7 +21,7 @@ import { ShowProjectionCache } from '../model/ProjectionCompute';
 import { MovieProgressOptions, MovieProgressSource, defaultMovieProgress, validMovieProgress, movieProgressRows as projectMovieProgress, clearMoviePin } from '../model/MovieProgressRules';
 import { ProgressSource, ProgressPreferences, ProgressFlag, ProgressRow, defaultProgress, validProgress, toggleProgressFlag, progressRows, ProgressEntry, progressSections, progressEntries, progressPage, effectiveProgressFilter } from '../model/ProgressRules';
 import { CalendarSnapshot, CalendarEntry, readCalendar, calendarWindow, localDay } from '../data/TraktCalendar';
-import { PersonalMovie, PersonalMovieSnapshot, readPersonalMovies, readPersonalMovieDate, CollectionRating, readCollectionRatings } from '../data/TraktLibrary';
+import { PersonalMovie, PersonalMovieSnapshot, readPersonalMovieDate, CollectionRating, readCollectionRatings } from '../data/TraktLibrary';
 import { MovieCalendarItem, filterMovies, moviePage } from '../data/MovieCalendar';
 import { searchTrakt } from '../data/TraktSearch';
 import { TRAKT_APPS_URL, TRAKT_REDIRECT_URI } from '../config/TraktConfig';
@@ -55,8 +55,8 @@ import { UpdateInfo, UpstreamInfo, checkRelease, checkUpstream } from '../data/R
 struct Index {
   @State title: string = '';
   @State presentationLanguage: string = 'zh';
-  @State presentationTitles: TitlePresentation[] = [];
-  @State presentationSeasons: SeasonPresentation[] = [];
+  @State presentationRevision: number = 0;
+  private seasonKeys: Map<string, string[]> = new Map<string, string[]>();
   @State presentationStatus: string = '';
   @State languageBusy: boolean = false;
   private presentation?: PresentationRepository;
@@ -157,6 +157,9 @@ struct Index {
   @State calendarStatus: string = '';
   @State @Watch('onPresentationChanged') calendarData?: CalendarSnapshot = undefined;
   @State @Watch('onListInputChanged') movieCalendarData?: PersonalMovieSnapshot = undefined;
+  private movieRatingKey: string = '';
+  private movieRatingRows: CollectionRating[] = [];
+  private movieRatingBusy: boolean = false;
   @State @Watch('onPresentationChanged') movieCalendarMode: string = 'future';
   @State @Watch('onPresentationChanged') movieCalendarQuery: string = '';
   private calendarRevision: number = 0;
@@ -958,19 +961,21 @@ struct Index {
     const revision = this.presentation.revision();
     if (revision === this.presentationPublished) { return; }
     this.presentationPublished = revision;
-    const titles = this.presentation.titleRows();
-    const seasons = this.presentation.seasonRows();
-    this.titleIndex.clear();
-    this.episodeNameIndex.clear();
-    for (const row of titles) { this.titleIndex.set(row.id, row); }
-    for (const row of seasons) {
+    const changes = this.presentation.takeChanges();
+    for (const row of changes.titles) { this.titleIndex.set(row.id,row); }
+    for (const row of changes.seasons) {
+      const seasonKey = row.showId + ':' + row.season;
+      for (const key of this.seasonKeys.get(seasonKey) ?? []) { this.episodeNameIndex.delete(key); }
+      const keys: string[] = [];
       for (const ep of row.episodes) {
-        this.episodeNameIndex.set(row.showId + ':' + row.season + ':' + ep.id, ep.text.title);
+        const key = seasonKey + ':' + ep.id;
+        keys.push(key);
+        this.episodeNameIndex.set(key,ep.text.title);
       }
+      this.seasonKeys.set(seasonKey,keys);
     }
     this.listRevision++;
-    this.presentationTitles = titles;
-    this.presentationSeasons = seasons;
+    this.presentationRevision = revision;
     // A localized sort or query can reveal a different page. One more pass
     // only after real cache changes converges to the newly visible artwork.
     if (this.presentationRunning) { this.presentationPending = true; }
@@ -978,7 +983,7 @@ struct Index {
   }
 
   private displayTitle(item: Media): string {
-    return this.presentationLanguage === 'zh' && this.presentationTitles.length ?
+    return this.presentationLanguage === 'zh' && this.presentationRevision > 0 ?
       this.titleIndex.get(item.id)?.text.title || item.title : item.title;
   }
 
@@ -990,17 +995,17 @@ struct Index {
   }
 
   private displayEpisode(item: Media, season: number, id: number, original: string): string {
-    return this.presentationLanguage === 'zh' && this.presentationSeasons.length ?
+    return this.presentationLanguage === 'zh' && this.presentationRevision > 0 ?
       this.episodeNameIndex.get(item.id + ':' + season + ':' + id) || original : original;
   }
 
   private displayOverview(item: Media, original: string): string {
     return this.presentationLanguage === 'zh' ?
-      (this.presentationTitles.length ? this.titleIndex.get(item.id)?.text.overview : '') || original : original;
+      (this.presentationRevision > 0 ? this.titleIndex.get(item.id)?.text.overview : '') || original : original;
   }
 
   private artwork(item: Media): string {
-    return this.presentationTitles.length ? this.titleIndex.get(item.id)?.posterUri ?? '' : '';
+    return this.presentationRevision > 0 ? this.titleIndex.get(item.id)?.posterUri ?? '' : '';
   }
 
   private matchesMedia(item: Media, query: string): boolean {
@@ -1049,6 +1054,7 @@ struct Index {
     }
     if (this.tab !== 'progress' || this.progressMode !== 'next') { return; }
     if (this.mediaMode === 'movie') {
+      if (this.movieProgressOptions.sort === 'userRating') { this.loadMovieRatings(); }
       const rows = this.movieProgressRows().slice((this.movieProgressPage - 1) * this.collectionPageSize,
         this.movieProgressPage * this.collectionPageSize);
       this.movieRowsSource.replace(rows, rows.map((row: PersonalLibraryRow) => row.media.id),
@@ -1146,6 +1152,39 @@ struct Index {
     return tasks;
   }
 
+  private async presentationLane(repo: PresentationRepository, tasks: PresentationTask[], client: string, language: string,
+    collection: boolean, text: boolean, current: () => boolean): Promise<boolean> {
+    let pagePublished = false;
+    if (text && language === 'zh') {
+      // Publish already cached visible translations before any remote wait.
+      try {
+        for (const task of tasks) {
+          if (!current()) { break; }
+          if (task.artwork && task.season > 0) { await repo.hydrateSeason(task.media,task.season); }
+        }
+        this.publishPresentation();
+      } catch (error) { this.publishPresentation(); return true; }
+    }
+    for (const task of tasks) {
+      if (!current()) { break; }
+      if (!pagePublished && !task.artwork) { this.publishPresentation(); pagePublished = true; }
+      try {
+        if (text) {
+          // Local season translation does not depend on the title or artwork request.
+          if (task.season > 0) { await repo.season(task.media,task.season,client,language); }
+          if (current()) { await repo.translation(task.media,client,language); }
+        } else {
+          await repo.artwork(task.media,client,task.artwork,task.posterUrls,collection);
+        }
+      } catch (error) {
+        this.publishPresentation();
+        return true;
+      }
+    }
+    this.publishPresentation();
+    return false;
+  }
+
   private async loadPresentation(): Promise<void> {
     const repo = this.presentation;
     if (!repo || this.presentationRunning) { return; }
@@ -1166,31 +1205,17 @@ struct Index {
         const current = (): boolean => this.pageVisible && this.presentationEpoch === epoch &&
           this.clientId === client && this.presentationLanguage === language && this.tab === tab &&
           this.mediaMode === mode && this.progressMode === progress && (this.selectedMedia?.id ?? '') === selected;
-        // Publish once after the current page, then once after the optional
-        // whole-query translation phase. No full state update per item.
+        // Two independent resource lanes, one sequential producer per lane.
+        // No arbitrary concurrency multiplier; neither waits on the other's I/O.
         const tasks = this.presentationTasks();
-        let pagePublished = false;
-        for (const task of tasks) {
-          if (!current()) { break; }
-          if (!pagePublished && !task.artwork && !selected) {
-            this.publishPresentation();
-            pagePublished = true;
-          }
-          try {
-            await repo.title(task.media, client, language, task.artwork, task.posterUrls, tab === 'library' && !selected);
-            if (!current()) { break; }
-            if (task.season > 0) { await repo.season(task.media, task.season, client, language); }
-          } catch (error) {
-            if (current()) {
-              this.presentationStatus = '部分海报或译名暂不可用；下拉刷新可重试。';
-              this.presentationBlocked = true;
-            }
-            break;
-          }
+        const failed = await Promise.all([
+          this.presentationLane(repo,tasks,client,language,tab === 'library' && !selected,false,current),
+          this.presentationLane(repo,tasks,client,language,false,true,current)
+        ]);
+        if (current() && failed.some((value: boolean) => value)) {
+          this.presentationStatus = '部分海报或译名暂不可用；下拉刷新可重试。';
+          this.presentationBlocked = true;
         }
-        // Public metadata can be retained after route change; no private
-        // library records are published here.
-        this.publishPresentation();
       }
     } finally { this.presentationRunning = false; }
   }
@@ -2433,9 +2458,10 @@ struct Index {
       if (cached) {
         const restored: CloudLibrary = { generation: session.generation, activity: cached.activity,
           observedAt: cached.observedAt, watchlist: cached.watchlist, watchedMovies: cached.watchedMovies,
-          shows: cached.shows, moviePlays: cached.moviePlays, queueDates: cached.queueDates };
+          shows: cached.shows, moviePlays: cached.moviePlays, queueDates: cached.queueDates, movieDetails: cached.movieDetails };
         this.cloud = restored;
         this.cloudUuid = account.uuid;
+        this.publishMovieSource(restored);
         this.reloadProgressFlags();
         this.resetCollection();
         this.cloudStatus = '已读取本账户缓存，正在核对云端版本…';
@@ -2459,7 +2485,7 @@ struct Index {
       let snapshot = this.cloud;
       try {
         const revision = await readActivity(session);
-        const changed = !snapshot || snapshot.activity !== revision || snapshot.queueDates === undefined;
+        const changed = !snapshot || snapshot.activity !== revision || snapshot.queueDates === undefined || snapshot.movieDetails === undefined;
         if (changed) { snapshot = await readCloudLibrary(session); }
         if (!snapshot) { throw new Error('Observation unavailable'); }
         const verified = await readSyncAccount(session);
@@ -2471,6 +2497,7 @@ struct Index {
         if (!current()) { throw new Error('Session changed'); }
         this.cloud = snapshot;
         this.cloudUuid = account.uuid;
+        this.publishMovieSource(snapshot);
         if (changed) { this.libraryEvidence = []; }
         this.cloudFresh = true;
       } catch (error) {
@@ -2543,9 +2570,8 @@ struct Index {
       this.cloudStatus = (this.cloudFresh ? '云端版本已核对' : '使用上次缓存（非实时）') +
         ' · 缺少目录 ' + result.missing + ' 部 · 下载失败 ' + result.failed + ' 部；未写入 Trakt。' + (result.localAllowed ? '' : ' 当前账户只读；本机库未绑定或属于另一账户。');
       if (this.tab === 'library' && this.collectionGrid && !this.selectedMedia) { this.loadCollectionPosters(); }
-      if (this.tab === 'progress' && !this.selectedMedia && this.mediaMode === 'movie' && !this.movieCalendarCurrent()) {
-        await this.loadCalendar();
-      }
+      // Movie progress and calendar consume the already verified observation.
+      // Optional rating reads run outside the cloudBusy gate.
     } catch (error) {
       if (!this.cloud || !traktAuth.isCurrent(clientId, this.cloud.generation)) { this.clearCloud(); }
       this.libraryNotice = '更新未完成，请重试。';
@@ -3473,10 +3499,60 @@ struct Index {
   private resetCalendar(): void {
     ++this.calendarRevision;
     this.movieCalendarData = undefined;
+    this.movieRatingKey = '';
+    this.movieRatingRows = [];
     this.calendarData = undefined;
     this.calendarBusy = false;
     this.calendarPage = 1;
     this.calendarStatus = '';
+  }
+
+  private publishMovieSource(snapshot: CloudLibrary): void {
+    if (this.activeCloud() !== snapshot || !snapshot.movieDetails) { return; }
+    if (this.movieCalendarCurrent()) { return; }
+    this.movieRatingKey = '';
+    this.movieRatingRows = [];
+    this.movieCalendarData = { generation: snapshot.generation, activity: snapshot.activity,
+      movies: snapshot.movieDetails, ratingsComplete: false };
+    this.calendarStatus = '已读取本账户电影资料，共 ' + snapshot.movieDetails.length + ' 部。';
+    this.movieProgressPage = 1;
+  }
+
+  private async loadMovieRatings(): Promise<void> {
+    const source = this.activeCloud();
+    const snapshot = this.movieCalendarData;
+    const session = traktAuth.session(this.clientId);
+    const scope = this.currentProgressScope();
+    if (!source || !snapshot || !session || !scope || !this.movieCalendarCurrent() || !this.cloudFresh ||
+        this.cloudBusy || this.movieRatingBusy || this.authBusy || this.syncBusy || this.setupBusy) { return; }
+    const key = JSON.stringify([scope,session.clientId,session.generation,source.activity]);
+    if (this.movieRatingKey === key) { return; }
+    this.movieRatingKey = key;
+    this.movieRatingBusy = true;
+    const current = (): boolean => this.activeCloud() === source && this.movieCalendarData === snapshot &&
+      this.currentProgressScope() === scope && traktAuth.isCurrent(session.clientId,session.generation);
+    try {
+      const ratings = await readCollectionRatings(session,'movie',source.activity);
+      if (!current()) { return; }
+      const values = new Map<string,number>();
+      for (const rating of ratings) { values.set(rating.id,rating.value); }
+      this.movieRatingRows = ratings;
+      this.collectionRatingStatus = '';
+      const movies = snapshot.movies.map((row: PersonalMovie): PersonalMovie => ({
+        media: row.media, released: row.released, cloudWatched: row.cloudWatched, cloudWatchlist: row.cloudWatchlist,
+        localOnly: row.localOnly, runtime: row.runtime, rating: row.rating, addedAt: row.addedAt,
+        dateUncertain: row.dateUncertain, userRating: values.get(row.media.id) }));
+      this.movieCalendarData = { generation: snapshot.generation, activity: snapshot.activity, movies: movies, ratingsComplete: true };
+    } catch (error) {
+      if (current()) { this.collectionRatingStatus = '电影个人评分读取失败；下拉刷新后重试。'; }
+    } finally {
+      this.movieRatingBusy = false;
+      if (this.activeCloud() !== source || this.currentProgressScope() !== scope ||
+          (this.movieCalendarData !== snapshot && this.movieCalendarData?.ratingsComplete !== true)) {
+        if (this.movieRatingKey === key) { this.movieRatingKey = ''; }
+        this.scheduleLazyRows();
+      }
+    }
   }
 
   private async loadCalendar(): Promise<void> {
@@ -3492,18 +3568,14 @@ struct Index {
     this.calendarStatus = '正在更新日历…';
     try {
       if (kind === 'movie') {
-        const personal = await readPersonalMovies(session);
-        if (revision !== this.calendarRevision || this.mediaMode !== kind ||
-            !this.signedIn || !traktAuth.isCurrent(this.clientId, session.generation)) { return; }
-        const known: Set<string> = new Set<string>(personal.movies.map((row: PersonalMovie) => row.media.id));
-        for (const row of this.personalLibrary()) {
-          if (row.media.kind === 'movie' && isTraktMedia(row.media) && (row.watched || row.queued) && !known.has(row.media.id)) {
-            personal.movies.push({ media: row.media, released: '', cloudWatched: false, cloudWatchlist: false, localOnly: true });
-          }
+        const source = this.activeCloud();
+        if (source?.movieDetails) {
+          this.publishMovieSource(source);
+          this.calendarStatus = '使用已验证账户的个人电影资料，共 ' + (this.movieCalendarData?.movies.length ?? 0) + ' 部。';
+        } else {
+          this.calendarStatus = '等待个人库核对及电影资料读取。';
+          this.requestObservation();
         }
-        this.movieCalendarData = personal;
-        this.movieProgressPage = 1;
-        this.calendarStatus = '已读取个人电影库，共 ' + this.movieCalendarData.movies.length + ' 部。';
         return;
       }
       const result = await readCalendar(session, kind, week);
@@ -3773,17 +3845,20 @@ struct Index {
   }
 
   private movieCalendarCurrent(): boolean {
-    return !!this.movieCalendarData && this.signedIn &&
+    const active = this.activeCloud();
+    return !!this.movieCalendarData && !!active && this.movieCalendarData.activity === active.activity &&
+      this.movieCalendarData.generation === active.generation &&
       traktAuth.isCurrent(this.clientId, this.movieCalendarData.generation);
   }
 
   private movieRows(mode: string = this.movieCalendarMode, query: string = this.movieCalendarQuery): PersonalMovie[] {
     if (!this.movieCalendarCurrent()) { return []; }
-    const metadata = this.movieCalendarData?.movies ?? [];
+    const metadata = new Map<string,PersonalMovie>();
+    for (const movie of this.movieCalendarData?.movies ?? []) { metadata.set(movie.media.id,movie); }
     const rows: PersonalMovie[] = [];
     for (const row of this.personalLibrary()) {
       if (this.isHidden(row.media) || row.media.kind !== 'movie' || !isTraktMedia(row.media) || (!row.watched && !row.queued)) { continue; }
-      const found = metadata.find((item: PersonalMovie) => item.media.id === row.media.id);
+      const found = metadata.get(row.media.id);
       rows.push({ media: row.media, released: found?.released ?? '', cloudWatched: row.watched,
         cloudWatchlist: row.queued, localOnly: false });
     }
@@ -3963,7 +4038,7 @@ struct Index {
       const movie = metadata.get(row.media.id);
       if (this.isHidden(row.media) || !movie || movie.localOnly || movie.dateUncertain || row.media.kind !== 'movie') { continue; }
       const translation = this.presentationLanguage === 'zh' ?
-        (this.presentationTitles.length ? this.titleIndex.get(row.media.id)?.text.title ?? '' : '') : '';
+        (this.presentationRevision > 0 ? this.titleIndex.get(row.media.id)?.text.title ?? '' : '') : '';
       sources.push({ row: row, translation: translation,
         metadata: { id: row.media.id, released: movie.released, year: movie.media.year,
           runtime: movie.runtime, rating: movie.rating, addedAt: movie.addedAt, userRating: movie.userRating } });
@@ -4047,8 +4122,8 @@ struct Index {
         if (!this.movieCalendarCurrent()) {
           Text('上映资料尚未就绪，请刷新。').fontSize(13).width('100%')
         } else {
-          if (this.movieCalendarData?.ratingsComplete !== true) {
-            Text('个人评分未完整读取；保留其他排序及观看功能。').fontSize(12).width('100%')
+          if (this.movieProgressOptions.sort === 'userRating' && this.movieCalendarData?.ratingsComplete !== true) {
+            Text('个人评分按需读取中或暂不可用；保留其他排序及观看功能。').fontSize(12).width('100%')
           }
           if (!this.movieProgressRows().length) {
             Text('暂无符合上映日期或年份条件的待看电影。').fontSize(13).width('100%')
@@ -4174,6 +4249,10 @@ struct Index {
 
   private async refreshPage(): Promise<void> {
     if (this.tab === 'library') { this.collectionRatingKey = ''; this.collectionRatings = []; }
+    if (this.mediaMode === 'movie') {
+      this.movieRatingKey = '';
+      this.movieRatingRows = [];
+    }
     this.presentation?.retryArtwork();
     this.presentationBlocked = false;
     this.presentationStatus = '';
@@ -4188,9 +4267,9 @@ struct Index {
       } else if (this.tab === 'progress') {
         if (this.progressMode === 'next') {
           if (this.signedIn) { await this.loadCloud(); } else { await this.loadNextShows(); }
-          if (this.mediaMode === 'movie') { await this.loadCalendar(); }
+          // Movie source is published by loadCloud; no second network read.
         }
-        else if (this.progressMode === 'calendar') { if (this.signedIn) { await this.loadCloud(); } await this.loadCalendar(); }
+        else if (this.progressMode === 'calendar') { if (this.signedIn) { await this.loadCloud(); } if (this.mediaMode === 'show') { await this.loadCalendar(); } }
         else if (this.signedIn) { await this.loadCloud(); }
       } else if (this.tab === 'cloud') {
         if (this.signedIn) { await this.loadCloud(); }
@@ -4332,6 +4411,7 @@ struct Index {
     finally { this.collectionEditBusy = false; }
   }
   private async loadCollectionRatings(): Promise<void> {
+    if (this.mediaMode === 'movie') { await this.loadMovieRatings(); return; }
     const snapshot = this.activeCloud();
     const session = traktAuth.session(this.clientId);
     const scope = this.currentProgressScope();
@@ -4382,7 +4462,12 @@ struct Index {
       for (const rating of this.collectionRatings) { personalRatings.set(rating.id,rating.value); }
     }
     const movies = new Map<string,PersonalMovie>();
-    if (this.movieCalendarCurrent()) { for (const row of this.movieCalendarData?.movies ?? []) { movies.set(row.media.id,row); } }
+    if (this.movieCalendarCurrent()) {
+      for (const row of this.movieCalendarData?.movies ?? []) { movies.set(row.media.id,row); }
+      if (this.mediaMode === 'movie' && active && session && this.movieRatingKey === JSON.stringify([this.currentProgressScope(),session.clientId,session.generation,active.activity])) {
+        for (const rating of this.movieRatingRows) { personalRatings.set(rating.id,rating.value); }
+      }
+    }
     return rows.map((row: PersonalLibraryRow): CollectionCandidate => {
       const metadata = this.titleIndex.get(row.media.id);
       const movie = movies.get(row.media.id);
@@ -4849,7 +4934,14 @@ struct Index {
       this.movieProgressPage = 1;
       this.calendarWeek = 0;
       this.resetDiscover();
-      this.resetCalendar();
+      // Calendar range changes do not discard account movie metadata.
+      ++this.calendarRevision;
+      this.calendarData = undefined;
+      this.calendarBusy = false;
+      this.calendarPage = 1;
+      this.calendarStatus = '';
+      const source = this.activeCloud();
+      if (source) { this.publishMovieSource(source); }
       this.resetCollection();
       if (this.settings) { await this.settings.saveMode(this.mediaMode); }
       this.modeStatus = '';
