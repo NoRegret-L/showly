@@ -133,7 +133,7 @@ const tick=()=>new Promise(r=>setImmediate(r));
      const id=candidates[17].row.media.id;idx.dirty(id);
      const patch=x=>x.row.media.id===id?{...x,translation:'中文'}:x;
      const delta=idx.update('collection',now,patch,x=>collectionSortEligible(x,options,'mine','',now),(a,b)=>compareCollectionCandidates(a,b,options,'mine'));
-     assert.deepEqual(delta.map(x=>x.media.id),projectCollection(candidates.map(patch),options,'mine','',now).map(x=>x.row));
+     assert.deepEqual(delta,projectCollection(candidates.map(patch),options,'mine','',now).map(x=>x.row));
      assert.equal(idx.patchCount(),1);
    }
    const catalog=base.map(x=>({media:x.row.media,votes:0,localized:''}));
