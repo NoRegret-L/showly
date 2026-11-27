@@ -246,6 +246,8 @@ export async function projectLibrary(store: EpisodeStore, records: MediaRecord[]
       progressRow.sections = sections;
       if (full && effective?.complete) {
         progressRow.source = calculated?.source;
+        progressRow.sourceStateKey = work.key;
+        progressRow.sourceCatalogKey = work.catalogKey;
       }
       next.push(progressRow);
     }

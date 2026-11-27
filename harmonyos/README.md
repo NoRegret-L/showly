@@ -1,4 +1,4 @@
-# Showly HarmonyOS Preview v0.9.3e.2d.9
+# Showly HarmonyOS Preview v0.9.3e.2d.10
 
 Unofficial native ArkTS prototype, not a complete Showly port. Your app uses Trakt but is not endorsed or certified by Trakt.
 
@@ -225,3 +225,6 @@ See [Search read model](docs/SEARCH_LOCAL.md).
 
 ### Build 51 (0.9.3.27) — v0.9.3e.2d.9 search performance follow-up
 CI #67 published Build 50 from 85dec58 before #68 completed. CI #68 passed all models and native HAP but correctly refused to overwrite that release. Build 51 retains 959b7bd's immutable search candidate reuse, stable cold/warm order and async response regression, with a new version identity. Existing tags/releases remain unchanged.
+
+## v0.9.3e.2d.10 — per-show progress candidate read model (0.9.3.28, build 52)
+See [Progress candidates](docs/PROGRESS_CANDIDATES.md).

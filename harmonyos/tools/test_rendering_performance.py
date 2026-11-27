@@ -79,7 +79,7 @@ assert "this.listRevision++" not in publish
 assert "this.titleSortRevision++" in publish and "this.episodeSearchRevision++" in publish and "this.collectionMetaRevision++" in publish
 assert "this.candidateMemo.get(businessKey,now)" in page
 assert "this.candidateMemo.put(businessKey,candidates,now,this.candidateExpiry)" in page
-assert "this.candidateRuns++" in page
+assert "this.candidateRuns+=plan.pending.length" in page
 assert "const tasks = new Map<string,PresentationTask>()" in page
 assert "if (artwork && !this.selectedMedia && !this.viewport.has(item,season))" in page
 assert "if (task.artwork && !this.selectedMedia && !this.viewport.has(task.media,task.season))" in page

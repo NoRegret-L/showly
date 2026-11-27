@@ -91,7 +91,7 @@ assert "this.flagVersion('show')" in page and "this.hiddenVersion('show')" in pa
 assert page.count("diffDisplay,current)")==7
 assert page.count("this.sortJobs.current(slot,token)")==3
 assert page.count("epoch !== this.presentationEpoch")>=3
-assert "this.progressData(this.nextQuery,true).some(" in page
+assert "this.validateNextTarget(row)" in page
 assert "this.movieProgressRows('',true).find(" in page
 assert "await taskpool.execute(showDisplayTask" in tasks and "await taskpool.execute(movieDisplayTask" in tasks and "await taskpool.execute(collectionDisplayTask" in tasks
 assert "await taskpool.execute(diffDisplayTask" in tasks

@@ -22,7 +22,9 @@ import { syncSelectedMedia, reconcilePendingMedia } from '../data/TraktMediaSync
 import { checkpointEpisodes, checkpointMedia, adoptEpisodeCloud, adoptMediaCloud } from '../data/ThreeWaySync';
 import { threeWayLabel } from '../model/ThreeWay';
 import { NextShow } from '../data/NextShows';
-import { RevisionMemo, projectionKey, progressExpiry } from '../model/ReadModelCache';
+import { RevisionMemo, projectionKey } from '../model/ReadModelCache';
+import { CandidateInput, CandidateBatch, CandidateResult, ProgressCandidateIndex } from '../model/ProgressCandidates';
+import { computeCandidateDisplay } from '../data/ProgressCandidateTask';
 import { ShowProjectionCache } from '../model/ProjectionCompute';
 import { MovieProgressOptions, MovieProgressSource, defaultMovieProgress, validMovieProgress, movieProgressRows as projectMovieProgress, clearMoviePin } from '../model/MovieProgressRules';
 import { ProgressSource, ProgressPreferences, ProgressFlag, ProgressRow, defaultProgress, validProgress, toggleProgressFlag, selectProgress, sortProgressCandidates, ProgressEntry, progressSections, progressEntries, progressPage, effectiveProgressFilter } from '../model/ProgressRules';
@@ -114,6 +116,11 @@ struct Index {
   private candidateMemo: RevisionMemo<ProgressRow[]> = new RevisionMemo<ProgressRow[]>();
   private candidateExpiry: number = 0;
   private candidateRuns: number = 0;
+  private candidateIndex: ProgressCandidateIndex = new ProgressCandidateIndex();
+  private candidateWake: number = -1;
+  private candidateWakeAt: number = 0;
+  private candidateFailureKey: string = '';
+  private showRatingVersion: number = 0;
   private viewport: ViewportTasks = new ViewportTasks();
   private viewportRouteKey: string = '';
   private discoverRows: LazyRows<DiscoverItem[]> = new LazyRows<DiscoverItem[]>();
@@ -425,6 +432,7 @@ struct Index {
 
   onPageHide(): void {
     this.pageVisible = false;
+    this.cancelCandidateWake();
     this.updateSearchContext();
     this.discoverRevision++;
     this.discoverBusy = false;
@@ -443,6 +451,7 @@ struct Index {
 
   aboutToDisappear(): void {
     this.pageVisible = false;
+    this.cancelCandidateWake();
     this.updateSearchContext();
     this.discoverRevision++;
     this.discoverBusy = false;
@@ -523,6 +532,7 @@ struct Index {
   // A busy auth/DB/sync operation no longer drops the network-resume event.
   // Coalesce to a single pending event, not a periodic retry loop.
   private onObservationAuthChanged(): void {
+    this.clearProgressCandidates();
     this.resetSearchAccount();
     this.viewport.clear();
     this.clearLocalCalendar(true);
@@ -934,7 +944,7 @@ struct Index {
       if (watched && (!previous || !hasTrackingEvidence(previous)) && previous?.localRecord?.followState !== 'no') {
         await this.recordFirstEpisodeDate(dateScope,item.id);
       }
-      this.invalidateNextShows();
+      this.invalidateNextShows(item.id);
       saved = true;
       this.requestProjection();
       this.localRecent = await store.recent();
@@ -1081,6 +1091,7 @@ struct Index {
     this.onPresentationChanged();
   }
   private onCollectionRatingsChanged(): void {
+    this.showRatingVersion++;
     this.displayRevisions.collectionChanged();
     this.onPresentationChanged();
   }
@@ -1188,6 +1199,7 @@ struct Index {
   private onPresentationChanged(): void {
     this.updateSearchContext();
     const scope = this.viewScope();
+    if (!this.progressCandidateActive()) { this.cancelCandidateWake(); }
     if (scope !== this.viewportRouteKey) { this.viewport.clear(); this.sortJobs.clear(); this.viewportRouteKey = scope; }
     this.reloadCollectionOptions();
     const route = JSON.stringify([this.clientId, this.tab, this.mediaMode, this.progressMode, this.selectedMedia?.id ?? '',
@@ -1277,9 +1289,10 @@ struct Index {
         rows.map((row: PersonalLibraryRow) => this.movieRowKey(row)),diffDisplay,current);
       if (committed && current()) { this.movieSummary = summary; }
     } else {
+      if (this.progressPrefs.sort==='userRating') { this.loadCollectionRatings(); }
       this.progressData(this.nextQuery,false,true);
       if (this.nextQuery && this.presentationLanguage === 'zh') { this.progressData('',false,true); }
-      if (this.sortJobs.pending(this.nextQuery ? 'show-query' : 'show-all')) { return; }
+      if (this.sortJobs.pending('show-candidates') || this.sortJobs.pending(this.nextQuery ? 'show-query' : 'show-all')) { return; }
       const rows = this.nextSlice();
       const pages = this.nextPages();
       const summary: DisplaySummary = {key:this.showDisplayKey(),total:this.nextFiltered().length,page:Math.min(this.nextPage,pages),pages:pages};
@@ -2590,6 +2603,7 @@ struct Index {
   }
 
   private clearCloud(): void {
+    this.clearProgressCandidates();
     this.resetSearchAccount();
     this.viewport.clear();
     this.clearLocalCalendar(true);
@@ -2724,6 +2738,7 @@ struct Index {
           initialSnapshot = restored;
           initialRevision = store.readModelRevision();
           initialRecords = JSON.stringify(this.mediaRecords);
+          this.retainProgressCandidates(initial.next);
           this.nextShows = initial.next;
           this.libraryEvidence = initial.evidence;
           this.publishLocalCalendar(initial);
@@ -2804,9 +2819,9 @@ struct Index {
       }
       if (!current()) { throw new Error('Session changed'); }
       this.cloudLocalAllowed = result.localAllowed;
+      this.retainProgressCandidates(result.next);
       this.nextShows = result.next;
       this.reloadProgressFlags();
-      this.nextPage = 1;
       this.movieProgressPage = 1;
       this.nextStatus = result.missing ? '部分剧集资料尚未补齐。' : '';
       this.libraryEvidence = result.evidence;
@@ -3751,13 +3766,16 @@ struct Index {
     return Math.max(1, Math.ceil(this.trackingItems().length / this.collectionPageSize));
   }
 
-  private invalidateNextShows(): void {
+  private invalidateNextShows(showId: string = ''): void {
     this.projectionMemo.clear();
-    this.nextShows = [];
+    if (showId) {
+      this.candidateIndex.remove(showId);
+      this.nextShows = this.nextShows.filter((row: NextShow)=>row.media.id!==showId);
+    } else { this.nextShows = []; }
     this.clearLocalCalendar(); this.libraryEvidence = [];
     this.projectionPending = true;
     this.resetCollection();
-    this.nextPage = 1;
+    if (!showId) { this.nextPage = 1; }
     this.nextStatus = '观看记录已变化，正在更新进度。';
   }
 
@@ -3776,6 +3794,7 @@ struct Index {
       const result = await this.readLibraryProjection(store, active, uuid, clientId, false, false,
         (): boolean => this.signedIn === signedIn && this.activeCloud() === active && this.cloudUuid === uuid && this.clientId === clientId);
       if (this.activeCloud() !== active || this.cloudUuid !== uuid || (this.signedIn && !active)) { return; }
+      this.retainProgressCandidates(result.next);
       this.nextShows = result.next;
       this.reloadProgressFlags();
       this.cloudLocalAllowed = result.localAllowed && !!active;
@@ -3784,7 +3803,6 @@ struct Index {
       this.resetCollection();
       await this.refreshEffectiveDetail();
       if (this.tab === 'library' && this.collectionGrid && !this.selectedMedia) { this.loadCollectionPosters(); }
-      this.nextPage = 1;
       this.nextStatus = result.missing ? '部分剧集资料尚未补齐。' : '';
       if (this.cloudFresh && active) { this.libraryNotice = result.repairTargets.length ? '部分剧集资料尚未补齐。' : ''; }
     } catch (error) {
@@ -3869,56 +3887,131 @@ struct Index {
   private collectionDisplayKey(): string { return JSON.stringify([this.collectionSortKey(),this.collectionPage,this.collectionGrid]); }
   private progressBusinessKey(): string {
     const prefs = this.progressPrefs;
-    return JSON.stringify([this.displayRevisions.show,this.currentProgressScope(),this.activeCloud()?.generation ?? -1,
+    return JSON.stringify([this.displayRevisions.show,this.candidateScope(),
       this.progressFlagScope,this.flagVersion('show'),this.hiddenVersion('show'),prefs.strategy,prefs.count,prefs.days,prefs.newAtTop]);
   }
   private progressSortKey(query: string): string {
     return JSON.stringify([this.progressBusinessKey(),this.presentationLanguage,this.titleVersion('show'),
-      query ? this.episodeSearchRevision : 0,this.progressPrefs.sort,this.progressPrefs.descending,this.nextFilter,query]);
+      query ? this.episodeSearchRevision : 0,this.progressPrefs.sort,this.progressPrefs.descending,this.nextFilter,query,
+      this.progressPrefs.sort==='userRating' ? this.showRatingVersion : 0,
+      this.progressPrefs.sort==='userRating' ? this.currentShowRatingKey() : '']);
+  }
+  private candidateScope(): string {
+    return JSON.stringify([this.clientId,this.currentProgressScope(),this.activeCloud()?.generation ?? -1,this.cloudLocalAllowed]);
+  }
+  private progressCandidateActive(): boolean {
+    return this.pageVisible && !this.selectedMedia && this.tab==='progress' && this.mediaMode==='show' && this.progressMode==='next';
+  }
+  private cancelCandidateWake(): void {
+    if (this.candidateWake>=0) { clearTimeout(this.candidateWake); }
+    this.candidateWake=-1; this.candidateWakeAt=0;
+  }
+  private scheduleCandidateWake(expiry: number): void {
+    if (!this.progressCandidateActive() || expiry===Number.MAX_SAFE_INTEGER) { this.cancelCandidateWake(); return; }
+    if (this.candidateWake>=0 && this.candidateWakeAt===expiry) { return; }
+    this.cancelCandidateWake();
+    this.candidateWakeAt=expiry;
+    // Native timer signed 32-bit maximum, not an empirical refresh period.
+    this.candidateWake=setTimeout(()=>{
+      this.candidateWake=-1; this.candidateWakeAt=0;
+      if (!this.progressCandidateActive()) { return; }
+      if (Date.now()<expiry) { this.scheduleCandidateWake(expiry); return; }
+      this.requestPresentation();
+    },Math.min(2147483647,Math.max(0,expiry-Date.now())));
+  }
+  private clearProgressCandidates(): void {
+    this.cancelCandidateWake(); this.candidateIndex.clear(); this.candidateMemo.clear();
+    this.progressMemo.clear(); this.progressAllMemo.clear(); this.candidateFailureKey='';
+  }
+  private retainProgressCandidates(rows: NextShow[]): void {
+    this.candidateIndex.begin(this.candidateScope());
+    this.candidateIndex.retain(new Set<string>(rows.map((row: NextShow)=>row.media.id)));
+  }
+  private currentShowRatingKey(): string {
+    const active=this.activeCloud(); const session=traktAuth.session(this.clientId); const scope=this.currentProgressScope();
+    return active && session && scope ? JSON.stringify([scope,session.clientId,session.generation,active.activity,'show']) : '';
+  }
+  private showRatingIndex(): Map<string,number> {
+    const result=new Map<string,number>();
+    const key=this.currentShowRatingKey();
+    if (key && this.collectionRatingKey===key) {
+      for (const rating of this.collectionRatings) { result.set(rating.id,rating.value); }
+    }
+    return result;
+  }
+  private localizedProgress(row: ProgressRow,ratings: Map<string,number>): ProgressRow {
+    return {media:row.media,episode:row.episode,total:row.total,completed:row.completed,upcoming:row.upcoming,
+      fresh:row.fresh,pinned:row.pinned,held:row.held,group:row.group,recentAt:row.recentAt,
+      rating:row.rating,randomOrder:row.randomOrder,dateUnknown:row.dateUnknown,userRating:ratings.get(row.media.id),
+      localizedTitle:this.presentationLanguage==='zh' ? this.displayTitle(row.media) : undefined,
+      localizedEpisode:this.presentationLanguage==='zh' ? this.displayEpisode(row.media,row.episode.season,row.episode.id,row.episode.title) : undefined};
+  }
+  private async prepareProgressCandidates(businessKey: string,now: number): Promise<void> {
+    if (this.candidateFailureKey===businessKey) { return; }
+    const token=this.sortJobs.begin('show-candidates',businessKey);
+    if (!token) { return; }
+    const scope=this.candidateScope();
+    const current=(): boolean=>this.sortJobs.current('show-candidates',token) && this.progressCandidateActive() &&
+      scope===this.candidateScope() && businessKey===this.progressBusinessKey() && (!this.signedIn || !!this.activeCloud());
+    try {
+      this.candidateIndex.begin(scope);
+      const inputs: CandidateInput[]=[];
+      for (const row of this.nextShows) {
+        if (row.source && !this.isHidden(row.source.media)) {
+          inputs.push({source:row.source,stateKey:row.sourceStateKey,catalogKey:row.sourceCatalogKey,flag:this.progressFlag(row.source.media)});
+        }
+      }
+      const plan=this.candidateIndex.plan(inputs,this.progressPrefs,now);
+      let built: CandidateResult[]=[];
+      if (plan.pending.length) {
+        this.candidateRuns+=plan.pending.length;
+        const batch: CandidateBatch={inputs:plan.pending,prefs:plan.prefs,now:now};
+        built=await computeCandidateDisplay(batch);
+      } else { await Promise.resolve(); }
+      if (!current() || Date.now()<now) { return; }
+      const output=this.candidateIndex.commit(plan,built);
+      if (Date.now()>=output.expiry) { return; }
+      const candidates=output.rows;
+      this.candidateExpiry=output.expiry;
+      this.candidateMemo.put(businessKey,candidates,now,this.candidateExpiry);
+      this.scheduleCandidateWake(output.expiry);
+    } catch (error) {
+      if (current()) { this.candidateFailureKey=businessKey; this.nextStatus='下一集计算暂不可用，请刷新。'; }
+    } finally {
+      if (this.sortJobs.finish('show-candidates',token) && this.pageVisible) { this.sortedViewRevision++; this.requestPresentation(); }
+    }
   }
   private progressData(query: string, live: boolean = false, prepare: boolean = false): ProgressRow[] {
     if (this.signedIn && !this.activeCloud()) { return []; }
-    const now = Date.now();
-    const businessKey = this.progressBusinessKey();
-    const key = this.progressSortKey(query);
-    const memo = query ? this.progressMemo : this.progressAllMemo;
-    const cached = this.sortedViewRevision >= 0 ? memo.get(key,now) : undefined;
-    if (cached) { return cached; }
-    if (!live && !prepare) { return []; }
-    if (!live && this.sortJobs.matches(query ? 'show-query' : 'show-all',JSON.stringify([this.presentationEpoch,key]))) { return []; }
-    let candidates = this.candidateMemo.get(businessKey,now);
-    if (!candidates) {
-      this.candidateRuns++;
-      const sources: ProgressSource[] = [];
-      for (const row of this.nextShows) {
-        const source = row.source;
-        if (source && !this.isHidden(source.media)) { sources.push(source); }
-      }
-      this.candidateExpiry = progressExpiry(sources,this.progressPrefs,now);
-      candidates = [];
-      const flags = this.progressFlagScope === this.currentProgressScope() ? this.progressFlags : [];
-      for (const source of sources) {
-        const row = selectProgress(source,this.progressPrefs,flags,now);
-        if (row) { candidates.push(row); }
-      }
-      this.candidateMemo.put(businessKey,candidates,now,this.candidateExpiry);
-    }
-    const localized = candidates.map((row: ProgressRow): ProgressRow => ({
-      media: row.media, episode: row.episode, total: row.total, completed: row.completed, upcoming: row.upcoming,
-      fresh: row.fresh, pinned: row.pinned, held: row.held, group: row.group, recentAt: row.recentAt,
-      rating: row.rating, randomOrder: row.randomOrder, dateUnknown: row.dateUnknown,
-      localizedTitle: this.presentationLanguage === 'zh' ? this.displayTitle(row.media) : undefined,
-      localizedEpisode: this.presentationLanguage === 'zh' ? this.displayEpisode(row.media,row.episode.season,row.episode.id,row.episode.title) : undefined
-    }));
-    if (live) {
-      // Explicit mark validation remains synchronous against current inputs.
-      const rows = sortProgressCandidates(localized,this.progressPrefs,this.nextFilter,query);
-      memo.put(key,rows,now,this.candidateExpiry);
-      return rows;
-    }
-    const input: ProgressSortInput = {rows:localized,prefs:this.progressPrefs,filter:this.nextFilter,query:query};
+    const now=Date.now();
+    const businessKey=this.progressBusinessKey();
+    const key=this.progressSortKey(query);
+    const memo=query ? this.progressMemo : this.progressAllMemo;
+    const cached=this.sortedViewRevision>=0 ? memo.get(key,now) : undefined;
+    if (cached) { if (prepare) { this.scheduleCandidateWake(this.candidateExpiry); } return cached; }
+    if (!prepare) { return []; }
+    if (this.sortJobs.matches(query ? 'show-query' : 'show-all',JSON.stringify([this.presentationEpoch,key]))) { return []; }
+    const candidates=this.candidateMemo.get(businessKey,now);
+    if (!candidates) { this.prepareProgressCandidates(businessKey,now); return []; }
+    this.scheduleCandidateWake(this.candidateExpiry);
+    const ratings=this.progressPrefs.sort==='userRating' ? this.showRatingIndex() : new Map<string,number>();
+    const localized=candidates.map((row: ProgressRow): ProgressRow=>this.localizedProgress(row,ratings));
+    const input: ProgressSortInput={rows:localized,prefs:this.progressPrefs,filter:this.nextFilter,query:query};
     this.runShowSort(input,key,now,this.candidateExpiry);
     return [];
+  }
+  private validateNextTarget(row: ProgressRow): boolean {
+    if (!this.progressCandidateActive() || (this.signedIn && !this.activeCloud()) || this.isHidden(row.media)) { return false; }
+    const target=this.nextShows.find((item: NextShow)=>item.media.id===row.media.id);
+    const source=target?.source;
+    if (!source) { return false; }
+    const flag=this.progressFlag(row.media);
+    const candidate=selectProgress(source,this.progressPrefs,flag ? [flag] : [],Date.now());
+    if (!candidate || candidate.upcoming || candidate.episode.id!==row.episode.id) { return false; }
+    // Same search/group eligibility as the old full-list live check, but only
+    // the selected show is scanned. Disk/catalog and effective-state fences
+    // in markNext remain authoritative and are not replaced by this check.
+    return sortProgressCandidates([this.localizedProgress(candidate,new Map<string,number>())],this.progressPrefs,this.nextFilter,this.nextQuery).length===1;
   }
   private async runShowSort(input: ProgressSortInput, key: string, now: number, expiry: number): Promise<void> {
     const slot = input.query ? 'show-query' : 'show-all';
@@ -3962,7 +4055,7 @@ struct Index {
       this.activeCloud() === snapshot && this.cloudUuid === uuid && this.canEditLibrary() && !this.isHidden(row.media) && !this.collectionEditBusy;
     if (!store || !current() || !this.episodeReady || this.localBusy || this.cloudBusy || this.syncBusy ||
         this.saving || this.backupBusy || this.authBusy || this.setupBusy || row.upcoming ||
-        !this.progressData(this.nextQuery,true).some((item: ProgressRow) => item.media.id === row.media.id && item.episode.id === row.episode.id)) { return; }
+        !this.validateNextTarget(row)) { return; }
     this.localBusy = true;
     let saved = false;
     const auto = this.autoActive() ? this.autoConsent : undefined;
@@ -3991,12 +4084,12 @@ struct Index {
       }
       if (!unwatched) { this.nextStatus = '该集已看，正在更新推荐。'; this.requestProjection(); return; }
       if (signedIn && await store.boundAccount() !== uuid) { throw new Error('Account mismatch'); }
-      if (!current()) { return; }
+      if (!current() || !this.validateNextTarget(row)) { return; }
       this.invalidateSync();
       // Same guarded write path as detail. No direct remote request.
       await store.mark(row.media.id, [row.episode.id], true, auto && this.autoActive() ? auto.uuid : '');
       saved = true;
-      this.invalidateNextShows();
+      this.invalidateNextShows(row.media.id);
       this.requestProjection();
       this.localRecent = await store.recent();
       await this.reloadQueue();
@@ -4313,14 +4406,17 @@ struct Index {
       }.width('100%')
       Row({ space: 4 }) {
         this.progressOptionButton('播出日期', 'sort', 'newest', this.progressPrefs.sort === 'newest')
-        this.progressOptionButton('评分', 'sort', 'rating', this.progressPrefs.sort === 'rating')
+        this.progressOptionButton('公众评分', 'sort', 'rating', this.progressPrefs.sort === 'rating')
         this.progressOptionButton('随机', 'sort', 'random', this.progressPrefs.sort === 'random')
+        this.progressOptionButton('个人评分', 'sort', 'userRating', this.progressPrefs.sort === 'userRating')
       }.width('100%')
       Row({ space: 6 }) {
         this.progressOptionButton(this.progressPrefs.descending ? '降序' : '升序', 'direction', '', false)
         this.progressOptionButton(this.progressPrefs.newAtTop ? '新集优先：开' : '新集优先：关', 'new', '', this.progressPrefs.newAtTop)
       }.width('100%')
-      Text('个人评分排序尚未接入；未知评分不参与数值比较。').fontSize(12).width('100%')
+      if (this.progressPrefs.sort==='userRating') {
+        Text(this.collectionRatingStatus || (this.signedIn ? '未评分影视排在末尾。' : '登录后读取个人评分；未评分排在末尾。')).fontSize(12).width('100%')
+      }
     }.width('100%').padding(10).borderRadius(10).backgroundColor($r('app.color.showly_surface'))
   }
 
@@ -4916,7 +5012,8 @@ struct Index {
   }
 
   private async refreshPage(): Promise<void> {
-    if (this.tab === 'library') { this.collectionRatingKey = ''; this.collectionRatings = []; }
+    this.candidateFailureKey='';
+    if (this.tab === 'library' || (this.tab==='progress' && this.mediaMode==='show' && this.progressPrefs.sort==='userRating')) { this.collectionRatingKey = ''; this.collectionRatings = []; }
     if (this.mediaMode === 'movie') {
       this.movieRatingKey = '';
       this.movieRatingRows = [];

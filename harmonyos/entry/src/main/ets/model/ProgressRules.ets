@@ -54,6 +54,7 @@ export interface ProgressRow {
   rating?: number;
   randomOrder: number;
   dateUnknown: boolean;
+  userRating?: number;
   localizedTitle?: string;
   localizedEpisode?: string;
 }
@@ -67,7 +68,7 @@ export function defaultProgress(): ProgressPreferences {
 export function validProgress(p: ProgressPreferences): boolean {
   return !!p && ['last','oldest'].includes(p.strategy) && ['aired','all'].includes(p.count) &&
     Number.isSafeInteger(p.days) && p.days >= 0 && Number.isFinite(new Date(Date.now() + p.days * DAY).getTime()) &&
-    ['recent','remaining','title','newest','rating','random'].includes(p.sort) &&
+    ['recent','remaining','title','newest','rating','userRating','random'].includes(p.sort) &&
     typeof p.descending === 'boolean' && typeof p.newAtTop === 'boolean' &&
     typeof p.upcomingCollapsed === 'boolean' && typeof p.holdCollapsed === 'boolean' &&
     (p.filter === undefined || ['all','upcoming','hold','both'].includes(p.filter));
@@ -176,6 +177,14 @@ function title(row: ProgressRow): string {
 }
 function order(a: ProgressRow, b: ProgressRow, prefs: ProgressPreferences): number {
   const sign = prefs.descending ? -1 : 1;
+  if (prefs.sort === 'userRating') {
+    // Android USER_RATING: unrated last in both directions, then title ascending.
+    if ((a.userRating === undefined)!==(b.userRating === undefined)) { return a.userRating === undefined ? 1 : -1; }
+    const value=sign*((a.userRating ?? 0)-(b.userRating ?? 0));
+    const x=(a.localizedTitle || a.media.title.replace(/^the /i,'')).toUpperCase();
+    const y=(b.localizedTitle || b.media.title.replace(/^the /i,'')).toUpperCase();
+    return value || (x<y ? -1 : x>y ? 1 : 0) || a.media.id.localeCompare(b.media.id);
+  }
   if (prefs.sort === 'rating' && (a.rating === undefined || b.rating === undefined)) {
     if (a.rating !== b.rating) { return a.rating === undefined ? 1 : -1; }
   }

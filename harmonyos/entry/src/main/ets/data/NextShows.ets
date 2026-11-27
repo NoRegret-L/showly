@@ -13,6 +13,8 @@ export interface NextShow {
   lastSeq: number;
   sections?: string[];
   source?: ProgressSource;
+  sourceStateKey?: string;
+  sourceCatalogKey?: string;
 }
 
 export function projectShow(state: EpisodeBackupState, lastSeq: number): NextShow {
