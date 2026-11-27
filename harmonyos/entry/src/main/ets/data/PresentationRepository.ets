@@ -17,6 +17,7 @@ export class PresentationRepository {
   private seasons: Map<string, SeasonPresentation> = new Map<string, SeasonPresentation>();
   private artAttempted: Set<string> = new Set<string>();
   private artChecked: Set<string> = new Set<string>();
+  private summaryMissing: Set<string> = new Set<string>();
   private version: number = 0;
   private loadedSeasons: Set<string> = new Set<string>();
   private dirtyTitles: Map<string, TitlePresentation> = new Map<string, TitlePresentation>();
@@ -57,7 +58,7 @@ export class PresentationRepository {
     this.dirtyTitles.clear(); this.dirtySeasons.clear();
     return result;
   }
-  retryArtwork(): void { this.artAttempted.clear(); this.artChecked.clear(); }
+  retryArtwork(): void { this.artAttempted.clear(); this.artChecked.clear(); this.summaryMissing.clear(); }
   private emptyTitle(id: string): TitlePresentation {
     return { id: id, text: { title: '', overview: '' }, translatedAt: 0, posterUrls: [], posterUri: '' };
   }
@@ -81,8 +82,9 @@ export class PresentationRepository {
     }
     if (!clientId) { return; }
     const attempt=JSON.stringify([clientId,item.id,urls]);
-    let missingSummary=false;
-    if (collection && !meta) {
+    const summaryKey=JSON.stringify([clientId,item.id]);
+    let missingSummary=this.summaryMissing.has(summaryKey);
+    if (collection && !meta && !missingSummary) {
       try {
         const detail=await readDetails(item,clientId);
         meta=detail.collection;
@@ -91,12 +93,16 @@ export class PresentationRepository {
       } catch (error) {
         if (presentationFailure(error as Error).category!=='missing') { throw error; }
         missingSummary=true;
+        this.summaryMissing.add(summaryKey);
       }
     }
     if (!artwork || uri || this.artAttempted.has(attempt)) { return; }
     if (!urls.length && !missingSummary) {
       try { urls=(await readDetails(item,clientId)).posterUrls; }
-      catch (error) { if (presentationFailure(error as Error).category!=='missing') { throw error; } }
+      catch (error) {
+        if (presentationFailure(error as Error).category!=='missing') { throw error; }
+        this.summaryMissing.add(summaryKey);
+      }
     }
     let failed: PresentationFailure | undefined;
     for (const url of urls) {

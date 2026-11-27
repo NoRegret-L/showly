@@ -45,6 +45,15 @@ const attempts=new p.PresentationAttempts();
  let titleDone=false;
  await p.runPresentationPass([task(9)],'title',attempts,'A',()=>true,()=>true,async()=>{titleDone=true},()=>{},()=>{});
  assert(titleDone);resolve();await slow;assert.deepEqual(started,['show:1']);assert.equal(stalePublishes,0);
+ let reject,scroll=true,staleErrors=0;
+ const scrolling=p.runPresentationPass([task(8)],'title',attempts,'A',()=>scroll,()=>true,async()=>{await new Promise((_,r)=>reject=r)},()=>{},()=>staleErrors++);
+ await Promise.resolve();scroll=false;reject(new p.PresentationFailure('temporary',0));await scrolling;
+ let retried=0;
+ await p.runPresentationPass([task(8)],'title',attempts,'A',()=>true,()=>true,async()=>retried++,()=>{},()=>{});
+ assert.equal(staleErrors,0);assert.equal(retried,0);
+ attempts.retry();
+ await p.runPresentationPass([task(8)],'title',attempts,'A',()=>true,()=>true,async()=>retried++,()=>{},()=>{});
+ assert.equal(retried,1);
  const flights=new ReadFlight();let network=0;
  await Promise.all(Array.from({length:393},()=>flights.run('A:show:1:season:1',async()=>{network++;return 1})));
  assert.equal(network,1);
@@ -60,6 +69,8 @@ assert "presentationBlocked" not in page
 assert "this.presentationLane('local')" in page and "this.presentationLane('title')" in page and "this.presentationLane('season')" in page
 assert "version===this.presentationWorkVersion" in page and "account===this.currentProgressScope()" in page
 assert "await repo.hydrateSeason(" in page and "await repo.translation(" in page and "await repo.season(" in page
+assert "await repo.artwork(task.media,\'\',task.artwork,task.posterUrls,false)" in page
+assert "this.summaryMissing.add(summaryKey)" in repo
 assert "this.hydrateFlights.run(" in repo and "this.seasonFlights.run(JSON.stringify([clientId,key,language])" in repo
 assert "checkPresentationService(service)" in detail and progress.count("checkPresentationService(service)")==2
 assert "presentationHttpError(service,response.responseCode" in detail and progress.count("presentationHttpError(service,response.responseCode")==2

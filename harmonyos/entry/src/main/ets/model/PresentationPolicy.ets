@@ -55,15 +55,19 @@ export class PresentationGate {
 }
 export class PresentationAttempts {
   private failures: Map<string,PresentationFailure>=new Map<string,PresentationFailure>();
+  private epoch: number=0;
+  generation(): number { return this.epoch; }
   allowed(key: string,now: number): boolean {
     const error=this.failures.get(key);
     if (!error) { return true; }
     if (error.category==='limited' && now>=error.retryAt) { this.failures.delete(key); return true; }
     return false;
   }
-  fail(key: string,error: PresentationFailure): void { this.failures.set(key,error); }
+  fail(key: string,error: PresentationFailure,generation: number): void {
+    if (generation===this.epoch) { this.failures.set(key,error); }
+  }
   // A network recovery or explicit retry does not change the transport gate.
-  retry(): void { this.failures.clear(); }
+  retry(): void { this.epoch++; this.failures.clear(); }
 }
 export function presentationTaskKey(task: PresentationTask,lane: string): string {
   return lane==='season' || lane==='local' ? task.media.id+':'+task.season : task.media.id;
@@ -86,13 +90,14 @@ export async function runPresentationPass(tasks: PresentationTask[],lane: string
     const key=JSON.stringify([scope,lane,presentationTaskKey(task,lane)]);
     if (seen.has(key) || !attempts.allowed(key,Date.now())) { continue; }
     seen.add(key);
+    const generation=attempts.generation();
     try { await work(task); }
     catch (error) {
-      if (current()) {
-        const failure=presentationFailure(error as Error);
-        attempts.fail(key,failure);
-        report(failure);
-      }
+      const failure=presentationFailure(error as Error);
+      // A scroll or route change suppresses publication, not the failure of
+      // the resource in its captured scope. An explicit retry wins a race.
+      attempts.fail(key,failure,generation);
+      if (current()) { report(failure); }
     }
     if (current()) { publish(); }
   }

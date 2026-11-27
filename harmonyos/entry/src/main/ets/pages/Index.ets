@@ -1393,7 +1393,13 @@ struct Index {
             if (lane==='local') { await repo.hydrateSeason(task.media,task.season); }
             else if (lane==='title') { await repo.translation(task.media,client,language); }
             else if (lane==='season') { await repo.season(task.media,task.season,client,language); }
-            else { await repo.artwork(task.media,client,task.artwork,task.posterUrls,collection); }
+            else {
+              // Publish local poster immediately, even if the remote summary
+              // is slow, unavailable or rate limited. Recheck before I/O.
+              await repo.artwork(task.media,'',task.artwork,task.posterUrls,false);
+              if (current()) { this.publishPresentation(); }
+              if (relevant() && eligible(task)) { await repo.artwork(task.media,client,task.artwork,task.posterUrls,collection); }
+            }
           },
           (): void=>{ if (current()) { this.publishPresentation(); } },
           (error: PresentationFailure): void=>{
