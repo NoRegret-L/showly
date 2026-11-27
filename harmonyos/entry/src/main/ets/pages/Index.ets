@@ -1,3 +1,4 @@
+import { ArtworkImage } from './ArtworkImage';
 import { MediaInputVersion } from '../model/MediaInputVersion';
 import { DetailSession, SeasonSummary, summarizeSeasons } from '../model/DetailSession';
 import { DetailEpisodeList, EpisodeDisplayRow } from './DetailEpisodeList';
@@ -53,7 +54,7 @@ import { LibraryProjection, projectLibrary, projectDetail } from '../data/Librar
 import { allowLocalScope } from '../model/EffectiveState';
 import { hasTrackingEvidence } from '../model/PersonalLibrary';
 import { CollectionGroup, GroupEntry, normalizeMode, progressTabs, collectionRows, pageGroups } from '../model/NavigationModel';
-import { MediaDetail, canReadDetails, readDetails, cachePoster, clearDetailMemory } from '../data/TraktDetails';
+import { MediaDetail, canReadDetails, readDetails, clearDetailMemory } from '../data/TraktDetails';
 import { DiscoverItem, DiscoverOptions, DiscoverFeed, DiscoverPage, defaultDiscover, validDiscoverOptions, discoverRequest, discoverKey, discoverFresh, filterDiscover, discoverPage, DISCOVER_GENRES, DISCOVER_NETWORKS } from '../model/DiscoverRules';
 import { DiscoverRead } from '../model/DiscoverRead';
 import { openDiscover } from '../data/DiscoverRepository';
@@ -1679,7 +1680,8 @@ struct Index {
     if (this.tab==='library') { const options=this.collectionFilter==='other'?defaultCollection():this.collectionOptions; return !!this.collectionQuery.trim() || options.sort==='title' || options.sort==='userRating'; }
     if (this.tab!=='progress') { return false; }
     if (this.progressMode==='next') {
-      return this.mediaMode==='show' ? !!this.nextQuery.trim() || this.progressPrefs.sort==='title' :
+      // Every show-progress comparator uses localized title for ties.
+      return this.mediaMode==='show' ? true :
         !!this.movieProgressQuery.trim() || this.movieProgressOptions.sort==='title' || this.movieProgressOptions.sort==='userRating';
     }
     return this.progressMode==='calendar' && this.mediaMode==='movie' && !!this.movieCalendarQuery.trim();
@@ -1807,10 +1809,21 @@ struct Index {
     finally { this.languageBusy = false; }
   }
 
+  private async artworkFailed(item: Media,uri: string): Promise<void> {
+    const repo=this.presentation;
+    if (!repo || !this.pageVisible || this.artwork(item)!==uri) { return; }
+    try {
+      const retry=await repo.repairArtwork(item,uri);
+      if (this.presentation!==repo || !this.pageVisible) { return; }
+      this.publishPresentation();
+      if (retry) { this.requestViewportPresentation(); }
+    } catch (error) {}
+  }
+
   @Builder
   posterImage(item: Media, width: number, height: number) {
     if (this.artwork(item)) {
-      Image(this.artwork(item)).width(width).height(height).objectFit(ImageFit.Cover).borderRadius(6)
+      ArtworkImage({uri:this.artwork(item),widthValue:width,ratio:width/height,corner:6,onFailure:(uri: string)=>{this.artworkFailed(item,uri);}})
     } else {
       Column() {
         Text('海报').fontSize(11).fontColor($r('app.color.showly_secondary'))
@@ -3989,8 +4002,7 @@ struct Index {
   discoverCard(item: DiscoverItem) {
     Column({ space: 6 }) {
       if (this.artwork(item.media)) {
-        Image(this.artwork(item.media)).width('100%').aspectRatio(0.667)
-          .objectFit(ImageFit.Cover).borderRadius(10)
+        ArtworkImage({uri:this.artwork(item.media),widthValue:'100%',ratio:2/3,corner:10,onFailure:(uri: string)=>{this.artworkFailed(item.media,uri);}})
       } else {
         Column() {
           Text('海报').fontColor($r('app.color.showly_secondary')).fontSize(14)
@@ -5869,8 +5881,7 @@ struct Index {
           ForEach(group.rows, (row: PersonalLibraryRow) => {
             Column({ space: 6 }) {
               if (this.artwork(row.media)) {
-                Image(this.artwork(row.media))
-                  .width('100%').aspectRatio(0.667).objectFit(ImageFit.Cover).borderRadius(10)
+                ArtworkImage({uri:this.artwork(row.media),widthValue:'100%',ratio:2/3,corner:10,onFailure:(uri: string)=>{this.artworkFailed(row.media,uri);}})
               } else {
                 Column() {
                   Text('海报').fontSize(13).fontColor($r('app.color.showly_secondary'))
@@ -6188,11 +6199,7 @@ struct Index {
       Text(this.displayTitle(item))
         .fontSize(26).fontWeight(FontWeight.Bold).width('100%')
       if (this.artwork(item)) {
-        Image(this.artwork(item))
-          .width(180).height(270).objectFit(ImageFit.Contain).borderRadius(10)
-          .onError(() => {
-            this.detailStatus = '海报已缓存，但鸿蒙 Image 组件解码或读取失败';
-          })
+        ArtworkImage({uri:this.artwork(item),widthValue:180,ratio:2/3,corner:10,contain:true,onFailure:(uri: string)=>{this.artworkFailed(item,uri);}})
       } else {
         Column() {
           Text(this.detailBusy ? '正在加载海报…' : '海报未显示').fontColor($r('app.color.showly_secondary'))

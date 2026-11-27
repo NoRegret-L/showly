@@ -1,12 +1,13 @@
+import { ArtworkRecovery } from '../model/ArtworkRules';
 import { relationalStore } from '@kit.ArkData';
 import { common } from '@kit.AbilityKit';
 import { Media } from '../model/Media';
 import { ReadFlight, ReadCancel, ConsumerReadFlight } from '../model/ReadFlight';
 import { PresentationFailure, presentationFailure } from '../model/PresentationPolicy';
 import { TitlePresentation, SeasonPresentation, EpisodePresentation, TranslationText, CollectionMeta, validTitle, validSeason, titleNeedsTranslation, seasonNeedsTranslation, mergeText } from '../model/MediaPresentation';
-import { readDetails, cachePoster, cachedPoster, canReadDetails } from './TraktDetails';
+import { readDetails, cachePoster, cachedPoster, canReadDetails, rejectPosterUri } from './TraktDetails';
 import { readChinese, readChineseSeason } from './TraktProgress';
-interface TitlePatch { text?: TranslationText; translatedAt?: number; posterUrls?: string[]; posterUri?: string; collection?: CollectionMeta; }
+interface TitlePatch { expectedPosterUri?: string; text?: TranslationText; translatedAt?: number; posterUrls?: string[]; posterUri?: string; collection?: CollectionMeta; }
 export interface PresentationChanges { titles: TitlePresentation[]; seasons: SeasonPresentation[]; }
 // Public metadata cache only: no personal library or sync writes.
 export class PresentationRepository {
@@ -17,6 +18,7 @@ export class PresentationRepository {
   private seasons: Map<string, SeasonPresentation> = new Map<string, SeasonPresentation>();
   private artAttempted: Set<string> = new Set<string>();
   private artChecked: Set<string> = new Set<string>();
+  private repair: ArtworkRecovery=new ArtworkRecovery();
   private summaryMissing: Set<string> = new Set<string>();
   private version: number = 0;
   private residency: number = 0;
@@ -63,6 +65,7 @@ export class PresentationRepository {
     this.residency++;
     this.titles.clear(); this.seasons.clear(); this.loadedSeasons.clear(); this.dirtySeasons.clear();
     this.artChecked.clear(); this.artAttempted.clear(); this.summaryMissing.clear();
+    this.repair.clear();
   }
   private async readTitle(id: string,version: number): Promise<TitlePresentation> {
     const cached=this.titles.get(id);
@@ -90,7 +93,22 @@ export class PresentationRepository {
     this.dirtyTitles.clear(); this.dirtySeasons.clear();
     return result;
   }
-  retryArtwork(): void { this.artAttempted.clear(); this.artChecked.clear(); this.summaryMissing.clear(); }
+  retryArtwork(): void { this.artAttempted.clear(); this.artChecked.clear(); this.summaryMissing.clear(); this.repair.clear(); }
+  // A native decoder error is not proof of corrupt bytes; quarantine this URI
+  // and permit a single recovery transition, then require explicit retry.
+  async repairArtwork(item: Media,uri: string): Promise<boolean> {
+    const version=this.residency;
+    const old=await this.readTitle(item.id,version);
+    if (version!==this.residency || old.posterUri!==uri || !uri) { return false; }
+    rejectPosterUri(uri);
+    const first=this.repair.reject(item.id,uri);
+    this.artChecked.delete(item.id);
+    for (const attempt of this.artAttempted) {
+      if (attempt.includes(','+JSON.stringify(item.id)+',')) { this.artAttempted.delete(attempt); }
+    }
+    await this.saveTitlePatch(item.id,{posterUri:'',expectedPosterUri:uri},version);
+    return first && version===this.residency;
+  }
   private emptyTitle(id: string): TitlePresentation {
     return { id: id, text: { title: '', overview: '' }, translatedAt: 0, posterUrls: [], posterUri: '' };
   }
@@ -108,9 +126,11 @@ export class PresentationRepository {
     let uri = prior.posterUri;
     let meta = prior.collection;
     // Local file reuse is independent of a failed/limited metadata request.
-    if (artwork && !this.artChecked.has(item.id)) {
+    if (artwork && !this.artChecked.has(item.id) && this.repair.allowed(item.id)) {
+      uri = await cachedPoster(this.dir,item,urls,scope) || await cachedPoster(this.oldDir,item,urls,scope);
+      scope.check();
+      if (version!==this.residency) { return; }
       this.artChecked.add(item.id);
-      uri = cachedPoster(this.dir,item,urls) || cachedPoster(this.oldDir,item,urls);
     }
     if (artwork || (urls.length && !prior.posterUrls.length)) {
       await this.saveTitlePatch(item.id,{posterUrls:urls,posterUri:uri},version);
@@ -134,7 +154,7 @@ export class PresentationRepository {
         if (version===this.residency) { this.summaryMissing.add(summaryKey); }
       }
     }
-    if (version!==this.residency || !artwork || uri || this.artAttempted.has(attempt)) { return; }
+    if (version!==this.residency || !artwork || uri || !this.repair.allowed(item.id) || this.artAttempted.has(attempt)) { return; }
     if (!urls.length && !missingSummary) {
       try { urls=(await readDetails(item,clientId,false,scope)).posterUrls; }
       catch (error) {
@@ -184,7 +204,7 @@ export class PresentationRepository {
     const task = previous.catch((): void => {}).then(async (): Promise<void> => {
       if (version!==this.residency) { return; }
       const old = await this.readTitle(id,version);
-      if (version!==this.residency) { return; }
+      if (version!==this.residency || (patch.expectedPosterUri!==undefined && old.posterUri!==patch.expectedPosterUri)) { return; }
       const row: TitlePresentation = { id: id, text: patch.text ? mergeText(old.text,patch.text) : old.text,
         translatedAt: patch.translatedAt ?? old.translatedAt,
         posterUrls: patch.posterUrls?.length ? patch.posterUrls : old.posterUrls,

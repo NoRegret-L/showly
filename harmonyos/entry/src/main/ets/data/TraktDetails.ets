@@ -1,3 +1,7 @@
+import { util } from '@kit.ArkTS';
+import { cryptoFramework } from '@kit.CryptoArchitectureKit';
+import { image } from '@kit.ImageKit';
+import { artworkIdentity, legacyPosterName } from '../model/ArtworkRules';
 import { http } from '@kit.NetworkKit';
 import { PresentationFailure } from '../model/PresentationPolicy';
 import { checkPresentationService, presentationHttpError, traktPresentationService } from './PresentationHttp';
@@ -181,20 +185,62 @@ function networkError(code: number): string {
 
 // Only Trakt-owned HTTPS artwork hosts are accepted. Never attach API credentials.
 // Download into local cache first; no hotlinking, proxy, or TLS verification bypass.
-export function cachedPoster(cacheDir: string, item: Media, candidates: string[]): string {
+// URI rejection is session-local; never delete a file selected by another
+// consumer. A fresh verified download atomically replaces it.
+const rejectedPosterUris: Set<string>=new Set<string>();
+export function rejectPosterUri(uri: string): void { if (uri) { rejectedPosterUris.add(uri); } }
+export async function posterPath(cacheDir: string,item: Media,url: string): Promise<string> {
+  const key=artworkIdentity('trakt','poster',item.id,url);
+  // normalizePoster accepts ASCII paths and authority; encode UTF-8 explicitly
+  // for query strings as well, without storing signed URLs in file names.
+  const data=new util.TextEncoder().encodeInto(key);
+  const md=cryptoFramework.createMd('SHA256');
+  await md.update({data:data});
+  const digest=await md.digest();
+  let hex='';
+  for (const byte of digest.data) { hex+=byte.toString(16).padStart(2,'0'); }
+  return cacheDir+'/showly_artwork_'+hex;
+}
+async function validPosterFile(path: string,scope?: ReadCancel): Promise<boolean> {
+  scope?.check();
+  try {
+    const stat=await fileIo.stat(path);
+    if (stat.size<=0) { return false; }
+    const uri=fileUri.getUriFromPath(path);
+    if (rejectedPosterUris.has(uri)) { return false; }
+    const file=await fileIo.open(path,fileIo.OpenMode.READ_ONLY);
+    try {
+      const source=image.createImageSource(file.fd);
+      try {
+        const info=await source.getImageInfo();
+        scope?.check();
+        return info.size.width>0 && info.size.height>0;
+      } finally { await source.release(); }
+    } finally { await fileIo.close(file); }
+  } catch (error) { scope?.check(); return false; }
+}
+export async function cachedPoster(cacheDir: string, item: Media, candidates: string[],scope?: ReadCancel): Promise<string> {
   if (!canReadDetails(item)) { return ''; }
-  for (const candidate of candidates) {
-    const url = normalizePoster(candidate);
-    if (!url) { continue; }
-    const imagePath = url.split('?')[0];
-    const filename = imagePath.substring(imagePath.lastIndexOf('/') + 1);
-    const path = cacheDir + '/showly_poster_' + item.kind + '_' + item.id.substring(item.kind.length + 1) + '_' + filename;
-    try { if (fileIo.accessSync(path) && fileIo.statSync(path).size > 0) { return fileUri.getUriFromPath(path); } } catch (error) {}
+  const urls=Array.from(new Set<string>(candidates.map((candidate: string)=>normalizePoster(candidate)).filter((url: string)=>!!url)));
+  for (const url of urls) {
+    scope?.check();
+    const path=await posterPath(cacheDir,item,url);
+    if (await validPosterFile(path,scope)) { return fileUri.getUriFromPath(path); }
+  }
+  // Existing offline files are a compatibility fallback only. Never promote
+  // them to the new exact identity, and reject ambiguous legacy basenames.
+  for (const url of urls) {
+    const name=legacyPosterName(url);
+    if (urls.filter((other: string)=>legacyPosterName(other)===name).length!==1) { continue; }
+    const path=cacheDir+'/showly_poster_'+item.kind+'_'+item.id.substring(item.kind.length+1)+'_'+name;
+    if (await validPosterFile(path,scope)) { return fileUri.getUriFromPath(path); }
   }
   return '';
 }
 export async function cachePoster(cacheDir: string, item: Media, candidates: string[], consumer?: ReadCancel): Promise<PosterResult> {
-  return posterFlights.run(JSON.stringify([cacheDir,item.id,candidates]), (scope: ReadCancel) => downloadPoster(cacheDir,item,candidates,scope),consumer);
+  const selected=candidates.map((candidate: string)=>normalizePoster(candidate)).find((url: string)=>!!url)??'';
+  const key=JSON.stringify([cacheDir,artworkIdentity('trakt','poster',item.id,selected),selected?'':candidates[0]??'']);
+  return posterFlights.run(key,(scope: ReadCancel)=>downloadPoster(cacheDir,item,candidates,scope),consumer);
 }
 async function downloadPoster(cacheDir: string, item: Media, candidates: string[], scope: ReadCancel): Promise<PosterResult> {
   if (!canReadDetails(item) || candidates.length === 0) {
@@ -212,16 +258,9 @@ async function downloadPoster(cacheDir: string, item: Media, candidates: string[
     return { uri: '', status: '海报地址未通过安全校验 · ' + rejectedPosterHint(candidates[0]) };
   }
   const host = url.substring(8, url.indexOf('/', 8));
-  const imagePath = url.split('?')[0];
-  const filename = imagePath.substring(imagePath.lastIndexOf('/') + 1);
-  const path = cacheDir + '/showly_poster_' + item.kind + '_' +
-    item.id.substring(item.kind.length + 1) + '_' + filename;
-  try {
-    if (fileIo.accessSync(path) && fileIo.statSync(path).size > 0) {
-      return { uri: fileUri.getUriFromPath(path), status: '海报来自本地缓存 · ' + host };
-    }
-  } catch (error) {
-    // Cache miss; download below.
+  const path=await posterPath(cacheDir,item,url);
+  if (await validPosterFile(path,scope)) {
+    return { uri:fileUri.getUriFromPath(path),status:'海报来自本地缓存 · '+host };
   }
   const service='poster:'+host;
   checkPresentationService(service);
@@ -259,24 +298,27 @@ async function downloadPoster(cacheDir: string, item: Media, candidates: string[
     return { uri: '', status: '海报 CDN 未返回支持的图片文件头 · ' + host, failure:new PresentationFailure('temporary',200) };
   }
   try {
-    const file = fileIo.openSync(temp, fileIo.OpenMode.CREATE | fileIo.OpenMode.WRITE_ONLY | fileIo.OpenMode.TRUNC);
+    const file = await fileIo.open(temp, fileIo.OpenMode.CREATE | fileIo.OpenMode.WRITE_ONLY | fileIo.OpenMode.TRUNC);
     try {
       const written = await fileIo.write(file.fd, bytes);
       if (written !== bytes.byteLength) {
         throw new Error('Incomplete poster cache write');
       }
     } finally {
-      fileIo.closeSync(file);
+      await fileIo.close(file);
     }
-    fileIo.renameSync(temp, path);
+    scope.check();
+    if (!await validPosterFile(temp,scope)) { throw new Error('Invalid poster image metadata'); }
+    scope.check();
+    await fileIo.rename(temp, path);
+    rejectedPosterUris.delete(fileUri.getUriFromPath(path));
     return { uri: fileUri.getUriFromPath(path), status: '海报已下载并缓存 · ' + host };
   } catch (error) {
+    scope.check();
     return { uri: '', status: '海报下载成功，但本地缓存写入失败（错误码 ' + (error as BusinessError).code + '）', failure:new PresentationFailure('temporary',0) };
   } finally {
     try {
-      if (fileIo.accessSync(temp)) {
-        fileIo.unlinkSync(temp);
-      }
+      await fileIo.unlink(temp);
     } catch (error) {
       // A temporary cache file is not a library record.
     }
