@@ -314,6 +314,20 @@ export class EpisodeStore {
     }
   }
 
+  // Derived read cache only. Existing personal/sync tables are not modified.
+  async readProjectionCache(scope: string): Promise<string> {
+    try {
+      await this.db.executeSql('CREATE TABLE IF NOT EXISTS progress_projection_cache (scope TEXT PRIMARY KEY,payload TEXT NOT NULL)');
+      const rows = await this.db.querySql('SELECT payload FROM progress_projection_cache WHERE scope=?', [scope]);
+      try { return rows.goToFirstRow() ? rows.getString(0) : ''; } finally { rows.close(); }
+    } catch (error) { return ''; }
+  }
+  async saveProjectionCache(scope: string, payload: string): Promise<void> {
+    try {
+      await this.db.executeSql('INSERT OR REPLACE INTO progress_projection_cache(scope,payload) VALUES(?,?)', [scope, payload]);
+    } catch (error) { /* optional cache; never block the library */ }
+  }
+
   async fullCatalog(showId: string): Promise<FullEpisodeCatalog | undefined> {
     const rows = await this.db.querySql('SELECT payload FROM episode_schedule WHERE show_id=?', [showId]);
     try {

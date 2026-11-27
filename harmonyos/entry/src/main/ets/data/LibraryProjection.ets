@@ -1,6 +1,6 @@
 import { taskpool } from '@kit.ArkTS';
 import { Media } from '../model/Media';
-import { ProjectionInput, ProjectionOutput, computeProjection, ShowProjectionCache, showProjectionKey } from '../model/ProjectionCompute';
+import { ProjectionInput, ProjectionOutput, computeProjection, ShowProjectionCache, showProjectionKey, ShowMemoEntry, persistentProjectionScope, decodePersistedProjection, encodePersistedProjection, diskProjectionAllowed, readPersistedShow, persistShow } from '../model/ProjectionCompute';
 import { computeProjectionTask } from './ProjectionTask';
 import { MediaRecord } from '../model/MediaState';
 import { LibraryShowEvidence, PersonalLibraryRow, buildPersonalLibrary, hasTrackingEvidence } from '../model/PersonalLibrary';
@@ -24,6 +24,8 @@ export interface LibraryProjection {
   cacheable: boolean;
   computedShows: number;
   reusedShows: number;
+  diskHits: number;
+  repairTargets: Media[];
 }
 export async function projectLibrary(store: EpisodeStore, records: MediaRecord[],
   cloud: RemoteLibraryObservation | undefined, uuid: string, clientId: string, fill: boolean,
@@ -71,6 +73,12 @@ export async function projectLibrary(store: EpisodeStore, records: MediaRecord[]
   const now = Date.now();
   cache.begin(JSON.stringify([clientId, uuid, cloud?.generation ?? -1, localAllowed]));
   const retained = new Set<string>();
+  const diskScope = persistentProjectionScope(clientId, uuid, !!cloud, localAllowed);
+  const diskRaw = await store.readProjectionCache(diskScope);
+  const disk = decodePersistedProjection(diskRaw, diskScope);
+  const nextDisk = new Map<string, ShowMemoEntry>();
+  const repairTargets: Media[] = [];
+  let diskHits = 0;
   let cacheable = true;
   let computedShows = 0;
   let reusedShows = 0;
@@ -88,6 +96,7 @@ export async function projectLibrary(store: EpisodeStore, records: MediaRecord[]
     }
     const unmatched = (show?.positions ?? []).some((pos: RemotePlayPosition) => pos.season > 0 && !positions.has(pos.season + ':' + pos.number));
     const needsRepair = !full || stale || unmatched || !full.status;
+    if (needsRepair) { repairTargets.push(row.media); }
     if (needsRepair && (!fill || !clientId)) { cacheable = false; }
     if (fill && clientId && needsRepair) {
       try {
@@ -125,6 +134,10 @@ export async function projectLibrary(store: EpisodeStore, records: MediaRecord[]
         decisions: decisions, timed: timed, checkpoints: cp, common: baseline, now: now };
       const key = showProjectionKey(input);
       calculated = cache.get(row.media.id, key, now);
+      if (!calculated) {
+        calculated = readPersistedShow(disk.get(row.media.id), input, key);
+        if (calculated) { diskHits++; cache.put(row.media.id, key, now, calculated); }
+      }
       if (calculated) { reusedShows++; }
       else {
         computedShows++;
@@ -139,6 +152,11 @@ export async function projectLibrary(store: EpisodeStore, records: MediaRecord[]
       }
       if (!current()) { throw new Error('Observation session changed'); }
       validUntil = Math.min(validUntil, calculated.validUntil);
+      if (calculated.effective.complete && diskProjectionAllowed(input)) {
+        const prior = disk.get(row.media.id);
+        // Preserve original validity start for an unchanged disk entry.
+        nextDisk.set(row.media.id, readPersistedShow(prior, input, key) && prior ? prior : persistShow(key, now, calculated));
+      }
     }
     const effective = calculated?.effective;
     if (!effective?.complete || !full?.status) { cacheable = false; }
@@ -164,8 +182,12 @@ export async function projectLibrary(store: EpisodeStore, records: MediaRecord[]
     progress(++done, targets.length);
   }
   cache.retain(retained);
+  if (!current()) { throw new Error('Observation session changed'); }
+  const payload = encodePersistedProjection(diskScope, nextDisk);
+  if (payload !== diskRaw) { await store.saveProjectionCache(diskScope, payload); }
+  if (!current()) { throw new Error('Observation session changed'); }
   return { evidence: result, missing: missing, failed: failed, localAllowed: localAllowed, matches: matches, next: next,
-    computedAt: now, validUntil: validUntil, cacheable: cacheable && !missing && !failed, computedShows: computedShows, reusedShows: reusedShows };
+    computedAt: now, validUntil: validUntil, cacheable: cacheable && !missing && !failed, computedShows: computedShows, reusedShows: reusedShows, diskHits: diskHits, repairTargets: repairTargets };
 }
 
 export interface DetailProjection {

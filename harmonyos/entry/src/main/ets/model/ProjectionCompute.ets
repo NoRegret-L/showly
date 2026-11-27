@@ -1,4 +1,4 @@
-import { FullEpisodeCatalog, scheduleEpisodes, showSections } from './ShowCatalog';
+import { FullEpisodeCatalog, ScheduledEpisode, scheduleEpisodes, showSections } from './ShowCatalog';
 import { RemoteShowObservation } from './RemoteObservation';
 import { CommonEntry } from './ThreeWay';
 import { ReadCheckpoint, ReadDecision, EffectiveEpisodes, resolveEpisodes } from './EffectiveState';
@@ -43,7 +43,7 @@ export function computeProjection(input: ProjectionInput): ProjectionOutput {
     validUntil: validUntil };
 }
 
-interface ShowMemoEntry {
+export interface ShowMemoEntry {
   key: string;
   from: number;
   output: ProjectionOutput;
@@ -70,4 +70,63 @@ export class ShowProjectionCache {
 export function showProjectionKey(input: ProjectionInput): string {
   return JSON.stringify([input.full, input.remote, input.cloudActive, input.localIds,
     input.decisions, input.timed, input.checkpoints, input.common]);
+}
+
+export interface PersistedShowEntry { id: string; entry: ShowMemoEntry; }
+export interface PersistedProjection { schema: number; scope: string; entries: PersistedShowEntry[]; }
+export function persistentProjectionScope(client: string, uuid: string, cloudActive: boolean, localAllowed: boolean): string {
+  return JSON.stringify([client, cloudActive ? 'account' : 'device', uuid, localAllowed]);
+}
+export function diskProjectionAllowed(input: ProjectionInput): boolean {
+  // An unacknowledged decision must use the live resolver. Disk data never
+  // provides new checkpoint evidence, even if the rest of its key matches.
+  return !input.cloudActive || input.decisions.every((d: ReadDecision) =>
+    input.checkpoints.some((cp: ReadCheckpoint) => cp.id === d.episodeId && cp.seq === d.seq && cp.watched === d.watched));
+}
+export function readPersistedShow(entry: ShowMemoEntry | undefined, input: ProjectionInput,
+  key: string): ProjectionOutput | undefined {
+  if (!entry || entry.key !== key || !diskProjectionAllowed(input) ||
+      !Number.isSafeInteger(entry.from) || input.now < entry.from || !entry.output ||
+      !Number.isSafeInteger(entry.output.validUntil) || input.now >= entry.output.validUntil) { return undefined; }
+  const out = entry.output;
+  if (!out.effective || !out.effective.complete || !Array.isArray(out.effective.ids) ||
+      !Array.isArray(out.effective.matches) || out.effective.matches.length !== 0 ||
+      !Array.isArray(out.sections) || !out.sections.every((s: string) => ['watching','finished','upcoming'].includes(s)) ||
+      !out.source || out.source.media?.id !== input.full.media.id || !Array.isArray(out.source.episodes) ||
+      !Number.isFinite(out.source.recentAt) || !Number.isFinite(out.source.randomOrder)) { return undefined; }
+  const episodes = scheduleEpisodes(input.full);
+  const watched = new Set<number>(out.effective.ids);
+  if (watched.size !== out.effective.ids.length || out.source.episodes.length !== episodes.length) { return undefined; }
+  const known = new Set<number>(episodes.map((ep: ScheduledEpisode) => ep.id));
+  if (out.effective.ids.some((id: number) => !known.has(id))) { return undefined; }
+  for (let i = 0; i < episodes.length; i++) {
+    const row = out.source.episodes[i];
+    if (!row || JSON.stringify(row.episode) !== JSON.stringify(episodes[i]) ||
+        row.watched !== watched.has(episodes[i].id) || !Number.isFinite(row.watchedAt)) { return undefined; }
+  }
+  return out;
+}
+export function decodePersistedProjection(raw: string, scope: string): Map<string, ShowMemoEntry> {
+  const result = new Map<string, ShowMemoEntry>();
+  try {
+    const parsed = JSON.parse(raw) as PersistedProjection;
+    if (parsed.schema !== 1 || parsed.scope !== scope || !Array.isArray(parsed.entries)) { return result; }
+    for (const row of parsed.entries) {
+      if (!row || !/^show:[1-9][0-9]*$/.test(row.id) || !row.entry || result.has(row.id)) { return new Map<string, ShowMemoEntry>(); }
+      result.set(row.id, row.entry);
+    }
+  } catch (error) { return new Map<string, ShowMemoEntry>(); }
+  return result;
+}
+export function persistShow(key: string, from: number, output: ProjectionOutput): ShowMemoEntry {
+  // Never serialize the checkpoint evidence to the display cache.
+  const effective: EffectiveEpisodes = { ids: output.effective.ids, complete: output.effective.complete, matches: [] };
+  return { key: key, from: from, output: { effective: effective, sections: output.sections,
+    source: output.source, validUntil: output.validUntil } };
+}
+export function encodePersistedProjection(scope: string, entries: Map<string, ShowMemoEntry>): string {
+  const rows: PersistedShowEntry[] = [];
+  entries.forEach((entry: ShowMemoEntry, id: string) => { rows.push({ id: id, entry: entry }); });
+  const payload: PersistedProjection = { schema: 1, scope: scope, entries: rows };
+  return JSON.stringify(payload);
 }

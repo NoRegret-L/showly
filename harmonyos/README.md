@@ -1,4 +1,4 @@
-# Showly HarmonyOS Preview v0.9.3e.2c
+# Showly HarmonyOS Preview v0.9.3e.2c.1
 
 Unofficial native ArkTS prototype, not a complete Showly port. Your app uses Trakt but is not endorsed or certified by Trakt.
 
@@ -189,3 +189,6 @@ See [movie progress parity](docs/MOVIE_PROGRESS_PARITY.md) for source-derived ru
 
 ## v0.9.3e.2c — local-first startup and incremental read models (0.9.3.15, build 39)
 See [startup performance](docs/STARTUP_PERFORMANCE.md) for cache invalidation, worker isolation, and acceptance checks.
+
+## v0.9.3e.2c.1 — persistent read cache and lazy progress lists (0.9.3.16, build 40)
+See [deep startup performance](docs/DEEP_STARTUP_PERFORMANCE.md) for scope, safety and acceptance checks.

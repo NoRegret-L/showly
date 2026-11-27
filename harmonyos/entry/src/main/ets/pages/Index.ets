@@ -1,4 +1,5 @@
 import { common } from '@kit.AbilityKit';
+import { LazyRows } from '../model/LazyRows';
 import { PresentationRepository } from '../data/PresentationRepository';
 import { TitlePresentation, SeasonPresentation, PresentationTask, matchesText } from '../model/MediaPresentation';
 import { Media, mediaLabel, setWatched } from '../model/Media';
@@ -226,6 +227,13 @@ struct Index {
   private startupAt: number = Date.now();
   @State performanceStatus: string = '等待首次个人库计算';
   private projectionPending: boolean = false;
+  private repairTargets: Media[] = [];
+  private repairRunning: boolean = false;
+  private repairEpoch: number = 0;
+  @State repairStatus: string = '';
+  private lazyPending: boolean = false;
+  private showRows: LazyRows<ProgressEntry> = new LazyRows<ProgressEntry>();
+  private movieRowsSource: LazyRows<PersonalLibraryRow> = new LazyRows<PersonalLibraryRow>();
   @State @Watch('onRecoveryGateChanged') cloudBusy: boolean = false;
   @State cloudStatus: string = '';
   @State advancedSync: boolean = false;
@@ -308,6 +316,7 @@ struct Index {
 
   onPageHide(): void {
     this.pageVisible = false;
+    this.cancelCatalogRepair();
     this.presentationPending = false;
     this.presentationEpoch++;
     this.recoveryPending = false;
@@ -319,6 +328,7 @@ struct Index {
 
   aboutToDisappear(): void {
     this.pageVisible = false;
+    this.cancelCatalogRepair();
     this.presentationPending = false;
     this.presentationEpoch++;
     this.recoveryPending = false;
@@ -390,6 +400,9 @@ struct Index {
   // A busy auth/DB/sync operation no longer drops the network-resume event.
   // Coalesce to a single pending event, not a periodic retry loop.
   private onObservationAuthChanged(): void {
+    this.cancelCatalogRepair();
+    this.showRows.replace([], [], []);
+    this.movieRowsSource.replace([], [], []);
     this.projectionMemo.clear();
     this.showProjectionCache.clear();
     this.libraryRevision++;
@@ -469,6 +482,55 @@ struct Index {
     if (this.projectionPending) {
       this.projectionPending = false;
       this.loadNextShows();
+      return;
+    }
+    if (this.repairTargets.length && !this.repairRunning && this.cloudFresh && this.activeCloud()) {
+      this.repairCatalogs();
+    }
+  }
+
+  private cancelCatalogRepair(): void {
+    this.repairEpoch++;
+    this.repairTargets = [];
+    this.repairStatus = '';
+  }
+
+  private async repairCatalogs(): Promise<void> {
+    const store = this.episodeStore;
+    const snapshot = this.activeCloud();
+    const uuid = this.cloudUuid;
+    const client = this.clientId;
+    if (!store || !snapshot || !this.cloudFresh || this.repairRunning || !this.pageVisible) { return; }
+    const epoch = this.repairEpoch;
+    const targets = this.repairTargets;
+    this.repairTargets = [];
+    this.repairRunning = true;
+    let saved = 0;
+    const current = (): boolean => this.pageVisible && this.repairEpoch === epoch &&
+      this.activeCloud() === snapshot && this.cloudUuid === uuid && this.clientId === client && this.cloudFresh;
+    const idle = (): boolean => !this.localBusy && !this.cloudBusy && !this.syncBusy && !this.saving &&
+      !this.authBusy && !this.setupBusy && !this.backupBusy;
+    try {
+      for (const media of targets) {
+        if (!current() || !idle()) { break; }
+        this.repairStatus = '正在补齐剧集资料 ' + (saved + 1) + '/' + targets.length + '；可继续浏览';
+        const revision = store.readModelRevision();
+        const full = await fetchFullEpisodeCatalog(media, client);
+        if (!current() || !idle() || store.readModelRevision() !== revision) { break; }
+        this.localBusy = true;
+        try {
+          if (!current()) { break; }
+          await store.saveObservedSchedule(full);
+          saved++;
+        } finally { this.localBusy = false; }
+      }
+      if (current()) { this.repairStatus = saved === targets.length ? '' : '部分目录待补齐；下次刷新继续。'; }
+    } catch (error) {
+      if (current()) { this.repairStatus = '目录补齐暂停；已有观看记录保留，下次刷新重试。'; }
+    } finally {
+      this.repairRunning = false;
+      if (current() && saved) { this.requestProjection(); }
+      this.onRecoveryGateChanged();
     }
   }
 
@@ -884,6 +946,7 @@ struct Index {
     // A localized sort or query can reveal a different page. One more pass
     // only after real cache changes converges to the newly visible artwork.
     if (this.presentationRunning) { this.presentationPending = true; }
+    this.scheduleLazyRows();
   }
 
   private displayTitle(item: Media): string {
@@ -930,7 +993,40 @@ struct Index {
     this.requestPresentation();
   }
 
+  private scheduleLazyRows(): void {
+    if (this.lazyPending) { return; }
+    this.lazyPending = true;
+    this.updateLazyRows();
+  }
+
+  private async updateLazyRows(): Promise<void> {
+    await Promise.resolve();
+    this.lazyPending = false;
+    if (!this.pageVisible || this.selectedMedia || this.tab !== 'progress' || this.progressMode !== 'next') { return; }
+    if (this.mediaMode === 'movie') {
+      const rows = this.movieProgressRows().slice((this.movieProgressPage - 1) * this.collectionPageSize,
+        this.movieProgressPage * this.collectionPageSize);
+      this.movieRowsSource.replace(rows, rows.map((row: PersonalLibraryRow) => row.media.id),
+        rows.map((row: PersonalLibraryRow) => this.movieRowKey(row)));
+    } else {
+      const rows = this.nextSlice();
+      this.showRows.replace(rows, rows.map((entry: ProgressEntry) => entry.key),
+        rows.map((entry: ProgressEntry) => this.showRowKey(entry)));
+    }
+  }
+
+  private showRowKey(entry: ProgressEntry): string {
+    return JSON.stringify(entry) + ':' + (entry.row ? this.artwork(entry.row.media) + ':' +
+      this.displayTitle(entry.row.media) + ':' + this.displayEpisode(entry.row.media, entry.row.episode.season,
+        entry.row.episode.id, entry.row.episode.title) : '');
+  }
+
+  private movieRowKey(row: PersonalLibraryRow): string {
+    return JSON.stringify(row) + ':' + this.artwork(row.media) + ':' + this.displayTitle(row.media);
+  }
+
   private requestPresentation(): void {
+    this.scheduleLazyRows();
     if (!this.pageVisible || !this.presentation || this.presentationBlocked) { return; }
     this.presentationPending = true;
     if (!this.presentationRunning) { this.loadPresentation(); }
@@ -2186,6 +2282,9 @@ struct Index {
   }
 
   private clearCloud(): void {
+    this.cancelCatalogRepair();
+    this.showRows.replace([], [], []);
+    this.movieRowsSource.replace([], [], []);
     this.projectionMemo.clear();
     this.showProjectionCache.clear();
     this.libraryRevision++;
@@ -2239,7 +2338,7 @@ struct Index {
       this.projectionMemo.put(finalKey, result, result.computedAt, result.validUntil);
     }
     this.performanceStatus = '全库计算 ' + this.projectionRuns + ' 次 · 缓存命中 ' + this.projectionHits +
-      ' 次 · 本轮重算 ' + result.computedShows + ' 部 / 复用 ' + result.reusedShows + ' 部 · 计算 ' +
+      ' 次 · 本轮重算 ' + result.computedShows + ' 部 / 复用 ' + result.reusedShows + ' 部（磁盘 ' + result.diskHits + ' 部） · 计算 ' +
       (Date.now() - result.computedAt) + ' ms' + (this.projectionRuns === 1 ? ' · 启动至首轮计算完成 ' + (Date.now() - this.startupAt) + ' ms' : '');
     return result;
   }
@@ -2248,6 +2347,7 @@ struct Index {
     const store = this.episodeStore;
     if (!store || !this.ready || !this.episodeReady || this.cloudBusy || this.localBusy || this.saving ||
         this.backupBusy || this.syncBusy || this.setupBusy || this.authBusy || !this.clientId) { return; }
+    this.cancelCatalogRepair();
     this.cloudBusy = true;
     this.cloudFresh = false;
     this.cloudStatus = '正在验证账户并读取个人库…';
@@ -2340,7 +2440,7 @@ struct Index {
           this.titleQuickStatus = '影视状态协调未完成，请刷新。';
         }
       }
-      const result = await this.readLibraryProjection(store, snapshot, account.uuid, clientId, this.cloudFresh, force, current);
+      const result = await this.readLibraryProjection(store, snapshot, account.uuid, clientId, false, force, current);
       let checkpointChanged = false;
       if (!current()) { throw new Error('Session changed'); }
       if (this.cloudFresh && result.localAllowed && result.matches.length &&
@@ -2361,6 +2461,7 @@ struct Index {
       // A newly acknowledged watch time can alter LAST_WATCHED. Only that
       // real input change requires a follow-up projection.
       if (checkpointChanged) { this.projectionPending = true; }
+      if (this.cloudFresh) { this.repairTargets = result.repairTargets; }
       this.libraryNotice = !this.cloudFresh ? '更新未完成，显示上次记录。' : result.missing || result.failed ? '部分剧集资料尚未补齐。' : '';
       this.cloudStatus = (this.cloudFresh ? '云端版本已核对' : '使用上次缓存（非实时）') +
         ' · 缺少目录 ' + result.missing + ' 部 · 下载失败 ' + result.failed + ' 部；未写入 Trakt。' + (result.localAllowed ? '' : ' 当前账户只读；本机库未绑定或属于另一账户。');
@@ -3079,10 +3180,11 @@ struct Index {
       const snapshot = this.cloud;
       const uuid = this.cloudUuid;
       const clientId = this.clientId;
-      const active = snapshot && this.signedIn && traktAuth.isCurrent(clientId, snapshot.generation) ? snapshot : undefined;
-      if (this.signedIn && !active) { this.nextShows = []; this.libraryEvidence = []; return; }
+      const signedIn = this.signedIn;
+      const active = snapshot && signedIn && traktAuth.isCurrent(clientId, snapshot.generation) ? snapshot : undefined;
+      if (signedIn && !active) { this.nextShows = []; this.libraryEvidence = []; return; }
       const result = await this.readLibraryProjection(store, active, uuid, clientId, false, false,
-        (): boolean => this.activeCloud() === active && this.cloudUuid === uuid && this.clientId === clientId);
+        (): boolean => this.signedIn === signedIn && this.activeCloud() === active && this.cloudUuid === uuid && this.clientId === clientId);
       if (this.activeCloud() !== active || this.cloudUuid !== uuid || (this.signedIn && !active)) { return; }
       this.nextShows = result.next;
       this.reloadProgressFlags();
@@ -3093,6 +3195,7 @@ struct Index {
       if (this.tab === 'library' && this.collectionGrid && !this.selectedMedia) { this.loadCollectionPosters(); }
       this.nextPage = 1;
       this.nextStatus = result.missing ? '部分剧集资料尚未补齐。' : '';
+      if (this.cloudFresh && active) { this.libraryNotice = result.repairTargets.length ? '部分剧集资料尚未补齐。' : ''; }
     } catch (error) {
       this.invalidateNextShows();
       this.projectionPending = false;
@@ -3518,7 +3621,12 @@ struct Index {
 
   @Builder
   nextShowsView() {
-    Column({ space: 10 }) {
+    List({ space: 10 }) {
+      ListItem() {
+        Column({ space: 10 }) {
+          this.progressHeader()
+          if (this.presentationStatus) { Text(this.presentationStatus).fontSize(12).width('100%') }
+          if (this.repairStatus) { Text(this.repairStatus).fontSize(12).width('100%') }
       Row({ space: 6 }) {
         Text('下一集').fontSize(21).fontWeight(FontWeight.Medium).layoutWeight(1)
         Button(this.progressOptions ? '收起筛选设置' : '筛选与排序').fontSize(12)
@@ -3545,7 +3653,11 @@ struct Index {
       if (!this.nextFiltered().length && !this.cloudBusy && !this.localBusy) {
         Text('暂无符合条件的下一集。').fontSize(14).width('100%')
       }
-      ForEach(this.nextSlice(), (entry: ProgressEntry) => {
+        }.width('100%')
+      }
+      if (!this.signedIn || this.activeCloud()) {
+        LazyForEach(this.showRows, (entry: ProgressEntry) => {
+          ListItem() {
         if (entry.row) {
           this.nextProgressCard(entry.row)
         } else {
@@ -3555,15 +3667,17 @@ struct Index {
               .onClick(() => { this.editProgressOption(entry.group === 'hold' ? 'hold' : 'upcoming', ''); })
           }.width('100%')
         }
-      }, (entry: ProgressEntry) => entry.key + ':' + entry.collapsed + ':' + entry.count +
-        ':' + (entry.row?.episode.id ?? 0) + ':' + (entry.row?.completed ?? 0) + ':' + (entry.row?.total ?? 0) +
-        ':' + entry.group + ':' + (entry.row?.fresh ?? false) + ':' + (entry.row ? this.artwork(entry.row.media) + ':' + this.displayTitle(entry.row.media) + ':' + this.displayEpisode(entry.row.media, entry.row.episode.season, entry.row.episode.id, entry.row.episode.title) : ''))
+          }
+        }, (entry: ProgressEntry) => this.showRowKey(entry))
+      }
+      ListItem() {
       Row({ space: 8 }) {
         Button('上一页').layoutWeight(1).enabled(this.nextPage > 1).onClick(() => { this.nextPage--; })
         Text(this.nextPage + ' / ' + this.nextPages()).fontSize(13)
         Button('下一页').layoutWeight(1).enabled(this.nextPage < this.nextPages()).onClick(() => { this.nextPage++; })
       }.width('100%')
-    }.width('100%')
+      }
+    }.width('100%').height('100%').padding(16)
   }
 
   private movieCalendarCurrent(): boolean {
@@ -3805,7 +3919,12 @@ struct Index {
 
   @Builder
   movieProgressView() {
-    Column({ space: 10 }) {
+    List({ space: 10 }) {
+      ListItem() {
+        Column({ space: 10 }) {
+          this.progressHeader()
+          if (this.presentationStatus) { Text(this.presentationStatus).fontSize(12).width('100%') }
+          if (this.repairStatus) { Text(this.repairStatus).fontSize(12).width('100%') }
       this.librarySyncNotice()
       Text('已上映或仅有年份、尚未观看的待看电影').fontSize(13).width('100%')
       if (!this.signedIn) {
@@ -3842,8 +3961,13 @@ struct Index {
           if (!this.movieProgressRows().length) {
             Text('暂无符合上映日期或年份条件的待看电影。').fontSize(13).width('100%')
           }
-          ForEach(this.movieProgressRows().slice((this.movieProgressPage - 1) * this.collectionPageSize,
-            this.movieProgressPage * this.collectionPageSize), (row: PersonalLibraryRow) => {
+        }
+      }
+        }.width('100%')
+      }
+      if (this.signedIn && this.movieCalendarCurrent()) {
+        LazyForEach(this.movieRowsSource, (row: PersonalLibraryRow) => {
+          ListItem() {
             Row({ space: 8 }) {
               this.posterImage(row.media, 54, 81)
               Column({ space: 4 }) {
@@ -3855,7 +3979,9 @@ struct Index {
                   !this.calendarBusy && !this.progressPrefsBusy)
                 .onClick(() => { this.markMovieProgress(row.media); })
             }.width('100%').padding(10).borderRadius(10).backgroundColor($r('app.color.showly_surface'))
-          }, (row: PersonalLibraryRow) => row.media.id + ':' + this.artwork(row.media) + ':' + this.displayTitle(row.media))
+          }
+        }, (row: PersonalLibraryRow) => this.movieRowKey(row))
+        ListItem() {
           Row({ space: 8 }) {
             Button('上一页').layoutWeight(1).enabled(this.movieProgressPage > 1).onClick(() => { this.movieProgressPage--; })
             Text(this.movieProgressPage + ' / ' + Math.max(1, Math.ceil(this.movieProgressRows().length / this.collectionPageSize))).fontSize(13)
@@ -3864,11 +3990,11 @@ struct Index {
           }.width('100%')
         }
       }
-    }.width('100%')
+    }.width('100%').height('100%').padding(16)
   }
 
   @Builder
-  progressView() {
+  progressHeader() {
     Column({ space: 12 }) {
       Row({ space: 8 }) {
         Text(this.mediaMode === 'show' ? '剧集进度' : '电影进度').fontSize(25).fontWeight(FontWeight.Bold).layoutWeight(1)
@@ -3879,11 +4005,17 @@ struct Index {
         this.progressModeButton(this.mediaMode === 'show' ? '日历' : '上映日历', 'calendar')
         if (this.mediaMode === 'show') { this.progressModeButton('历史', 'history') }
       }.width('100%')
+    }.width('100%')
+  }
+
+  @Builder
+  progressView() {
+    Column({ space: 12 }) {
+      this.progressHeader()
       if (this.progressMode === 'calendar') { this.calendarView() }
       else if (this.progressMode === 'history' && this.mediaMode === 'show') {
         Text('逐集观看历史尚未实现。现有观看记录不受影响。').fontSize(14).width('100%')
-      } else if (this.mediaMode === 'movie') { this.movieProgressView() }
-      else { this.nextShowsView() }
+      }
     }.width('100%')
   }
 
@@ -4595,7 +4727,11 @@ struct Index {
         this.mediaModeTabs()
         if (this.modeStatus) { Text(this.modeStatus).fontSize(12).width('100%') }
       }
-      Refresh({ refreshing: $$this.refreshing }) {
+      Refresh({ refreshing: $this.refreshing }) {
+        if (!this.selectedMedia && this.tab === 'progress' && this.progressMode === 'next') {
+          if (this.mediaMode === 'movie') { this.movieProgressView() }
+          else { this.nextShowsView() }
+        } else {
         Scroll() {
         Column({ space: 14 }) {
           if (this.presentationStatus) { Text(this.presentationStatus).fontSize(12).width('100%') }
@@ -4720,6 +4856,7 @@ struct Index {
           }
         }.width('100%').padding(16)
         }.width('100%').height('100%').align(Alignment.TopStart)
+        }
       }.width('100%').layoutWeight(1)
         .onRefreshing(() => { this.refreshPage(); })
       Divider().color($r('app.color.showly_line'))
