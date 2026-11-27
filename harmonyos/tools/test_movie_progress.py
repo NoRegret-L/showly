@@ -65,18 +65,23 @@ console.log('Movie progress candidate, sorter, pin and watched transition fixtur
 """,encoding="utf-8")
     subprocess.run(["node","test.cjs"],cwd=work,check=True)
 source=(root/"pages"/"Index.ets").read_text()
-# Validate the cached miss path still calls the original movie rules and
-# returns exactly that result; also require the fast path to be guarded.
-movie_rows=source.split("  private movieProgressRows(",1)[1].split("  private async setMovieProgressSort(",1)[0]
+# Both display and explicit mark validation use the same movie rules. The
+# background result may enter the memo only after route/account/key checks.
+movie_rows=source.split("  private movieProgressRows(",1)[1].split("  private async runMovieSort(",1)[0]
+worker=source.split("  private async runMovieSort(",1)[1].split("  private async setMovieProgressSort(",1)[0]
 guard=movie_rows.index("if (!this.movieCalendarCurrent()) { return []; }")
-hit=movie_rows.index("const cached = memo.get(key, now);")
+hit=movie_rows.index("memo.get(key,now)")
 hit_return=movie_rows.index("if (cached) { return cached; }")
-compute=movie_rows.index("const rows = projectMovieProgress(sources, flags, this.movieProgressOptions, utc, query, this.movieRandomSeed);")
-cache=movie_rows.index("memo.put(key, rows, now, Date.parse(utc + 'T00:00:00Z') + 86400000);")
+compute=movie_rows.index("const rows = projectMovieProgress(sources,flags,this.movieProgressOptions,utc,query,this.movieRandomSeed);")
+cache=movie_rows.index("memo.put(key,rows,now,expiry);")
 result=movie_rows.index("return rows;")
 assert guard < hit < hit_return < compute < cache < result
-assert "this.movieSortKey(query,utc)" in movie_rows and "this.currentProgressScope(),this.activeCloud()?.generation" in page
-assert "this.movieSortKey(query,utc)" in movie_rows and "this.displayRevisions.movie,this.libraryRevision" in page
+assert "this.runMovieSort(input,key,now,expiry)" in movie_rows
+assert worker.index("await movieDisplay(input)") < worker.index("key !== this.movieSortKey(input.query,input.utc)") < worker.index("memo.put(key,rows,now,expiry)")
+assert "this.sortJobs.current(slot,token)" in worker and "!this.movieCalendarCurrent()" in worker
+assert "this.movieSortKey(query,utc)" in movie_rows and "this.currentProgressScope(),this.activeCloud()?.generation" in source
+assert "this.displayRevisions.movie,this.libraryRevision" in source
+assert "this.movieProgressRows('',true).find(" in source
 assert "this.markMovieProgress(row.media)" in source
 assert "await this.changeMediaIntent(row.media, 'movie', 'yes')" in source
 assert "await this.clearWatchedMoviePin(item, pinScope)" in source

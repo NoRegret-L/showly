@@ -94,7 +94,8 @@ struct Index {
   private hiddenMovieKey: string = '';
   private showFlagKey: string = '';
   private movieFlagKey: string = '';
-  private collectionIndexMemo: RevisionMemo<CollectionIndexes> = new RevisionMemo<CollectionIndexes>();
+  private collectionIndexMemos: Map<string,RevisionMemo<CollectionIndexes>> = new Map<string,RevisionMemo<CollectionIndexes>>();
+  private movieMetadataMemo: RevisionMemo<Map<string,PersonalMovie>> = new RevisionMemo<Map<string,PersonalMovie>>();
   private titleSortRevision: number = 0;
   private episodeSearchRevision: number = 0;
   private collectionMetaRevision: number = 0;
@@ -478,6 +479,10 @@ struct Index {
     this.showProjectionCache.clear();
     this.libraryRevision++;
     this.displayRevisions.reset();
+    this.collectionIndexMemos.clear();
+    this.movieMetadataMemo.clear();
+    this.libraryIndex.clear();
+    this.libraryMemo.clear();
     this.sortJobs.clear();
     this.lazyRevision++;
     this.presentationEpoch++;
@@ -2525,6 +2530,10 @@ struct Index {
     this.showProjectionCache.clear();
     this.libraryRevision++;
     this.displayRevisions.reset();
+    this.collectionIndexMemos.clear();
+    this.movieMetadataMemo.clear();
+    this.libraryIndex.clear();
+    this.libraryMemo.clear();
     this.sortJobs.clear();
     this.lazyRevision++;
     this.resetCalendar();
@@ -3570,6 +3579,7 @@ struct Index {
     const cached = this.sortedViewRevision >= 0 ? memo.get(key,now) : undefined;
     if (cached) { return cached; }
     if (!live && !prepare) { return []; }
+    if (!live && this.sortJobs.matches(query ? 'show-query' : 'show-all',JSON.stringify([this.presentationEpoch,key]))) { return []; }
     let candidates = this.candidateMemo.get(businessKey,now);
     if (!candidates) {
       this.candidateRuns++;
@@ -4268,7 +4278,8 @@ struct Index {
     const cached = this.sortedViewRevision >= 0 ? memo.get(key,now) : undefined;
     if (cached) { return cached; }
     if (!live && !prepare) { return []; }
-    const metadata = this.collectionIndexes('mine').movies;
+    if (!live && this.sortJobs.matches(query ? 'movie-query' : 'movie-all',JSON.stringify([this.presentationEpoch,key]))) { return []; }
+    const metadata = this.movieMetadataIndex();
     const sources: MovieProgressSource[] = [];
     for (const row of this.personalLibrary()) {
       const movie = metadata.get(row.media.id);
@@ -4707,11 +4718,26 @@ struct Index {
     if (this.signedIn && !this.activeCloud()) { return []; }
     return collectionMembers(this.personalLibrary(),this.currentCollectionState(),this.mediaMode,this.collectionFilter,this.collectionStatusFilter);
   }
+  private movieMetadataIndex(): Map<string,PersonalMovie> {
+    const now = Date.now();
+    const key = JSON.stringify([this.displayRevisions.movie,this.currentProgressScope(),this.movieCalendarCurrent(),this.activeCloud()?.activity ?? '']);
+    const cached = this.movieMetadataMemo.get(key,now);
+    if (cached) { return cached; }
+    const movies = new Map<string,PersonalMovie>();
+    if (this.movieCalendarCurrent()) {
+      for (const row of this.movieCalendarData?.movies ?? []) { movies.set(row.media.id,row); }
+    }
+    this.movieMetadataMemo.put(key,movies,now,Number.MAX_SAFE_INTEGER);
+    return movies;
+  }
   private collectionIndexes(section: string): CollectionIndexes {
     const now = Date.now();
     const key = JSON.stringify([this.displayRevisions.collection,this.libraryRevision,this.currentProgressScope(),
       this.collectionScope,this.mediaMode,section,this.collectionRatingKey,this.movieRatingKey,this.movieCalendarCurrent()]);
-    const cached = this.collectionIndexMemo.get(key,now);
+    const slot = this.mediaMode + ':' + section;
+    let memo = this.collectionIndexMemos.get(slot);
+    if (!memo) { memo = new RevisionMemo<CollectionIndexes>(); this.collectionIndexMemos.set(slot,memo); }
+    const cached = memo.get(key,now);
     if (cached) { return cached; }
     const state = this.currentCollectionState();
     const dates = section === 'mine' ? state.mine : section === 'queue' ? state.queue :
@@ -4727,15 +4753,14 @@ struct Index {
     if (active && session && this.collectionRatingKey === JSON.stringify([this.currentProgressScope(),session.clientId,session.generation,active.activity,this.mediaMode])) {
       for (const rating of this.collectionRatings) { personalRatings.set(rating.id,rating.value); }
     }
-    const movies = new Map<string,PersonalMovie>();
+    const movies = this.movieMetadataIndex();
     if (this.movieCalendarCurrent()) {
-      for (const row of this.movieCalendarData?.movies ?? []) { movies.set(row.media.id,row); }
       if (this.mediaMode === 'movie' && active && session && this.movieRatingKey === JSON.stringify([this.currentProgressScope(),session.clientId,session.generation,active.activity])) {
         for (const rating of this.movieRatingRows) { personalRatings.set(rating.id,rating.value); }
       }
     }
     const indexes: CollectionIndexes = {times:times,recent:recent,ratings:personalRatings,movies:movies};
-    this.collectionIndexMemo.put(key,indexes,now,Number.MAX_SAFE_INTEGER);
+    memo.put(key,indexes,now,Number.MAX_SAFE_INTEGER);
     return indexes;
   }
   private collectionCandidates(rows: PersonalLibraryRow[], section: string): CollectionCandidate[] {
@@ -4773,7 +4798,7 @@ struct Index {
     const key = this.collectionSortKey();
     const cached = this.sortedViewRevision >= 0 ? this.collectionItemsMemo.get(key,now) : undefined;
     if (cached) { return cached; }
-    if (!prepare) { return []; }
+    if (!prepare || this.sortJobs.matches('collection',JSON.stringify([this.presentationEpoch,key]))) { return []; }
     const candidates = this.collectionCandidates(this.collectionSource(),this.collectionFilter);
     let expiry = Number.MAX_SAFE_INTEGER;
     if (this.collectionFilter === 'queue' && options.upcoming !== 'all') {

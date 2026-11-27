@@ -20,7 +20,7 @@ rev.collectionChanged();assert.deepEqual([rev.show,rev.movie,rev.collection],[0,
 rev.moviesChanged();assert.deepEqual([rev.show,rev.movie,rev.collection],[0,1,2]);
 rev.showsChanged();assert.deepEqual([rev.show,rev.movie,rev.collection],[1,1,3]);
 const jobs=new LatestDisplayJobs(), a=jobs.begin('show','A'), b=jobs.begin('show','B'), c=jobs.begin('movie','A');
-assert.equal(jobs.begin('show','B'),0);assert(!jobs.current('show',a));assert(!jobs.finish('show',a));
+assert.equal(jobs.begin('show','B'),0);assert(jobs.matches('show','B'));assert(!jobs.matches('show','A'));assert(!jobs.current('show',a));assert(!jobs.finish('show',a));
 assert(jobs.current('show',b));assert(jobs.current('movie',c));jobs.clear();assert(!jobs.current('movie',c));
 let seed=19;const rand=()=>{seed=(Math.imul(seed,1664525)+1013904223)>>>0;return seed};
 const perm=()=>{const x=Array.from({length:16},(_,i)=>String(i)).filter(()=>rand()%3!==0);for(let i=x.length-1;i>0;i--){const j=rand()%(i+1);[x[i],x[j]]=[x[j],x[i]]}return x};

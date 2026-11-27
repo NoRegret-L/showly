@@ -22,6 +22,7 @@ export class LatestDisplayJobs {
   }
   current(slot: string, token: number): boolean { return this.entries.get(slot)?.token === token; }
   pending(slot: string): boolean { return this.entries.has(slot); }
+  matches(slot: string, key: string): boolean { return this.entries.get(slot)?.key === key; }
   finish(slot: string, token: number): boolean {
     if (!this.current(slot,token)) { return false; }
     this.entries.delete(slot); return true;
