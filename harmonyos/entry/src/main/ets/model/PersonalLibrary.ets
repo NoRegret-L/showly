@@ -196,7 +196,7 @@ export class PersonalLibraryIndex {
     for(const media of cloudWatchlist){mark(media);if(!this.cloudWatchlist.has(media.id)){this.cloudWatchlist.set(media.id,media);}}
     for(const show of cloudShows){mark(show.media);this.cloudShows.set(show.media.id,show);}
     for(const show of localShows){
-      if(show.watchedEpisodes>0||this.byId.has(show.media.id)){mark(show.media);}
+      mark(show.media);
       this.localShows.set(show.media.id,show);
     }
     for(let i=0;i<rows.length;i++){

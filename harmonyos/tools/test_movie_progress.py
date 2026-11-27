@@ -80,7 +80,7 @@ assert "this.runMovieSort(input,key,now,expiry)" in movie_rows
 assert worker.index("await movieDisplay(input,this.sortJobs.consumer(slot,token))") < worker.index("key !== this.movieSortKey(input.query,input.utc)") < worker.index("memo.put(key,rows,now,expiry)")
 assert "this.sortJobs.current(slot,token)" in worker and "!this.movieCalendarCurrent()" in worker
 assert "this.movieSortKey(query,utc)" in movie_rows and "this.currentProgressScope(),this.activeCloud()?.generation" in source
-assert "includeBusiness ? this.displayRevisions.movie : 0" in source
+assert "this.displayRevisions.movie,includeBusiness ? this.libraryRevision : 0" in source
 assert "includeBusiness ? this.libraryRevision : 0" in source
 assert "this.movieProgressRows('',true).find(" in source
 assert "this.markMovieProgress(row.media)" in source

@@ -93,6 +93,10 @@ interface PendingMediaDelta {
   now:number;
   utc:string;
   version:string;
+  account:string;
+  cloud?:CloudLibrary;
+  evidence:LibraryShowEvidence[];
+  localAllowed:boolean;
 }
 class RestoreScrollFrame extends FrameCallback {
   private action: ()=>void;
@@ -647,7 +651,7 @@ struct Index {
     this.displayRevisions.reset();
     this.collectionIndexMemos.clear();
     this.movieMetadataMemo.clear();
-    this.libraryIndex.clear();this.personalLibraryIndex.clear();
+    this.libraryIndex.clear();this.personalLibraryIndex.clear();this.pendingMediaDelta=undefined;
     this.libraryMemo.clear();
     this.sortJobs.clear();
     this.invalidateLazyWork();
@@ -1199,19 +1203,21 @@ struct Index {
     } catch (error) { this.presentationStatus = '影视资料缓存暂不可用，仍可管理观看记录。'; }
   }
 
-  private publishMediaRecords(records: MediaRecord[]): boolean {
+  private publishMediaRecords(records: MediaRecord[],submitted?:MediaRecord[],expected?:string,ids:string[]=[]): boolean {
     const prior=this.pendingMediaDelta,now=Date.now(),utc=new Date(now).toISOString().substring(0,10);
     const movieQueryScope=prior?.movieQueryScope??this.movieSortKey(this.movieProgressQuery,utc,false);
     const movieAllScope=prior?.movieAllScope??this.movieSortKey('',utc,false);
     const collectionScope=prior?.collectionScope??this.collectionSortKey(false);
-    if (!this.mediaInput.replace(records)) { return false; }
-    const changes=this.personalLibraryIndex.updateRecords(this.mediaInput.recordsById(),this.mediaInput.libraryChangedIds(),
-      this.mediaInput.canApplyIncremental()&&!this.mediaInput.libraryOrderChanged(),this.cloud,this.libraryEvidence,this.cloudLocalAllowed);
+    const changed=submitted&&expected!==undefined?this.mediaInput.replaceVerifiedEdit(expected,submitted,records,ids):this.mediaInput.replace(records);
+    if (!changed) { return false; }
+    const changes=prior||this.signedIn&&!this.activeCloud()?undefined:this.personalLibraryIndex.updateRecords(this.mediaInput.recordsById(),this.mediaInput.libraryChangedIds(),
+      this.mediaInput.canApplyIncremental()&&!this.mediaInput.libraryOrderChanged(),this.activeCloud(),this.libraryEvidence,this.cloudLocalAllowed);
     if(changes){
       for(const change of changes){if(change.row){this.libraryIndex.set(change.id,change.row);}else{this.libraryIndex.delete(change.id);}}
     }else{this.personalLibraryIndex.clear();this.libraryIndex.clear();}
     this.pendingMediaDelta={changes:changes,movieQueryScope:movieQueryScope,movieAllScope:movieAllScope,
-      collectionScope:collectionScope,now:now,utc:utc,version:this.mediaInput.version()};
+      collectionScope:collectionScope,now:now,utc:utc,version:this.mediaInput.version(),account:this.currentProgressScope(),
+      cloud:this.activeCloud(),evidence:this.libraryEvidence,localAllowed:this.cloudLocalAllowed};
     this.mediaRecords=records;
     return true;
   }
@@ -1219,7 +1225,9 @@ struct Index {
     this.libraryRevision++;this.libraryMemo.clear();
     const pending=this.pendingMediaDelta;this.pendingMediaDelta=undefined;
     let handled=false;
-    if(pending?.changes){
+    if(pending?.changes&&pending.version===this.mediaInput.version()&&pending.account===this.currentProgressScope()&&
+      pending.cloud===this.activeCloud()&&pending.evidence===this.libraryEvidence&&pending.localAllowed===this.cloudLocalAllowed&&
+      (!this.signedIn||!!this.activeCloud())){
       this.updateSearchCandidatesForLibraryChanges(pending.changes);
       handled=this.applyMediaRecordDisplayDelta(pending);
       this.mediaInput.acknowledgeLibrary(pending.version);
@@ -1271,11 +1279,11 @@ struct Index {
       ];
       for(let i=0;i<movieCases.length;i++){
         const [order,before,after,basis,memo]=movieCases[i],query=i===0?this.movieProgressQuery:'';
+        if(order.hasDirty()){order.clear();needsFull=true;continue;}
         const result=order.applyChanges(before,after,basis,pending.now,order.validUntil(),movieChanges,
           (value:MovieProgressSource)=>movieSortEligible(value,pending.utc,query),
           (a:MovieProgressSource,b:MovieProgressSource)=>compareMovieSources(a,b,this.movieProgressOptions,pins,this.movieRandomSeed));
         if(!result){continue;}
-        if(order.hasDirty()){needsFull=true;}
         memo.put(this.movieSortKey(query,pending.utc),result.rows,pending.now,order.validUntil());
         if(query===this.movieProgressQuery&&this.pageVisible&&this.tab==='progress'&&this.progressMode==='next'&&this.mediaMode==='movie'&&!this.selectedMedia){
           if(result.structural){needsFull=true;}
@@ -1287,7 +1295,11 @@ struct Index {
         }
       }
     }
-    if(this.collectionFilter==='mine'||this.collectionFilter==='queue'){
+    if(this.collectionTitleOrder.hasDirty()||(this.collectionFilter==='queue'&&this.collectionOptions.upcoming!=='all')){
+      // A changed release can introduce an earlier expiry; the complete
+      // candidate path recomputes it. Pending translations also invalidate.
+      this.collectionTitleOrder.clear();needsFull=true;
+    }else if(this.collectionFilter==='mine'||this.collectionFilter==='queue'){
       const before=pending.collectionScope,after=this.collectionSortKey(false),basis=this.collectionSortKey(false,false);
       const collectionChanges:StableOrderChange<CollectionCandidate>[]=[];
       for(const change of changes){
@@ -1303,7 +1315,6 @@ struct Index {
         (value:CollectionCandidate)=>collectionSortEligible(value,options,this.collectionFilter,this.collectionQuery,pending.now),
         (a:CollectionCandidate,b:CollectionCandidate)=>compareCollectionCandidates(a,b,options,this.collectionFilter));
       if(result){
-        if(this.collectionTitleOrder.hasDirty()){needsFull=true;}
         this.collectionItemsMemo.put(this.collectionSortKey(),result.rows,pending.now,this.collectionTitleOrder.validUntil());
         if(this.pageVisible&&this.tab==='library'&&!this.selectedMedia){
           if(result.structural){needsFull=true;}
@@ -3192,7 +3203,7 @@ struct Index {
     this.displayRevisions.reset();
     this.collectionIndexMemos.clear();
     this.movieMetadataMemo.clear();
-    this.libraryIndex.clear();this.personalLibraryIndex.clear();
+    this.libraryIndex.clear();this.personalLibraryIndex.clear();this.pendingMediaDelta=undefined;
     this.libraryMemo.clear();
     this.sortJobs.clear();
     this.invalidateLazyWork();
@@ -3443,7 +3454,9 @@ struct Index {
     const store = this.mediaStore;
     if (!this.ready || this.saving || this.syncBusy || !store || !this.canEditLibrary()) { return false; }
     const dateScope = this.currentProgressScope();
-    const beforeDates = changes.length ? this.personalLibrary() : [];
+    const editVersion=this.mediaInput.version();
+    const editIds=new Set<string>(changes.map((change:TitleChange)=>change.id));
+    const beforeDates:PersonalLibraryRow[]=changes.length?this.personalLibrary().filter((row:PersonalLibraryRow)=>editIds.has(row.media.id)):[];
     this.saving = true;
     this.clearThreeWayReview();
     this.mediaSelected = undefined;
@@ -3460,7 +3473,7 @@ struct Index {
       const verified = scoped ? await store.saveTitleEdit(records, changes, uuid, this.clientId,
         new Date().toISOString(), this.titleQuickActive()) : await store.save(records);
       this.invalidateMovieCalendar();
-      this.publishMediaRecords(verified);
+      this.publishMediaRecords(verified,records,editVersion,Array.from(editIds));
       this.items = verified.map((record: MediaRecord) => record.media);
       try { await this.recordTitleDates(dateScope, beforeDates, changes); }
       catch (error) { this.collectionRuleStatus = '收藏已保存，但添加时间未能保存。'; }
@@ -5340,7 +5353,7 @@ struct Index {
   }
 
   private movieSortKey(query: string, utc: string, includeTitles:boolean=true,includeBusiness:boolean=true): string {
-    return JSON.stringify([includeBusiness?this.displayRevisions.movie:0,includeBusiness?this.libraryRevision:0,this.currentProgressScope(),this.activeCloud()?.generation ?? -1,
+    return JSON.stringify([this.displayRevisions.movie,includeBusiness ? this.libraryRevision : 0,this.currentProgressScope(),this.activeCloud()?.generation ?? -1,
       this.presentationLanguage,includeTitles && this.presentationLanguage==='zh' && (query || this.movieProgressOptions.sort==='title' || this.movieProgressOptions.sort==='userRating') ? this.titleVersion('movie') : 0,this.progressFlagScope,this.flagVersion('movie'),this.hiddenVersion('movie'),
       this.movieProgressOptions,this.movieRandomSeed,utc,query]);
   }
@@ -5659,23 +5672,21 @@ struct Index {
     const now = Date.now();
     const cached = this.libraryMemo.get(key, now);
     if (cached&&this.personalLibraryIndex.matches(cloud,this.libraryEvidence,this.cloudLocalAllowed)) { return cached; }
+    if(this.personalLibraryIndex.matches(cloud,this.libraryEvidence,this.cloudLocalAllowed)){
+      const rows=this.personalLibraryIndex.rowsView();this.libraryMemo.put(key,rows,now,Number.MAX_SAFE_INTEGER);return rows;
+    }
     const cloudShows = (cloud?.shows ?? []).map((show: ShowProgress): LibraryShowEvidence => {
       const media: Media = { id: show.id, title: show.title, kind: 'show', year: show.year ?? 0, watched: false };
       return { media: media, watchedEpisodes: show.watchedEpisodes };
     });
     const localShows = this.libraryEvidence.filter((show: LibraryShowEvidence) => cloud ? show.merged === true : !show.merged);
-    let rows:PersonalLibraryRow[];
-    if(this.personalLibraryIndex.matches(cloud,this.libraryEvidence,this.cloudLocalAllowed)){
-      rows=this.personalLibraryIndex.rowsView();
-    }else{
-      const records=cloud&&!this.cloudLocalAllowed?[]:this.mediaRecords;
-      rows=buildPersonalLibrary(records,cloud?.watchedMovies??[],cloud?.watchlist??[],cloudShows,localShows);
-      this.personalLibraryIndex.seed(records,cloud?.watchedMovies??[],cloud?.watchlist??[],cloudShows,localShows,
-        cloud,this.libraryEvidence,this.cloudLocalAllowed,rows);
-      this.libraryIndex.clear();
-      for(const row of rows){this.libraryIndex.set(row.media.id,row);}
-      this.mediaInput.acknowledgeLibrary(this.mediaInput.version());
-    }
+    const records=cloud&&!this.cloudLocalAllowed?[]:this.mediaRecords;
+    const rows=buildPersonalLibrary(records,cloud?.watchedMovies??[],cloud?.watchlist??[],cloudShows,localShows);
+    this.personalLibraryIndex.seed(records,cloud?.watchedMovies??[],cloud?.watchlist??[],cloudShows,localShows,
+      cloud,this.libraryEvidence,this.cloudLocalAllowed,rows);
+    this.libraryIndex.clear();
+    for(const row of rows){this.libraryIndex.set(row.media.id,row);}
+    this.mediaInput.acknowledgeLibrary(this.mediaInput.version());
     this.libraryMemo.put(key, rows, now, Number.MAX_SAFE_INTEGER);
     return rows;
   }
@@ -5828,8 +5839,8 @@ struct Index {
   }
   private collectionIndexes(section: string): CollectionIndexes {
     const now = Date.now();
-    const key = JSON.stringify([this.displayRevisions.collection,this.libraryRevision,this.currentProgressScope(),
-      this.collectionScope,this.mediaMode,section,this.collectionRatingKey,this.movieRatingKey,this.movieCalendarCurrent()]);
+    const key = JSON.stringify([this.displayRevisions.collection,this.currentProgressScope(),this.activeCloud()?.generation??-1,
+      this.activeCloud()?.activity??'',this.collectionScope,this.mediaMode,section,this.collectionRatingKey,this.movieRatingKey,this.movieCalendarCurrent()]);
     const slot = this.mediaMode + ':' + section;
     let memo = this.collectionIndexMemos.get(slot);
     if (!memo) { memo = new RevisionMemo<CollectionIndexes>(); this.collectionIndexMemos.set(slot,memo); }
@@ -5883,7 +5894,7 @@ struct Index {
   private collectionSource(): PersonalLibraryRow[] { return this.collectionBase(); }
   private collectionSortKey(includeTitles:boolean=true,includeBusiness:boolean=true): string {
     const options = this.collectionFilter === 'other' ? defaultCollection() : this.collectionOptions;
-    return JSON.stringify([includeBusiness?this.displayRevisions.collection:0,includeBusiness?this.libraryRevision:0,this.collectionScope,this.currentProgressScope(),
+    return JSON.stringify([this.displayRevisions.collection,includeBusiness?this.libraryRevision:0,this.collectionScope,this.currentProgressScope(),
       this.mediaMode,this.collectionFilter,this.collectionStatusFilter,this.collectionQuery,options,this.presentationLanguage,
       includeTitles && this.presentationLanguage==='zh' && (this.collectionQuery.trim() || options.sort==='title' || options.sort==='userRating') ? this.titleVersion(this.mediaMode) : 0,this.collectionNeedsMetadata() ? this.metaVersion(this.mediaMode) : 0]);
   }

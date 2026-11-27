@@ -316,12 +316,11 @@ export class LibraryProjectionSession {
     order.seed(localAllowed?records.map((r:MediaRecord)=>r.media.id):[],(cloud?.watchlist??[]).map((r:Media)=>r.id),(cloud?.shows??[]).map((r:RemoteShowObservation)=>r.id));
     return order;
   }
-  private select(ids:Set<string>,snapshot:MediaRecord[]):ProjectionScope{
+  private select(ids:Set<string>,snapshot:MediaRecord[],mediaVersion:MediaInputVersion):ProjectionScope{
     const records:MediaRecord[]=[],shows:RemoteShowObservation[]=[],watchlist:Media[]=[];
-    const byRecord=snapshot===this.records?this.byRecord:new Map<string,MediaRecord[]>();
-    if(snapshot!==this.records){for(const row of snapshot){if(ids.has(row.media.id)){let list=byRecord.get(row.media.id);if(!list){list=[];byRecord.set(row.media.id,list);}list.push(row);}}}
     for(const id of ids){
-      for(const row of byRecord.get(id)??[]){records.push(row);}
+      if(mediaVersion.matchesSnapshot(snapshot)){const row=mediaVersion.recordsById().get(id);if(row){records.push(row);}}
+      else{for(const row of this.byRecord.get(id)??[]){records.push(row);}}
       const remote=this.byRemote.get(id);if(remote){shows.push(remote);}
       const queued=this.byQueue.get(id);if(queued){watchlist.push(queued);}
     }
@@ -339,8 +338,8 @@ export class LibraryProjectionSession {
       const ids=new Set<string>(store.libraryChangedIds());
       for(const id of mediaVersion.projectionChangedIds()){ids.add(id);}
       if(!fill&&!force&&prior&&this.store===store&&this.cloud===cloud&&this.scopeKey===key&&
-        !store.libraryGlobalChanged()&&!mediaVersion.projectionOrderChanged()&&ids.size>0&&now>=prior.computedAt&&now<prior.validUntil){
-        const scope=this.select(ids,records);
+        !store.libraryGlobalChanged()&&!mediaVersion.projectionOrderChanged()&&mediaVersion.matchesSnapshot(records)&&ids.size>0&&now>=prior.computedAt&&now<prior.validUntil){
+        const scope=this.select(ids,records,mediaVersion);
         const order=records===this.records?this.memberOrder:this.orderFor(records,cloud,prior.localAllowed);
         const delta=await projectLibrary(store,records,cloud,uuid,clientId,false,valid,progress,cache,scope);
         if(!valid()||!store.projectionReadable(revision)){throw new Error('Projection inputs changed');}

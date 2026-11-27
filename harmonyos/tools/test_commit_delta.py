@@ -73,6 +73,25 @@ const {planListDiff}=require('./ListDiff');
  assert.equal(utf8ProjectionBytes('中文😀'),Buffer.byteLength('中文😀'));
  console.log('Independent commit consumer: 393/10k rows, 100 scoped changes, exact full-result parity and untouched identity passed');
  const records=Array.from({length:10000},(_,i)=>({media:{id:'show:'+(i+1),kind:'show',title:'Show '+i,year:2026,watched:false},movieState:'unknown',watchlistState:'unknown'}));
+ for(const size of [393,10000]){
+   let base=records.slice(0,size);const version=new MediaInputVersion();version.replace(base);
+   version.acknowledgeLibrary(version.version());version.acknowledgeProjection(version.version());
+   for(let i=0;i<100;i++){
+     const at=i%size,id=base[at].media.id,submitted=base.slice();
+     submitted[at]={...base[at],watchlistState:base[at].watchlistState==='yes'?'no':'yes'};
+     const verified=JSON.parse(JSON.stringify(submitted)),prior=version.version();
+     assert(version.replaceVerifiedEdit(prior,submitted,verified,[id]));
+     assert.equal(version.serializedRecords(),1);assert.deepEqual(version.changedIds(),[id]);
+     assert.deepEqual(version.libraryChangedIds(),[id]);version.acknowledgeLibrary(version.version());
+     assert(version.projectionChangedIds().includes(id));version.acknowledgeProjection(prior);
+     assert(version.projectionChangedIds().includes(id));version.acknowledgeProjection(version.version());
+     base=verified;
+   }
+   const id=base[0].media.id,removed=base.slice(1);version.replace(removed);
+   version.acknowledgeLibrary(version.version());version.replace([...removed,base[0]]);
+   assert(version.projectionOrderChanged());assert(!version.libraryOrderChanged());
+ }
+ console.log('393/10k: 100 verified title commits serialize one record; independent stale acknowledgments and delete/readd fallback passed');
  const media=new MediaInputVersion();assert(media.replace(records));const v=media.version();assert(!media.replace(JSON.parse(JSON.stringify(records))));assert.equal(media.version(),v);
  const edited=records.slice();edited[5000]={...edited[5000],watchlistState:'yes'};assert(media.replace(edited));assert.deepEqual(media.changedIds(),['show:5001']);
  const order=edited.slice().reverse();assert(media.replace(order));assert.deepEqual(media.changedIds(),[]);
