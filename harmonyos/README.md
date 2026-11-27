@@ -1,4 +1,4 @@
-# Showly HarmonyOS Preview v0.9.3e.2c.1
+# Showly HarmonyOS Preview v0.9.3e.2d
 
 Unofficial native ArkTS prototype, not a complete Showly port. Your app uses Trakt but is not endorsed or certified by Trakt.
 
@@ -192,3 +192,6 @@ See [startup performance](docs/STARTUP_PERFORMANCE.md) for cache invalidation, w
 
 ## v0.9.3e.2c.1 — persistent read cache and lazy progress lists (0.9.3.16, build 40)
 See [deep startup performance](docs/DEEP_STARTUP_PERFORMANCE.md) for scope, safety and acceptance checks.
+
+## v0.9.3e.2d — collection and local hidden projection (0.9.3.17, build 41)
+See [collection parity](docs/COLLECTION_PARITY.md) for upstream rules, security deviations and tests.

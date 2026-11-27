@@ -51,14 +51,20 @@ export class PresentationRepository {
   titleRows(): TitlePresentation[] { return Array.from(this.titles.values()); }
   seasonRows(): SeasonPresentation[] { return Array.from(this.seasons.values()); }
   retryArtwork(): void { this.artAttempted.clear(); this.artChecked.clear(); }
-  async title(item: Media, clientId: string, language: string, artwork: boolean, hints: string[]): Promise<void> {
+  async title(item: Media, clientId: string, language: string, artwork: boolean, hints: string[], collection: boolean = false): Promise<void> {
     if (!canReadDetails(item)) { return; }
     const prior = this.titles.get(item.id);
     const row: TitlePresentation = prior ? { id: prior.id, text: prior.text, translatedAt: prior.translatedAt,
-      posterUrls: prior.posterUrls, posterUri: prior.posterUri } :
+      posterUrls: prior.posterUrls, posterUri: prior.posterUri, collection: prior.collection } :
       { id: item.id, text: { title: '', overview: '' }, translatedAt: 0, posterUrls: [], posterUri: '' };
     if (hints.length && !row.posterUrls.length) { row.posterUrls = hints; }
     let failed = false;
+    if (collection && clientId && !row.collection) {
+      const detail = await readDetails(item, clientId);
+      row.collection = detail.collection;
+      if (!row.posterUrls.length) { row.posterUrls = detail.posterUrls; }
+      await this.saveTitle(row);
+    }
     // Independent failures cannot erase successful metadata.
     if (artwork) {
       if (!this.artChecked.has(item.id)) {
@@ -90,7 +96,7 @@ export class PresentationRepository {
   private async saveTitle(row: TitlePresentation): Promise<void> {
     if (!validTitle(row)) { throw new Error('Invalid title presentation'); }
     const saved: TitlePresentation = { id: row.id, text: row.text, translatedAt: row.translatedAt,
-      posterUrls: row.posterUrls, posterUri: row.posterUri };
+      posterUrls: row.posterUrls, posterUri: row.posterUri, collection: row.collection };
     await this.db.executeSql('INSERT OR REPLACE INTO presentation_title(id,payload) VALUES(?,?)', [saved.id, JSON.stringify(saved)]);
     this.titles.set(saved.id, saved);
     this.version++;

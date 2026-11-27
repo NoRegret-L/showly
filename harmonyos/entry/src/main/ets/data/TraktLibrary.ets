@@ -1,5 +1,6 @@
 import { http } from '@kit.NetworkKit';
 import { Media } from '../model/Media';
+import { CollectionDate } from '../model/CollectionRules';
 import { TraktSession, traktAuth } from './TraktAuth';
 import { RemotePlayPosition, RemoteMovieObservation, RemoteLibraryObservation, RemoteShowObservation, validateObservation } from '../model/RemoteObservation';
 
@@ -186,6 +187,25 @@ function showProgress(rows: SyncItem[]): ShowProgress[] {
   return result;
 }
 
+export interface CollectionRating { id: string; value: number; }
+export async function readCollectionRatings(session: TraktSession, kind: string, activity: string): Promise<CollectionRating[]> {
+  if (kind !== 'show' && kind !== 'movie') { throw new Error('Invalid rating kind'); }
+  if (await readActivity(session) !== activity) { throw new Error('Activity changed'); }
+  const rows = await readAll(session, 'sync/ratings/' + (kind === 'show' ? 'shows' : 'movies'));
+  const ratings: CollectionRating[] = [];
+  const seen = new Set<string>();
+  for (const row of rows) {
+    const item = titleToMedia(row,kind,false);
+    if (seen.has(item.id) || typeof row.rating !== 'number' || !Number.isInteger(row.rating) || row.rating < 1 || row.rating > 10) {
+      throw new Error('Invalid personal rating');
+    }
+    seen.add(item.id);
+    ratings.push({ id: item.id, value: row.rating });
+  }
+  if (await readActivity(session) !== activity) { throw new Error('Activity changed'); }
+  ensureCurrent(session);
+  return ratings;
+}
 export async function readCloudLibrary(session: TraktSession): Promise<CloudLibrary> {
   const before = await readActivity(session);
   const movieRows = await readAll(session, 'sync/watched/movies');
@@ -195,15 +215,24 @@ export async function readCloudLibrary(session: TraktSession): Promise<CloudLibr
       lastWatchedAt: row.last_watched_at ?? '' };
   });
   const shows = showProgress(await readAll(session, 'sync/watched/shows?extended=progress'));
-  const queuedMovies = uniqueTitles(await readAll(session, 'sync/watchlist/movies'), 'movie', false);
-  const queuedShows = uniqueTitles(await readAll(session, 'sync/watchlist/shows'), 'show', false);
+  const queueMovieRows = await readAll(session, 'sync/watchlist/movies');
+  const queueShowRows = await readAll(session, 'sync/watchlist/shows');
+  const queuedMovies = uniqueTitles(queueMovieRows, 'movie', false);
+  const queuedShows = uniqueTitles(queueShowRows, 'show', false);
+  const queueDates: CollectionDate[] = [];
+  for (const row of [...queueMovieRows, ...queueShowRows]) {
+    const at = Date.parse(row.listed_at ?? '');
+    if (Number.isSafeInteger(at) && at > 0) {
+      queueDates.push({ id: titleToMedia(row, row.movie ? 'movie' : 'show', false).id, at: at });
+    }
+  }
   const after = await readActivity(session);
   ensureCurrent(session);
   if (before !== after) {
     throw new Error('Trakt activity changed during import; retry');
   }
   const snapshot: CloudLibrary = { generation: session.generation, activity: after, observedAt: Date.now(),
-    watchlist: [...queuedMovies, ...queuedShows], watchedMovies: movies, shows: shows, moviePlays: moviePlays };
+    watchlist: [...queuedMovies, ...queuedShows], watchedMovies: movies, shows: shows, moviePlays: moviePlays, queueDates: queueDates };
   validateObservation(snapshot);
   return snapshot;
 }

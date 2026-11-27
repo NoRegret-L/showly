@@ -5,6 +5,8 @@ import { ProgressPreferences, ProgressFlag, defaultProgress, validProgress, vali
 
 import { MovieProgressOptions, defaultMovieProgress, validMovieProgress } from '../model/MovieProgressRules';
 
+import { CollectionOptions, CollectionState, defaultCollection, emptyCollectionState, validCollection, validCollectionState } from '../model/CollectionRules';
+
 export class ClientSettings {
   private storage: preferences.Preferences;
   constructor(context: common.UIAbilityContext) {
@@ -26,6 +28,31 @@ export class ClientSettings {
   async saveMode(mode: string): Promise<void> {
     if (mode !== 'movie' && mode !== 'show') { throw new Error('Invalid media mode'); }
     await this.storage.put('media_mode', mode);
+    await this.storage.flush();
+  }
+  loadCollectionOptions(kind: string, section: string): CollectionOptions {
+    const raw = this.storage.getSync('collection_options:' + kind + ':' + section, '');
+    try {
+      const value = JSON.parse(typeof raw === 'string' ? raw : '') as CollectionOptions;
+      return validCollection(value) ? value : defaultCollection();
+    } catch (error) { return defaultCollection(); }
+  }
+  async saveCollectionOptions(kind: string, section: string, value: CollectionOptions): Promise<void> {
+    if (!validCollection(value) || !['show','movie'].includes(kind) || !['mine','queue','hidden'].includes(section)) { throw new Error('Invalid collection settings'); }
+    await this.storage.put('collection_options:' + kind + ':' + section, JSON.stringify(value));
+    await this.storage.flush();
+  }
+  loadCollectionState(scope: string): CollectionState {
+    if (!scope) { return emptyCollectionState(); }
+    const raw = this.storage.getSync('collection_state:' + scope, '');
+    if (typeof raw !== 'string' || !raw) { return emptyCollectionState(); }
+    const value = JSON.parse(raw) as CollectionState;
+    if (!validCollectionState(value)) { throw new Error('Invalid collection state'); }
+    return value;
+  }
+  async saveCollectionState(scope: string, value: CollectionState): Promise<void> {
+    if (!scope || !validCollectionState(value)) { throw new Error('Invalid collection state'); }
+    await this.storage.put('collection_state:' + scope, JSON.stringify(value));
     await this.storage.flush();
   }
   loadMovieProgress(): MovieProgressOptions {

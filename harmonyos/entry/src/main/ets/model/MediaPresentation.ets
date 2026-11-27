@@ -1,7 +1,8 @@
 import { Media } from './Media';
+export interface CollectionMeta { genres: string[]; network: string; release: string; rating?: number; runtime?: number; }
 export interface TranslationText { title: string; overview: string; }
 export interface TranslationCandidate { title?: string; overview?: string; language?: string; country?: string; }
-export interface TitlePresentation { id: string; text: TranslationText; translatedAt: number; posterUrls: string[]; posterUri: string; }
+export interface TitlePresentation { id: string; text: TranslationText; translatedAt: number; posterUrls: string[]; posterUri: string; collection?: CollectionMeta; }
 export interface EpisodePresentation { id: number; number: number; text: TranslationText; }
 export interface SeasonPresentation { showId: string; season: number; fetchedAt: number; episodes: EpisodePresentation[]; }
 export interface PresentationTask { media: Media; artwork: boolean; season: number; posterUrls: string[]; }
@@ -26,10 +27,16 @@ export function chineseEpisodeText(rows: TranslationCandidate[]): TranslationTex
 export function validText(text: TranslationText): boolean {
   return !!text && typeof text.title === 'string' && typeof text.overview === 'string';
 }
+export function validCollectionMeta(meta: CollectionMeta): boolean {
+  return !!meta && Array.isArray(meta.genres) && meta.genres.every((g: string) => typeof g === 'string') &&
+    typeof meta.network === 'string' && typeof meta.release === 'string' &&
+    (meta.rating === undefined || (Number.isFinite(meta.rating) && meta.rating >= 0 && meta.rating <= 10)) &&
+    (meta.runtime === undefined || (Number.isFinite(meta.runtime) && meta.runtime >= 0));
+}
 export function validTitle(row: TitlePresentation): boolean {
   return !!row && validTitleId(row.id) && validText(row.text) && Number.isSafeInteger(row.translatedAt) &&
     row.translatedAt >= 0 && Array.isArray(row.posterUrls) &&
-    row.posterUrls.every((url: string) => typeof url === 'string') && typeof row.posterUri === 'string';
+    row.posterUrls.every((url: string) => typeof url === 'string') && typeof row.posterUri === 'string' && (row.collection === undefined || validCollectionMeta(row.collection));
 }
 export function validSeason(row: SeasonPresentation): boolean {
   if (!row || !/^show:[1-9][0-9]*$/.test(row.showId) || !Number.isSafeInteger(row.season) ||

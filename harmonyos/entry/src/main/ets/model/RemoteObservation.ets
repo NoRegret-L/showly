@@ -1,4 +1,5 @@
 import { Media } from './Media';
+import { CollectionDate } from './CollectionRules';
 import { FullEpisodeCatalog, ScheduledEpisode, scheduleEpisodes, showSections } from './ShowCatalog';
 
 export interface RemotePlayPosition {
@@ -28,6 +29,7 @@ export interface RemoteLibraryObservation {
   watchedMovies: Media[];
   shows: RemoteShowObservation[];
   moviePlays: RemoteMovieObservation[];
+  queueDates?: CollectionDate[];
 }
 export interface EpisodeDecision {
   episodeId: number;
@@ -57,6 +59,14 @@ export function validateObservation(snapshot: RemoteLibraryObservation): void {
       throw new Error('Invalid observed watchlist');
     }
     queued.add(item.id);
+  }
+  if (snapshot.queueDates !== undefined) {
+    if (!Array.isArray(snapshot.queueDates)) { throw new Error('Invalid watchlist dates'); }
+    const dates = new Set<string>();
+    for (const row of snapshot.queueDates) {
+      if (!row || !queued.has(row.id) || dates.has(row.id) || !Number.isSafeInteger(row.at) || row.at <= 0) { throw new Error('Invalid watchlist date'); }
+      dates.add(row.id);
+    }
   }
   for (const item of snapshot.watchedMovies) {
     if (!validMedia(item, 'movie') || movies.has(item.id)) { throw new Error('Invalid observed movie'); }

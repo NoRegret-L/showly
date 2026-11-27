@@ -2,7 +2,7 @@ import { http } from '@kit.NetworkKit';
 import { fileIo, fileUri } from '@kit.CoreFileKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { Media } from '../model/Media';
-import { imageFormat } from '../model/MediaPresentation';
+import { CollectionMeta, imageFormat } from '../model/MediaPresentation';
 
 interface TraktIds {
   trakt: number;
@@ -19,6 +19,9 @@ interface Summary {
   rating?: number;
   status?: string;
   genres?: string[];
+  network?: string;
+  first_aired?: string;
+  released?: string;
   aired_episodes?: number;
   images?: Images;
 }
@@ -32,6 +35,7 @@ export interface MediaDetail {
   genres: string;
   airedEpisodes: number;
   posterUrls: string[];
+  collection?: CollectionMeta;
 }
 let posterWriteSequence: number = 0;
 const summaries: Map<string, MediaDetail> = new Map<string, MediaDetail>();
@@ -67,6 +71,7 @@ export async function readDetails(item: Media, clientId: string, reload: boolean
       throw new Error('Invalid summary identity');
     }
     const poster = data.images?.poster;
+    const release = item.kind === 'show' ? data.first_aired : data.released;
     const result: MediaDetail = {
       title: data.title,
       year: typeof data.year === 'number' ? data.year : item.year,
@@ -75,6 +80,10 @@ export async function readDetails(item: Media, clientId: string, reload: boolean
       rating: typeof data.rating === 'number' ? data.rating : 0,
       status: typeof data.status === 'string' ? data.status : '',
       genres: Array.isArray(data.genres) ? data.genres.join(' / ') : '',
+      collection: { genres: Array.isArray(data.genres) ? data.genres.filter((g: string) => typeof g === 'string') : [],
+        network: typeof data.network === 'string' ? data.network : '', release: typeof release === 'string' ? release : '',
+        rating: typeof data.rating === 'number' && Number.isFinite(data.rating) && data.rating >= 0 && data.rating <= 10 ? data.rating : undefined,
+        runtime: typeof data.runtime === 'number' && Number.isFinite(data.runtime) && data.runtime >= 0 ? data.runtime : undefined },
       airedEpisodes: typeof data.aired_episodes === 'number' ? data.aired_episodes : 0,
       posterUrls: Array.isArray(poster) ? poster.filter((value: string) => typeof value === 'string' && value.length > 0) : []
     };
