@@ -79,7 +79,17 @@ assert "if (this.cloudFresh) { this.repairTargets = result.repairTargets; }" in 
 assert "const full = await fetchFullEpisodeCatalog(media, client)" in repair
 assert repair.index("await fetchFullEpisodeCatalog") < repair.index("store.readModelRevision() !== revision") < repair.index("await store.saveObservedSchedule(full)")
 assert "store.mark(" not in repair and "saveReadCheckpoints" not in repair
-assert "readPersistedShow(disk.get" in projection and "store.saveProjectionCache" in projection
+# The batch refactor reads each disk entry once and reuses the validated result.
+lib=projection.split("export async function projectLibrary(",1)[1].split("export interface DetailProjection",1)[0]
+lookup="const prior = disk.get(row.media.id)"
+validate="const validDisk = readPersistedShow(prior, input, key)"
+reuse="if (!calculated && validDisk)"
+retain="if (validDisk && prior) { nextDisk.set(row.media.id,prior); }"
+assert lib.index(lookup) < lib.index(validate) < lib.index(reuse) < lib.index(retain)
+assert lib.count("readPersistedShow(") == 1
+assert "calculated = validDisk" in lib.split(reuse,1)[1].split("if (calculated)",1)[0]
+assert "calculated.effective.complete && diskProjectionAllowed(input)" in lib
+assert lib.index("if (diskChanged || nextDisk.size !== disk.size)") < lib.index("await store.saveProjectionCache(diskScope,payload)")
 assert "CREATE TABLE IF NOT EXISTS progress_projection_cache" in store
 for builder,ds in [("nextShowsView","showRows"),("movieProgressView","movieRowsSource")]:
     region=page.split("  "+builder+"(",1)[1].split("\n  @Builder",1)[0]
