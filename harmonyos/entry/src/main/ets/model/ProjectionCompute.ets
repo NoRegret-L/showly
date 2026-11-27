@@ -47,6 +47,7 @@ export interface ShowMemoEntry {
   key: string;
   from: number;
   output: ProjectionOutput;
+  catalogKey?: string;
 }
 // Exact input equality, no heuristic threshold. Only in-memory read models.
 export class ShowProjectionCache {
@@ -56,12 +57,12 @@ export class ShowProjectionCache {
     if (this.scope !== scope) { this.clear(); this.scope = scope; }
   }
   clear(): void { this.scope = ''; this.entries.clear(); }
-  get(id: string, key: string, now: number): ProjectionOutput | undefined {
+  get(id: string, key: string, now: number, catalogKey: string = ''): ProjectionOutput | undefined {
     const entry = this.entries.get(id);
-    return entry && entry.key === key && now >= entry.from && now < entry.output.validUntil ? entry.output : undefined;
+    return entry && entry.key === key && (entry.catalogKey ?? '') === catalogKey && now >= entry.from && now < entry.output.validUntil ? entry.output : undefined;
   }
-  put(id: string, key: string, now: number, output: ProjectionOutput): void {
-    this.entries.set(id, { key: key, from: now, output: output });
+  put(id: string, key: string, now: number, output: ProjectionOutput, catalogKey: string = ''): void {
+    this.entries.set(id, { key: key, from: now, output: output, catalogKey: catalogKey });
   }
   retain(ids: Set<string>): void {
     for (const id of this.entries.keys()) { if (!ids.has(id)) { this.entries.delete(id); } }
@@ -134,4 +135,13 @@ export function encodePersistedProjection(scope: string, entries: Map<string, Sh
   entries.forEach((entry: ShowMemoEntry, id: string) => { rows.push({ id: id, entry: entry }); });
   const payload: PersistedProjection = { schema: 1, scope: scope, entries: rows };
   return JSON.stringify(payload);
+}
+
+// Compare the original schedule payload separately; only per-show state is serialized here.
+export function showProjectionStateKey(input: ProjectionInput): string {
+  return JSON.stringify([input.remote, input.cloudActive, input.localIds,
+    input.decisions, input.timed, input.checkpoints, input.common]);
+}
+export function computeProjectionBatch(inputs: ProjectionInput[]): ProjectionOutput[] {
+  return inputs.map((input: ProjectionInput): ProjectionOutput => computeProjection(input));
 }

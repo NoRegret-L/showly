@@ -75,7 +75,7 @@ assert "if (checkpointChanged) { this.projectionPending = true; }" in cloud
 assert "await readSyncAccount(session)" in cloud and "await readActivity(session)" in cloud
 assert "reconcileTitleObservation" in cloud and "await store.saveReadCheckpoints" in cloud
 assert "this.readLibraryProjection(store, restored, account.uuid, clientId, false, false, current)" in cloud
-assert "taskpool.execute(computeProjectionTask" in project and "computeProjection(input)" in project
+assert "taskpool.execute(computeProjectionBatchTask" in project and "computeProjectionBatch(pending)" in project
 assert "value.posterUri = '';" in presentation
 assert "this.titleIndex.get(item.id)" in page
 assert "this.scheduleInitialRead()" in page

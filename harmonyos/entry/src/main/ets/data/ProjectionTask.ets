@@ -1,7 +1,6 @@
-import { ProjectionInput, computeProjection } from '../model/ProjectionCompute';
-
+import { ProjectionInput, computeProjectionBatch } from '../model/ProjectionCompute';
 @Concurrent
-export function computeProjectionTask(serialized: string): string {
-  const input = JSON.parse(serialized) as ProjectionInput;
-  return JSON.stringify(computeProjection(input));
+export function computeProjectionBatchTask(serialized: string): string {
+  const inputs = JSON.parse(serialized) as ProjectionInput[];
+  return JSON.stringify(computeProjectionBatch(inputs));
 }

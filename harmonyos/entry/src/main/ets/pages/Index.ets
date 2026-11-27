@@ -2496,7 +2496,7 @@ struct Index {
       this.projectionMemo.put(finalKey, result, result.computedAt, result.validUntil);
     }
     this.performanceStatus = '全库计算 ' + this.projectionRuns + ' 次 · 缓存命中 ' + this.projectionHits +
-      ' 次 · 本轮重算 ' + result.computedShows + ' 部 / 复用 ' + result.reusedShows + ' 部（磁盘 ' + result.diskHits + ' 部） · 计算 ' +
+      ' 次 · 本轮重算 ' + result.computedShows + ' 部 / 复用 ' + result.reusedShows + ' 部（磁盘 ' + result.diskHits + ' 部） · 目录解析 ' + result.scheduleParses + ' / 缓存解析 ' + result.diskParses + ' / 缓存行更新 ' + result.diskWrites + ' / 后台批次 ' + result.workerBatches + ' · 计算 ' +
       (Date.now() - started) + ' ms · EpisodeStore SELECT ' + (store.readQueryCount() - queryStart) + ' 次' + (this.projectionRuns === 1 ? ' · 启动至首轮计算完成 ' + (Date.now() - this.startupAt) + ' ms' : '');
     return result;
   }

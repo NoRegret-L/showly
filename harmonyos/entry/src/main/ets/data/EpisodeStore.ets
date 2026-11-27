@@ -7,6 +7,7 @@ import { CommonEntry, CommonUpdate, commonId } from '../model/ThreeWay';
 import { canReadDetails, readDetails } from './TraktDetails';
 import { RemoteLibraryObservation, validateObservation } from '../model/RemoteObservation';
 import { ReadCheckpoint } from '../model/EffectiveState';
+import { IndexedProjectionRow, ScheduleReadCache, SQLITE_BIND_LIMIT, bindPlaceholders } from '../model/IndexedProjection';
 import { FullEpisodeCatalog, ScheduledSeason, ScheduledEpisode, airDate, aired, scheduleEpisodes, validateFullCatalog } from '../model/ShowCatalog';
 
 interface EpisodeIds { trakt: number; }
@@ -210,6 +211,9 @@ export class EpisodeStore {
   private projectionRevision: number = 0;
   readModelRevision(): number { return this.projectionRevision; }
   private readQueries: number = 0;
+  private projectionSchedules: ScheduleReadCache = new ScheduleReadCache();
+  projectionScheduleParseCount(): number { return this.projectionSchedules.parseCount(); }
+  projectionCatalogKey(full: FullEpisodeCatalog): string { return this.projectionSchedules.key(full); }
   readQueryCount(): number { return this.readQueries; }
   private async queryRead(sql: string, args: relationalStore.ValueType[] = []): Promise<relationalStore.ResultSet> {
     this.readQueries++;
@@ -250,7 +254,7 @@ export class EpisodeStore {
     await db.executeSql('CREATE TABLE IF NOT EXISTS episode_restore_baseline (show_id TEXT PRIMARY KEY, episode_ids TEXT NOT NULL, verified INTEGER NOT NULL DEFAULT 0 CHECK(verified IN (0,1)))');
     await db.executeSql("CREATE TABLE IF NOT EXISTS sync_common_state (account_uuid TEXT NOT NULL, domain TEXT NOT NULL CHECK(domain='episode'), payload TEXT NOT NULL, PRIMARY KEY(account_uuid,domain))");
     // Optional derived cache must not block opening the authoritative store.
-    try { await db.executeSql('CREATE TABLE IF NOT EXISTS progress_projection_cache (scope TEXT PRIMARY KEY,payload TEXT NOT NULL)'); }
+    try { await db.executeSql('CREATE TABLE IF NOT EXISTS progress_projection_row_v2 (scope TEXT NOT NULL,show_id TEXT NOT NULL,catalog_key TEXT NOT NULL,state_key TEXT NOT NULL,computed_at INTEGER NOT NULL,valid_until INTEGER NOT NULL,payload TEXT NOT NULL,PRIMARY KEY(scope,show_id))'); }
     catch (error) { /* reads and writes of the optional cache can fail safely */ }
     return new EpisodeStore(db);
   }
@@ -328,34 +332,72 @@ export class EpisodeStore {
     }
   }
 
-  // Derived read cache only. Existing personal/sync tables are not modified.
-  async readProjectionCache(scope: string): Promise<string> {
+  // Optional derived rows. The old whole-account cache is left untouched.
+  async readProjectionRows(scope: string, ids: Set<string>): Promise<Map<string, IndexedProjectionRow>> {
+    const result = new Map<string, IndexedProjectionRow>();
+    const targets = Array.from(ids);
+    const limit = SQLITE_BIND_LIMIT - 1;
     try {
-      const rows = await this.queryRead('SELECT payload FROM progress_projection_cache WHERE scope=?', [scope]);
-      try { return rows.goToFirstRow() ? rows.getString(0) : ''; } finally { rows.close(); }
-    } catch (error) { return ''; }
-  }
-  async saveProjectionCache(scope: string, payload: string): Promise<void> {
-    try {
-      await this.db.executeSql('INSERT OR REPLACE INTO progress_projection_cache(scope,payload) VALUES(?,?)', [scope, payload]);
-    } catch (error) { /* optional cache; never block the library */ }
+      for (let start = 0; start < targets.length; start += limit) {
+        const batch = targets.slice(start,start+limit);
+        const args: relationalStore.ValueType[] = [scope,...batch];
+        const rows = await this.queryRead('SELECT show_id,catalog_key,state_key,computed_at,valid_until,payload FROM progress_projection_row_v2 WHERE scope=? AND show_id IN (' + bindPlaceholders(batch.length) + ')',args);
+        try {
+          while (rows.goToNextRow()) {
+            const id = rows.getString(0);
+            if (!ids.has(id)) { continue; }
+            result.set(id,{ id: id, catalogKey: rows.getString(1), key: rows.getString(2),
+              from: rows.getLong(3), until: rows.getLong(4), payload: rows.getString(5) });
+          }
+        } finally { rows.close(); }
+      }
+    } catch (error) { result.clear(); }
+    return result;
   }
 
-  // One query regardless of number of targets. Unrelated public catalog
-  // payloads are not parsed or retained. No write-eligible metadata changes.
+  async saveProjectionRows(scope: string, rows: IndexedProjectionRow[]): Promise<void> {
+    const limit = Math.floor(SQLITE_BIND_LIMIT / 7);
+    try {
+      for (let start = 0; start < rows.length; start += limit) {
+        const batch = rows.slice(start,start+limit);
+        const args: relationalStore.ValueType[] = [];
+        const values: string[] = [];
+        for (const row of batch) {
+          values.push('(?,?,?,?,?,?,?)');
+          args.push(scope,row.id,row.catalogKey,row.key,row.from,row.until,row.payload);
+        }
+        await this.db.executeSql('INSERT OR REPLACE INTO progress_projection_row_v2(scope,show_id,catalog_key,state_key,computed_at,valid_until,payload) VALUES ' + values.join(','),args);
+      }
+    } catch (error) { /* optional cache; missing rows recompute */ }
+  }
+
+  async removeProjectionRows(scope: string, ids: string[]): Promise<void> {
+    const limit = SQLITE_BIND_LIMIT - 1;
+    try {
+      for (let start = 0; start < ids.length; start += limit) {
+        const batch = ids.slice(start,start+limit);
+        const args: relationalStore.ValueType[] = [scope,...batch];
+        await this.db.executeSql('DELETE FROM progress_projection_row_v2 WHERE scope=? AND show_id IN (' + bindPlaceholders(batch.length) + ')',args);
+      }
+    } catch (error) { /* exact input and checkpoint gates still apply */ }
+  }
+
+  // Indexed target read. The DB remains authoritative on every read.
   async projectionCatalogs(ids: Set<string>): Promise<Map<string, FullEpisodeCatalog>> {
     const result = new Map<string, FullEpisodeCatalog>();
-    if (!ids.size) { return result; }
-    const rows = await this.queryRead('SELECT show_id,payload FROM episode_schedule ORDER BY show_id');
-    try {
-      while (rows.goToNextRow()) {
-        const id = rows.getString(0);
-        if (!ids.has(id)) { continue; }
-        const full = JSON.parse(rows.getString(1)) as FullEpisodeCatalog;
-        validateFullCatalog(full,id);
-        result.set(id,full);
-      }
-    } finally { rows.close(); }
+    const targets = Array.from(ids);
+    for (let start = 0; start < targets.length; start += SQLITE_BIND_LIMIT) {
+      const batch = targets.slice(start,start+SQLITE_BIND_LIMIT);
+      const rows = await this.queryRead('SELECT show_id,payload FROM episode_schedule WHERE show_id IN (' + bindPlaceholders(batch.length) + ') ORDER BY show_id',batch);
+      try {
+        while (rows.goToNextRow()) {
+          const id = rows.getString(0);
+          if (!ids.has(id)) { continue; }
+          result.set(id,this.projectionSchedules.read(id,rows.getString(1)));
+        }
+      } finally { rows.close(); }
+    }
+    this.projectionSchedules.retain(new Set<string>(result.keys()));
     return result;
   }
 

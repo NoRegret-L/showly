@@ -16,7 +16,8 @@ def sql_for(name):
 bound_sql,=sql_for("boundAccount")
 baseline_sql,=sql_for("cloudBaseline")
 catalog_sql,event_sql=sql_for("projectionLocalInputs")
-schedule_sql,=sql_for("projectionCatalogs")
+schedule_prefix,=sql_for("projectionCatalogs")
+schedule_sql=schedule_prefix+','.join('?' for _ in range(393))+') ORDER BY show_id'
 db=sqlite3.connect(":memory:")
 db.executescript("""
 CREATE TABLE episode_catalog(show_id TEXT PRIMARY KEY,catalog TEXT,updated_at INTEGER);
@@ -86,7 +87,9 @@ fixture[catalog_sql]=read(catalog_sql)
 fixture[baseline_sql]=read(baseline_sql,("account-A",))
 fixture[event_sql]=read(event_sql)
 read(bound_sql)
-fixture[schedule_sql]=read(schedule_sql)
+fixture[schedule_prefix]=read(schedule_sql,ids)
+assert len(fixture[schedule_prefix])==392
+assert any('SEARCH' in row[3] for row in read('EXPLAIN QUERY PLAN '+schedule_sql,ids))
 new_count=len(queries)
 new_ms=(time.perf_counter()-start)*1000
 assert new_count==6,new_count
@@ -94,14 +97,15 @@ assert len(fixture[catalog_sql])==count and len(fixture[event_sql])==count*3
 print(f"SQLite 393-show projection input fixture: {old_count} legacy SELECTs -> {new_count} batch SELECTs; host sample {old_ms:.2f} ms vs {new_ms:.2f} ms (not device latency)")
 with tempfile.TemporaryDirectory() as tmp:
     work=Path(tmp)
-    for name in ("Media","ShowCatalog","BatchEpisodeRead"):
-        shutil.copyfile(root/"model"/(name+".ets"),work/(name+".ts"))
+    for path in (root/"model").glob("*.ets"):
+        shutil.copyfile(path,work/(path.stem+".ts"))
     # Compile the actual production read methods with a minimal ResultSet
     # adapter. SQLite above supplies the real result rows, not invented API data.
     types="export interface LocalEpisode"+region("export interface LocalEpisode","export interface LocalEpisodeState")
     validators="function validId"+region("function validId","// Public catalog only")
     harness="""import { ReadEpisodeIdentity, ReadJournalEvent, validReadIds, replayWatchedIds } from './BatchEpisodeRead';
 import { FullEpisodeCatalog, validateFullCatalog } from './ShowCatalog';
+import { ScheduleReadCache, SQLITE_BIND_LIMIT, bindPlaceholders } from './IndexedProjection';
 type Cell=string|number|null;
 class FixtureResult {
   private index=-1;
@@ -116,12 +120,18 @@ class FixtureResult {
 """+types+validators+"""
 export class BatchHarness {
   private projectionRevision=0;
+  private projectionSchedules=new ScheduleReadCache();
+  public scheduleParses(){return this.projectionSchedules.parseCount();}
   public count=0;
   public changeAt=0;
   constructor(private fixture: Record<string,Cell[][]>) {}
   async queryRead(sql:string,args:(string|number)[]=[]):Promise<FixtureResult>{
     this.count++;
     if(this.changeAt===this.count)this.projectionRevision++;
+    if(sql.startsWith('SELECT show_id,payload FROM episode_schedule WHERE show_id IN (')) {
+      if(sql.split('?').length-1!==args.length || args.length>999)throw Error('Invalid bindings');
+      return new FixtureResult(this.fixture['SELECT show_id,payload FROM episode_schedule WHERE show_id IN ('].filter(row=>args.includes(row[0] as string)));
+    }
     if(!Object.prototype.hasOwnProperty.call(this.fixture,sql))throw Error('Unexpected SQL '+sql);
     if(args.length && (args.length!==1 || args[0]!=='account-A'))throw Error('Unexpected scope');
     return new FixtureResult(this.fixture[sql]);
@@ -129,7 +139,7 @@ export class BatchHarness {
 """+ "\n".join(method(n) for n in ("boundAccount","cloudBaseline","projectionLocalInputs","projectionCatalogs"))+"\n}\n"
     (work/"BatchHarness.ts").write_text(harness,encoding="utf-8")
     subprocess.run(["tsc","--strict","--target","ES2020","--module","commonjs","BatchHarness.ts","BatchEpisodeRead.ts"],cwd=work,check=True)
-    (work/"fixture.json").write_text(json.dumps({"queries":fixture,"legacy":legacy,"eventSql":event_sql,"boundSql":bound_sql,"scheduleSql":schedule_sql,"now":now}),encoding="utf-8")
+    (work/"fixture.json").write_text(json.dumps({"queries":fixture,"legacy":legacy,"eventSql":event_sql,"boundSql":bound_sql,"scheduleSql":schedule_prefix,"now":now}),encoding="utf-8")
     (work/"test.cjs").write_text("""
 const assert=require('node:assert/strict');
 const f=require('./fixture.json');
@@ -148,11 +158,17 @@ const {aired}=require('./ShowCatalog.js');
  const all=new Set(batch.states.map(s=>s.catalog.showId));
  const schedules=await h.projectionCatalogs(all);
  assert.equal(schedules.size,392);assert.equal(schedules.has('show:393'),false);
- assert.equal(h.count,6);
- // One, zero or many targets: schedule query count is independent of N.
+ assert.equal(h.count,6);assert.equal(h.scheduleParses(),392);
+ await h.projectionCatalogs(all);assert.equal(h.scheduleParses(),392);assert.equal(h.count,7);
+ const changedSchedule=JSON.parse(JSON.stringify(f.queries));
+ const warm=new BatchHarness(changedSchedule);await warm.projectionCatalogs(all);assert.equal(warm.scheduleParses(),392);
+ const raw=JSON.parse(changedSchedule[f.scheduleSql][0][1]);raw.rating=8;changedSchedule[f.scheduleSql][0][1]=JSON.stringify(raw);
+ await warm.projectionCatalogs(all);assert.equal(warm.scheduleParses(),393);
+ // One, zero or many targets within SQLite's binding limit use at most one query.
  const one=new BatchHarness(f.queries);
  assert.equal((await one.projectionCatalogs(new Set())).size,0);assert.equal(one.count,0);
  assert.equal((await one.projectionCatalogs(new Set(['show:1']))).size,1);assert.equal(one.count,1);
+ const many=new BatchHarness(f.queries);await many.projectionCatalogs(new Set(Array.from({length:1000},(_,i)=>'show:'+(i+1))));assert.equal(many.count,2);
  // Compare direct summary against original aired-filter + sort path.
  for(const state of batch.states) {
    const full=schedules.get(state.catalog.showId);if(!full)continue;
@@ -183,8 +199,8 @@ comp=(root/"model"/"ProjectionCompute.ets").read_text()
 lib=projection.split("export async function projectLibrary(",1)[1].split("export interface DetailProjection",1)[0]
 assert "store.projectionLocalInputs(bound)" in lib and "store.projectionCatalogs(" in lib
 assert "await store.backupStates()" not in lib and "await store.journalIntents()" not in lib and "await store.fullCatalog(" not in lib
-assert lib.count("readPersistedShow(")==1
-assert "if (diskChanged || nextDisk.size !== disk.size)" in lib
+assert lib.count("decodeIndexedProjection(")==1
+assert "if (changedDisk.length) { await store.saveProjectionRows(diskScope,changedDisk); }" in lib
 assert "summarizeAired(full,effective.ids,now)" in lib
 assert "store.readModelRevision() !== revision" in lib
 assert "JSON.stringify(row.episode)" not in comp

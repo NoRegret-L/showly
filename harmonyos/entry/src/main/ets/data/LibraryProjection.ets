@@ -1,8 +1,9 @@
 import { taskpool } from '@kit.ArkTS';
 import { summarizeAired } from '../model/BatchEpisodeRead';
 import { Media } from '../model/Media';
-import { ProjectionInput, ProjectionOutput, computeProjection, ShowProjectionCache, showProjectionKey, ShowMemoEntry, persistentProjectionScope, decodePersistedProjection, encodePersistedProjection, diskProjectionAllowed, readPersistedShow, persistShow } from '../model/ProjectionCompute';
-import { computeProjectionTask } from './ProjectionTask';
+import { ProjectionInput, ProjectionOutput, computeProjectionBatch, ShowProjectionCache, showProjectionStateKey, persistentProjectionScope, diskProjectionAllowed } from '../model/ProjectionCompute';
+import { IndexedProjectionRow, indexedProjectionMatches, decodeIndexedProjection, encodeIndexedProjection } from '../model/IndexedProjection';
+import { computeProjectionBatchTask } from './ProjectionTask';
 import { MediaRecord } from '../model/MediaState';
 import { LibraryShowEvidence, PersonalLibraryRow, buildPersonalLibrary, hasTrackingEvidence } from '../model/PersonalLibrary';
 import { RemoteLibraryObservation, RemoteShowObservation, RemotePlayPosition } from '../model/RemoteObservation';
@@ -26,7 +27,22 @@ export interface LibraryProjection {
   computedShows: number;
   reusedShows: number;
   diskHits: number;
+  scheduleParses: number;
+  diskParses: number;
+  diskWrites: number;
+  workerBatches: number;
   repairTargets: Media[];
+}
+interface PreparedProjection {
+  row: PersonalLibraryRow;
+  full?: FullEpisodeCatalog;
+  state?: EpisodeBackupState;
+  ids: number[];
+  input?: ProjectionInput;
+  key: string;
+  catalogKey: string;
+  calculated?: ProjectionOutput;
+  diskReusable: boolean;
 }
 export async function projectLibrary(store: EpisodeStore, records: MediaRecord[],
   cloud: RemoteLibraryObservation | undefined, uuid: string, clientId: string, fill: boolean,
@@ -52,7 +68,10 @@ export async function projectLibrary(store: EpisodeStore, records: MediaRecord[]
   });
   const members = buildPersonalLibrary(localAllowed ? records : [], cloud?.watchedMovies ?? [], cloud?.watchlist ?? [], remote, local);
   const targets = members.filter((row: PersonalLibraryRow) => row.media.kind === 'show' && (hasTrackingEvidence(row) || row.queued));
-  const schedules = await store.projectionCatalogs(new Set<string>(targets.map((row: PersonalLibraryRow) => row.media.id)));
+  const targetIds = new Set<string>(targets.map((row: PersonalLibraryRow) => row.media.id));
+  const parseStart = store.projectionScheduleParseCount();
+  const schedules = await store.projectionCatalogs(targetIds);
+  const scheduleParses = store.projectionScheduleParseCount() - parseStart;
   if (!current() || store.readModelRevision() !== revision) { throw new Error('Projection inputs changed'); }
   const byId: Map<string, EpisodeBackupState> = new Map<string, EpisodeBackupState>();
   for (const state of states) { byId.set(state.catalog.showId, state); }
@@ -80,12 +99,16 @@ export async function projectLibrary(store: EpisodeStore, records: MediaRecord[]
   cache.begin(JSON.stringify([clientId, uuid, cloud?.generation ?? -1, localAllowed]));
   const retained = new Set<string>();
   const diskScope = persistentProjectionScope(clientId, uuid, !!cloud, localAllowed);
-  const diskRaw = await store.readProjectionCache(diskScope);
-  const disk = decodePersistedProjection(diskRaw, diskScope);
-  const nextDisk = new Map<string, ShowMemoEntry>();
+  const disk = await store.readProjectionRows(diskScope,targetIds);
+  const changedDisk: IndexedProjectionRow[] = [];
+  const removedDisk: string[] = [];
+  const prepared: PreparedProjection[] = [];
+  const pending: ProjectionInput[] = [];
+  const pendingRows: PreparedProjection[] = [];
   const repairTargets: Media[] = [];
   let diskHits = 0;
-  let diskChanged = false;
+  let diskParses = 0;
+  let workerBatches = 0;
   let cacheable = true;
   let computedShows = 0;
   let reusedShows = 0;
@@ -124,7 +147,8 @@ export async function projectLibrary(store: EpisodeStore, records: MediaRecord[]
     const ids = state?.watchedIds ?? [];
     // With a complete current-account observation, absent remote show means
     // no cloud plays; retain only explicit local decisions, not stale imports.
-    let calculated: ProjectionOutput | undefined;
+    const work: PreparedProjection = { row: row, full: full, state: state, ids: ids,
+      key: '', catalogKey: '', diskReusable: false };
     if (full) {
       const decisions = decisionsByShow.get(row.media.id) ?? [];
       const timed = timedByShow.get(row.media.id) ?? [];
@@ -139,36 +163,64 @@ export async function projectLibrary(store: EpisodeStore, records: MediaRecord[]
       }
       const input: ProjectionInput = { full: full, remote: show, cloudActive: !!cloud, localIds: ids,
         decisions: decisions, timed: timed, checkpoints: cp, common: baseline, now: now };
-      const key = showProjectionKey(input);
-      calculated = cache.get(row.media.id, key, now);
+      work.input = input;
+      work.key = showProjectionStateKey(input);
+      work.catalogKey = store.projectionCatalogKey(full);
+      let calculated = cache.get(row.media.id,work.key,now,work.catalogKey);
       const prior = disk.get(row.media.id);
-      // At most one disk validation per show; reuse its outcome for persistence.
-      const validDisk = readPersistedShow(prior, input, key);
-      if (!calculated && validDisk) {
-        calculated = validDisk;
-        diskHits++;
-        cache.put(row.media.id, key, now, calculated);
-      }
-      if (calculated) { reusedShows++; }
-      else {
-        computedShows++;
-        try {
-          const serialized = await taskpool.execute(computeProjectionTask, JSON.stringify(input)) as string;
-          calculated = JSON.parse(serialized) as ProjectionOutput;
-        } catch (error) {
-          // Same pure resolver; fallback never changes authorization or writes.
-          calculated = computeProjection(input);
+      const metadataMatch = indexedProjectionMatches(prior,input,work.catalogKey,work.key);
+      if (calculated) {
+        work.diskReusable = metadataMatch;
+      } else if (prior && metadataMatch) {
+        diskParses++;
+        calculated = decodeIndexedProjection(prior,input,work.catalogKey,work.key);
+        if (calculated) {
+          diskHits++;
+          work.diskReusable = true;
+          cache.put(row.media.id,work.key,now,calculated,work.catalogKey);
         }
-        if (current()) { cache.put(row.media.id, key, now, calculated); }
       }
-      if (!current()) { throw new Error('Observation session changed'); }
-      validUntil = Math.min(validUntil, calculated.validUntil);
-      if (calculated.effective.complete && diskProjectionAllowed(input)) {
-        // Reuse exact validated disk entry without rebuilding JSON.
-        if (validDisk && prior) { nextDisk.set(row.media.id,prior); }
-        else { nextDisk.set(row.media.id,persistShow(key,now,calculated)); diskChanged = true; }
+      if (calculated) {
+        work.calculated = calculated;
+        reusedShows++;
+      } else {
+        pending.push(input);
+        pendingRows.push(work);
       }
     }
+    prepared.push(work);
+  }
+  if (!current() || (readOnly && store.readModelRevision() !== revision)) { throw new Error('Observation inputs changed'); }
+  if (pending.length) {
+    computedShows = pending.length;
+    workerBatches++;
+    let outputs: ProjectionOutput[];
+    try {
+      const serialized = await taskpool.execute(computeProjectionBatchTask, JSON.stringify(pending)) as string;
+      outputs = JSON.parse(serialized) as ProjectionOutput[];
+      if (outputs.length !== pending.length) { throw new Error('Incomplete projection batch'); }
+    } catch (error) {
+      outputs = computeProjectionBatch(pending);
+    }
+    if (!current() || (readOnly && store.readModelRevision() !== revision)) { throw new Error('Observation inputs changed'); }
+    for (let i = 0; i < pendingRows.length; i++) {
+      const work = pendingRows[i];
+      work.calculated = outputs[i];
+      cache.put(work.row.media.id,work.key,now,outputs[i],work.catalogKey);
+    }
+  }
+  for (const work of prepared) {
+    if (!current()) { throw new Error('Observation session changed'); }
+    const row = work.row;
+    const full = work.full;
+    const state = work.state;
+    const ids = work.ids;
+    const calculated = work.calculated;
+    const input = work.input;
+    if (calculated) { validUntil = Math.min(validUntil,calculated.validUntil); }
+    if (calculated && input && calculated.effective.complete && diskProjectionAllowed(input)) {
+      if (!work.diskReusable) { changedDisk.push(encodeIndexedProjection(input,work.catalogKey,work.key,calculated)); }
+    } else if (disk.has(row.media.id)) { removedDisk.push(row.media.id); }
     const effective = calculated?.effective;
     if (!effective?.complete || !full?.status) { cacheable = false; }
     if (effective && effective.complete) {
@@ -198,14 +250,13 @@ export async function projectLibrary(store: EpisodeStore, records: MediaRecord[]
     progress(++done, targets.length);
   }
   cache.retain(retained);
-  if (!current()) { throw new Error('Observation session changed'); }
-  if (diskChanged || nextDisk.size !== disk.size) {
-    const payload = encodePersistedProjection(diskScope,nextDisk);
-    await store.saveProjectionCache(diskScope,payload);
-  }
+  if (!current() || (readOnly && store.readModelRevision() !== revision)) { throw new Error('Observation inputs changed'); }
+  if (changedDisk.length) { await store.saveProjectionRows(diskScope,changedDisk); }
+  if (removedDisk.length) { await store.removeProjectionRows(diskScope,removedDisk); }
   if (!current() || (readOnly && store.readModelRevision() !== revision)) { throw new Error('Observation inputs changed'); }
   return { evidence: result, missing: missing, failed: failed, localAllowed: localAllowed, matches: matches, next: next,
-    computedAt: now, validUntil: validUntil, cacheable: cacheable && !missing && !failed, computedShows: computedShows, reusedShows: reusedShows, diskHits: diskHits, repairTargets: repairTargets };
+    computedAt: now, validUntil: validUntil, cacheable: cacheable && !missing && !failed, computedShows: computedShows, reusedShows: reusedShows, diskHits: diskHits, scheduleParses: scheduleParses,
+    diskParses: diskParses, diskWrites: changedDisk.length, workerBatches: workerBatches, repairTargets: repairTargets };
 }
 
 export interface DetailProjection {

@@ -1,4 +1,4 @@
-# Showly HarmonyOS Preview v0.9.3e.2d.3
+# Showly HarmonyOS Preview v0.9.3e.2d.4
 
 Unofficial native ArkTS prototype, not a complete Showly port. Your app uses Trakt but is not endorsed or certified by Trakt.
 
@@ -204,3 +204,6 @@ See [shared read performance](docs/SHARED_READ_PERFORMANCE.md) for scope, safety
 
 ## v0.9.3e.2d.3 — viewport and candidate rendering (0.9.3.20, build 44)
 See [rendering performance](docs/RENDERING_PERFORMANCE.md).
+
+## v0.9.3e.2d.4 — indexed derived reads (0.9.3.21, build 45)
+See [Indexed projection](docs/INDEXED_PROJECTION.md). Derived-only, no authoritative migration or new dependency.
