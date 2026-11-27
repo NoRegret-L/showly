@@ -8,6 +8,8 @@ export class LazyRows<T> implements IDataSource, ScrollRows {
   private keyById: Map<string,string> = new Map<string,string>();
   private listeners: DataChangeListener[] = [];
   private revision: number = 0;
+  private publishedVersion:number=0;
+  publicationVersion():number { return this.publishedVersion; }
   private pendingRevision: number=0;
   private dependencies: RowDependencies=new RowDependencies();
   private dependenciesOf?: (row: T)=>string[];
@@ -23,7 +25,18 @@ export class LazyRows<T> implements IDataSource, ScrollRows {
     for (const i of this.dependencies.affected(ids)) {
       const next=key(this.rows[i]);
       if (next===this.keys[i]) { continue; }
-      this.keys[i]=next; this.keyById.set(this.ids[i],next);
+      this.keys[i]=next; this.keyById.set(this.ids[i],next); this.publishedVersion++;
+      for (const listener of this.listeners) { listener.onDataChange(i); }
+    }
+    return true;
+  }
+  patchRow(id: string,row: T,key: string): boolean {
+    if (this.pendingRevision!==0) { return false; }
+    const i=this.indexOfId(id);
+    if (i<0) { return false; }
+    this.rows[i]=row;
+    if (this.keys[i]!==key) {
+      this.keys[i]=key;this.keyById.set(id,key);this.publishedVersion++;
       for (const listener of this.listeners) { listener.onDataChange(i); }
     }
     return true;
@@ -63,6 +76,7 @@ export class LazyRows<T> implements IDataSource, ScrollRows {
     return true;
   }
   private apply(rows: T[], ids: string[], keys: string[], edits: ListEdit[]): void {
+    if(edits.length){this.publishedVersion++;}
     if (edits.some((edit: ListEdit) => edit.kind === 'reload')) {
       this.rows = [...rows]; this.ids = [...ids]; this.keys = [...keys];
       this.keyById.clear();

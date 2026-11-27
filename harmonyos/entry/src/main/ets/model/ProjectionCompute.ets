@@ -52,14 +52,34 @@ export interface ShowMemoEntry {
   catalogKey?: string;
   diskKnown?: boolean;
 }
+interface ProjectionSignature { input:ProjectionInput; key:string; }
+// Cloud observations and derived store state are published by replacement.
+// Reference equality applies only to the immutable remote snapshot. Other
+// fields are compared exactly, including ordered decisions and evidence.
+function sameSignatureInput(a:ProjectionInput,b:ProjectionInput):boolean {
+  if(a.remote!==b.remote||a.cloudActive!==b.cloudActive||a.localIds.length!==b.localIds.length||
+    a.decisions.length!==b.decisions.length||a.timed.length!==b.timed.length||a.checkpoints.length!==b.checkpoints.length||a.common.length!==b.common.length){return false;}
+  for(let i=0;i<a.localIds.length;i++){if(a.localIds[i]!==b.localIds[i]){return false;}}
+  for(let i=0;i<a.decisions.length;i++){const x=a.decisions[i],y=b.decisions[i];if(x.episodeId!==y.episodeId||x.seq!==y.seq||x.watched!==y.watched){return false;}}
+  for(let i=0;i<a.timed.length;i++){const x=a.timed[i],y=b.timed[i];if(x.episodeId!==y.episodeId||x.seq!==y.seq||x.watched!==y.watched||x.changedAt!==y.changedAt){return false;}}
+  for(let i=0;i<a.checkpoints.length;i++){const x=a.checkpoints[i],y=b.checkpoints[i];if(x.id!==y.id||x.seq!==y.seq||x.watched!==y.watched){return false;}}
+  for(let i=0;i<a.common.length;i++){const x=a.common[i],y=b.common[i];if(x.id!==y.id||x.value!==y.value||x.activity!==y.activity){return false;}}
+  return true;
+}
 // Exact input equality, no heuristic threshold. Only in-memory read models.
 export class ShowProjectionCache {
   private scope: string = '';
   private entries: Map<string, ShowMemoEntry> = new Map<string, ShowMemoEntry>();
+  private signatures: Map<string,ProjectionSignature>=new Map<string,ProjectionSignature>();
   begin(scope: string): void {
     if (this.scope !== scope) { this.clear(); this.scope = scope; }
   }
-  clear(): void { this.scope = ''; this.entries.clear(); }
+  clear(): void { this.scope = ''; this.entries.clear(); this.signatures.clear(); }
+  stateKey(input:ProjectionInput):string {
+    const id=input.full.media.id,old=this.signatures.get(id);
+    if(old && sameSignatureInput(old.input,input)){return old.key;}
+    const key=showProjectionStateKey(input);this.signatures.set(id,{input:input,key:key});return key;
+  }
   get(id: string, key: string, now: number, catalogKey: string = ''): ProjectionOutput | undefined {
     const entry = this.entries.get(id);
     return entry && entry.key === key && (entry.catalogKey ?? '') === catalogKey && now >= entry.from && now < entry.output.validUntil ? entry.output : undefined;
@@ -76,6 +96,7 @@ export class ShowProjectionCache {
   }
   retain(ids: Set<string>): void {
     for (const id of this.entries.keys()) { if (!ids.has(id)) { this.entries.delete(id); } }
+    for (const id of this.signatures.keys()) { if (!ids.has(id)) { this.signatures.delete(id); } }
   }
 }
 export function showProjectionKey(input: ProjectionInput): string {

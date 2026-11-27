@@ -2,7 +2,7 @@ import { taskpool } from '@kit.ArkTS';
 import { CalendarSource } from '../model/CalendarRules';
 import { summarizeAired } from '../model/BatchEpisodeRead';
 import { Media } from '../model/Media';
-import { ProjectionInput, ProjectionOutput, computeProjectionBatch, ShowProjectionCache, showProjectionStateKey, persistentProjectionScope, diskProjectionAllowed } from '../model/ProjectionCompute';
+import { ProjectionInput, ProjectionOutput, computeProjectionBatch, ShowProjectionCache, persistentProjectionScope, diskProjectionAllowed } from '../model/ProjectionCompute';
 import { IndexedProjectionRow, indexedProjectionMatches, decodeIndexedProjection, encodeIndexedProjection } from '../model/IndexedProjection';
 import { computeProjectionBatchTask } from './ProjectionTask';
 import { MediaRecord } from '../model/MediaState';
@@ -164,7 +164,7 @@ export async function projectLibrary(store: EpisodeStore, records: MediaRecord[]
       const input: ProjectionInput = { full: full, remote: show, cloudActive: !!cloud, localIds: ids,
         decisions: decisions, timed: timed, checkpoints: cp, common: baseline, now: now };
       work.input = input;
-      work.key = showProjectionStateKey(input);
+      work.key = cache.stateKey(input);
       work.catalogKey = store.projectionCatalogKey(full);
       work.calculated=cache.get(row.media.id,work.key,now,work.catalogKey);
       work.diskReusable=!!work.calculated && cache.diskKnown(row.media.id,work.key,now,work.catalogKey);

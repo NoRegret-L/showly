@@ -212,6 +212,19 @@ export function progressRows(sources: ProgressSource[], prefs: ProgressPreferenc
   }
   return sortProgressCandidates(candidates,prefs,filter,query);
 }
+export function progressSortEligible(row: ProgressRow,filter:string,query:string):boolean {
+  const q=query.trim();
+  return ['pinned','new','aired','upcoming','hold'].includes(row.group) &&
+    (filter==='all'||filter===row.group||(filter==='both'&&(row.group==='upcoming'||row.group==='hold'))) &&
+    (!q || matchesText(q,row.media.title,row.localizedTitle??'') || matchesText(q,row.episode.title,row.localizedEpisode??''));
+}
+export function compareProgressRows(a: ProgressRow,b: ProgressRow,prefs: ProgressPreferences):number {
+  const groups=['pinned','new','aired','upcoming','hold'];
+  if(a.group!==b.group){return groups.indexOf(a.group)-groups.indexOf(b.group);}
+  if(a.group==='upcoming'){return time(a.episode.firstAired)-time(b.episode.firstAired)||order(a,b,prefs);}
+  if((a.group==='pinned'||a.group==='hold')&&a.fresh!==b.fresh){return a.fresh?-1:1;}
+  return order(a,b,prefs);
+}
 export function sortProgressCandidates(candidates: ProgressRow[], prefs: ProgressPreferences,
   filter: string, query: string): ProgressRow[] {
   const q = query.trim();
@@ -221,13 +234,7 @@ export function sortProgressCandidates(candidates: ProgressRow[], prefs: Progres
   for (const group of ['pinned','new','aired','upcoming','hold']) {
     if (filter !== 'all' && filter !== group && !(filter === 'both' && (group === 'upcoming' || group === 'hold'))) { continue; }
     const rows = result.filter((row: ProgressRow) => row.group === group);
-    rows.sort((a: ProgressRow, b: ProgressRow) => {
-      if (group === 'upcoming') { return time(a.episode.firstAired) - time(b.episode.firstAired) || order(a,b,prefs); }
-      if (group === 'pinned' || group === 'hold') {
-        if (a.fresh !== b.fresh) { return a.fresh ? -1 : 1; }
-      }
-      return order(a,b,prefs);
-    });
+    rows.sort((a: ProgressRow, b: ProgressRow) => compareProgressRows(a,b,prefs));
     grouped.push(...rows);
   }
   return grouped;

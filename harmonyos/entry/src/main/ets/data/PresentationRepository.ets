@@ -4,7 +4,7 @@ import { common } from '@kit.AbilityKit';
 import { Media } from '../model/Media';
 import { ReadFlight, ReadCancel, ConsumerReadFlight } from '../model/ReadFlight';
 import { PresentationFailure, presentationFailure } from '../model/PresentationPolicy';
-import { TitlePresentation, SeasonPresentation, EpisodePresentation, TranslationText, CollectionMeta, validTitle, validSeason, titleNeedsTranslation, seasonNeedsTranslation, mergeText } from '../model/MediaPresentation';
+import { TitlePresentation, SeasonPresentation, EpisodePresentation, TranslationText, CollectionMeta, validTitle, validSeason, titleNeedsTranslation, seasonNeedsTranslation, mergeText, PresentationTask, TITLE_RETRY, SEASON_RETRY } from '../model/MediaPresentation';
 import { readDetails, cachePoster, cachedPoster, canReadDetails, rejectPosterUri } from './TraktDetails';
 import { readChinese, readChineseSeason } from './TraktProgress';
 interface TitlePatch { expectedPosterUri?: string; text?: TranslationText; translatedAt?: number; posterUrls?: string[]; posterUri?: string; collection?: CollectionMeta; }
@@ -86,6 +86,16 @@ export class PresentationRepository {
       this.titles.set(id,row); this.dirtyTitles.set(id,this.lightTitle(row)); this.version++;
     }
     return row;
+  }
+  taskValidUntil(task: PresentationTask,lane: string,now: number): number {
+    if (lane==='title') {
+      const row=this.titles.get(task.media.id);
+      if (row && (!row.text.title || !row.text.overview) && row.translatedAt>0) { return Math.max(now,row.translatedAt+TITLE_RETRY); }
+    } else if (lane==='season') {
+      const row=this.seasons.get(task.media.id+':'+task.season);
+      if (row) { return Math.max(now,row.fetchedAt+SEASON_RETRY); }
+    }
+    return Number.MAX_SAFE_INTEGER;
   }
   revision(): number { return this.version; }
   takeChanges(): PresentationChanges {

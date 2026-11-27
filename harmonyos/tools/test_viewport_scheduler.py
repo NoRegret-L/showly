@@ -63,7 +63,8 @@ const media=i=>({id:'show:'+i,title:'Show '+i,year:2026,kind:'show',watched:fals
     subprocess.run(["node","test.cjs"],cwd=work,check=True)
 page=(root/"pages/Index.ets").read_text()
 tasks=page.split("  private presentationTasks()",1)[1].split("  private cancelPresentationReads()",1)[0]
-assert "mergeViewportTasks(this.viewport,this.businessTasks())" in tasks
+assert "return this.viewport.rows()" in tasks
+assert "this.presentationQueues.lane(lane).update(visible,business,eligible,Date.now())" in page
 for old in ("this.visibleDiscover()","this.results","this.collectionSlice()","this.nextSlice()","this.movieProgressRows()","this.calendarSlice()","this.movieSlice()"):
     assert old not in tasks,old
 assert "this.businessPresentationTasks=tasks" in page

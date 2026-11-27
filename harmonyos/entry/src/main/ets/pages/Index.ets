@@ -1,7 +1,11 @@
+import { PageDisplayRows } from '../model/PageDisplayRows';
+import { ProgressTitleOrder } from '../model/ProgressTitleOrder';
+import { PresentationQueues, FramePublication } from '../model/PresentationQueue';
 import { ArtworkImage } from './ArtworkImage';
 import { MediaInputVersion } from '../model/MediaInputVersion';
 import { DetailSession, SeasonSummary, summarizeSeasons } from '../model/DetailSession';
-import { DetailEpisodeList, EpisodeDisplayRow } from './DetailEpisodeList';
+import { DetailEpisodeList } from './DetailEpisodeList';
+import { EpisodeRowsOwner, EpisodeDisplayRow } from '../model/EpisodeRowsOwner';
 import { ListDiffInput } from '../model/ListDiff';
 import { FrameCallback, LengthMetrics } from '@kit.ArkUI';
 import { ScrollRows, ScrollAnchor, ScrollAnchors, captureAnchor, resolveAnchor } from '../model/ScrollAnchor';
@@ -11,9 +15,9 @@ import { LazyRows } from '../model/LazyRows';
 import { DisplayRevisions, LatestDisplayJobs } from '../model/DisplayJobs';
 import { ProgressSortInput, MovieSortInput, CollectionSortInput } from '../model/DisplaySort';
 import { diffDisplay, showDisplay, movieDisplay, collectionDisplay } from '../data/DisplayTasks';
-import { ViewportTasks, addPresentationTask, mergeViewportTasks } from '../model/ViewportTasks';
+import { ViewportTasks, addPresentationTask } from '../model/ViewportTasks';
 import { CollectionCandidate, CollectionOptions, CollectionState, HiddenEntry, defaultCollection, emptyCollectionState, collectionMembers, recentCollection, recordCollectionDate, transitionCollectionDates, hideMedia } from '../model/CollectionRules';
-import { PresentationAttempts, PresentationFailure, runPresentationPass } from '../model/PresentationPolicy';
+import { PresentationAttempts, PresentationFailure, presentationFailure } from '../model/PresentationPolicy';
 import { presentationGate } from '../data/PresentationHttp';
 import { PresentationRepository } from '../data/PresentationRepository';
 import { TitlePresentation, SeasonPresentation, PresentationTask, matchesText } from '../model/MediaPresentation';
@@ -108,6 +112,10 @@ struct Index {
   @State languageBusy: boolean = false;
   private presentation?: PresentationRepository;
   private presentationLanes: Set<string> = new Set<string>();
+  private presentationQueues=new PresentationQueues();
+  private presentationFrame=new FramePublication();
+  private viewportFrame=new FramePublication();
+  private emptyBusinessTasks=new Map<string,PresentationTask>();
   private presentationAttempts: PresentationAttempts = new PresentationAttempts();
   private presentationWorkVersion: number = 0;
   private presentationEpoch: number = 0;
@@ -151,7 +159,8 @@ struct Index {
   private detailScroller: Scroller=new Scroller();
   private detailScrollOffset: number=0;
   @State episodePage: boolean=false;
-  @State episodeRows: EpisodeDisplayRow[]=[];
+  private episodeRowOwner=new EpisodeRowsOwner();
+  @State episodeRowCount: number=0;
   @State seasonSummaries: SeasonSummary[]=[];
   private discoverConsumer: ReadCancel=new ReadCancel();
   private searchLocalConsumer: ReadCancel=new ReadCancel();
@@ -171,11 +180,13 @@ struct Index {
   private showRatingVersion: number = 0;
   private viewport: ViewportTasks = new ViewportTasks();
   private viewportRouteKey: string = '';
-  private discoverRows: LazyRows<DiscoverItem[]> = new LazyRows<DiscoverItem[]>((row: DiscoverItem[])=>row.map((item: DiscoverItem)=>item.media.id));
-  private searchRows: LazyRows<Media> = new LazyRows<Media>((row: Media)=>[row.id]);
-  private calendarRows: LazyRows<CalendarEntry> = new LazyRows<CalendarEntry>((row: CalendarEntry)=>[row.media.id]);
-  private movieCalendarRows: LazyRows<MovieCalendarItem> = new LazyRows<MovieCalendarItem>((row: MovieCalendarItem)=>[row.movie.media.id]);
+  private discoverRows: PageDisplayRows<DiscoverItem[]> = new PageDisplayRows<DiscoverItem[]>((row: DiscoverItem[])=>row.map((item: DiscoverItem)=>item.media.id));
+  private searchRows: PageDisplayRows<Media> = new PageDisplayRows<Media>((row: Media)=>[row.id]);
+  private calendarRows: PageDisplayRows<CalendarEntry> = new PageDisplayRows<CalendarEntry>((row: CalendarEntry)=>[row.media.id]);
+  private movieCalendarRows: PageDisplayRows<MovieCalendarItem> = new PageDisplayRows<MovieCalendarItem>((row: MovieCalendarItem)=>[row.movie.media.id]);
   private libraryMemo: RevisionMemo<PersonalLibraryRow[]> = new RevisionMemo<PersonalLibraryRow[]>();
+  private progressTitleOrder=new ProgressTitleOrder();
+  private progressAllTitleOrder=new ProgressTitleOrder();
   private progressMemo: RevisionMemo<ProgressRow[]> = new RevisionMemo<ProgressRow[]>();
   private progressAllMemo: RevisionMemo<ProgressRow[]> = new RevisionMemo<ProgressRow[]>();
   private movieMemo: RevisionMemo<PersonalLibraryRow[]> = new RevisionMemo<PersonalLibraryRow[]>();
@@ -360,9 +371,9 @@ struct Index {
   private repairEpoch: number = 0;
   @State repairStatus: string = '';
   private lazyPending: boolean = false;
-  private showRows: LazyRows<ProgressEntry> = new LazyRows<ProgressEntry>((entry: ProgressEntry)=>entry.row?[entry.row.media.id]:[]);
-  private movieRowsSource: LazyRows<PersonalLibraryRow> = new LazyRows<PersonalLibraryRow>((row: PersonalLibraryRow)=>[row.media.id]);
-  private collectionRowsSource: LazyRows<CollectionGroup> = new LazyRows<CollectionGroup>((group: CollectionGroup)=>group.rows.map((row: PersonalLibraryRow)=>row.media.id));
+  private showRows: PageDisplayRows<ProgressEntry> = new PageDisplayRows<ProgressEntry>((entry: ProgressEntry)=>entry.row?[entry.row.media.id]:[]);
+  private movieRowsSource: PageDisplayRows<PersonalLibraryRow> = new PageDisplayRows<PersonalLibraryRow>((row: PersonalLibraryRow)=>[row.media.id]);
+  private collectionRowsSource: PageDisplayRows<CollectionGroup> = new PageDisplayRows<CollectionGroup>((group: CollectionGroup)=>group.rows.map((row: PersonalLibraryRow)=>row.media.id));
   @State @Watch('onCollectionStateChanged') collectionState: CollectionState = emptyCollectionState();
   @State collectionScope: string = '';
   @State @Watch('onCollectionViewChanged') collectionOptions: CollectionOptions = defaultCollection();
@@ -555,7 +566,7 @@ struct Index {
           this.requestRecovery();
           this.requestMediaRecovery();
           this.requestObservation();
-          this.presentationAttempts.retry();
+          this.presentationAttempts.retry(); this.presentationQueues.clear();
           this.requestPresentation();
         }
       });
@@ -955,7 +966,7 @@ struct Index {
     const uuid = this.cloudUuid;
     if (this.signedIn && !snapshot) {
       this.localSeries = undefined;
-      this.episodeRows=[]; this.seasonSummaries=[];
+      this.episodeRowOwner.clear(); this.episodeRowCount=0; this.seasonSummaries=[];
       this.effectiveEditable = false;
       this.localStatus = '正在等待账户验证；暂不读取本机私有记录。';
       return;
@@ -1117,14 +1128,16 @@ struct Index {
     return this.localSeries?.seasons.find((season: LocalSeasonState)=>season.number===this.localSeason);
   }
   private updateEpisodePageRows(): void {
-    if (!this.episodePage || !this.selectedMedia) { this.episodeRows=[]; return; }
+    if (!this.episodePage || !this.selectedMedia) { this.episodeRowOwner.clear(); this.episodeRowCount=0; return; }
     const item=this.selectedMedia;
     const season=this.currentSeason();
-    this.episodeRows=(season?.episodes??[]).map((entry: LocalEpisodeState): EpisodeDisplayRow=>({
-      id:entry.episode.id,number:entry.episode.number,watched:entry.watched,
+    const rows=(season?.episodes??[]).map((entry: LocalEpisodeState): EpisodeDisplayRow=>({
+      id:entry.episode.id,number:entry.episode.number,watched:entry.watched,originalTitle:entry.episode.title,
       title:this.displayEpisode(item,entry.episode.season,entry.episode.id,entry.episode.title)
     }));
+    this.episodeRowOwner.replace(this.episodeRowsScope(),rows); this.episodeRowCount=rows.length;
   }
+  private episodeRowsScope(): string { return JSON.stringify([this.currentSearchAccount(),this.selectedMedia?.id??'',this.localSeason,this.presentationLanguage]); }
   private openSeasonPage(season: number): void {
     if (!this.selectedMedia || !this.localSeries?.seasons.some((row: LocalSeasonState)=>row.number===season)) { return; }
     try { this.detailScrollOffset=this.detailScroller.currentOffset().yOffset; } catch (error) { this.detailScrollOffset=0; }
@@ -1134,7 +1147,7 @@ struct Index {
     this.requestPresentation();
   }
   private closeSeasonPage(): void {
-    this.episodePage=false; this.episodeRows=[];
+    this.episodePage=false; this.episodeRowOwner.clear(); this.episodeRowCount=0;
     const revision=this.detailRevision;
     const offset=this.detailScrollOffset;
     this.getUIContext().postFrameCallback(new RestoreScrollFrame(()=>{
@@ -1152,7 +1165,7 @@ struct Index {
   }
   @Builder
   episodeDetailPage(item: Media) {
-    DetailEpisodeList({rows:this.episodeRows,title:this.displayTitle(item),season:this.localSeason,
+    DetailEpisodeList({source:this.episodeRowOwner.source,count:this.episodeRowCount,title:this.displayTitle(item),season:this.localSeason,
       completed:this.currentSeason()?.completed??0,
       editable:this.effectiveEditable && !this.localCatalogNeedsVerification && !this.cloudBusy && !this.syncBusy,
       busy:this.localBusy,status:this.localStatus,onBack:()=>{this.closeSeasonPage();},
@@ -1228,10 +1241,12 @@ struct Index {
     const priorShowMeta=this.showMetaRevision,priorMovieMeta=this.movieMetaRevision;
     const priorEpisodes=this.episodeSearchRevision;
     const dirty=new Set<string>();
+    const episodeDirty=new Set<number>();
+    const sortDirty=new Set<string>();
     for (const row of changes.titles) {
       const prior = this.titleIndex.get(row.id);
       if ((prior?.text.title ?? '') !== row.text.title) {
-        this.titleSortRevision++;
+        this.titleSortRevision++; sortDirty.add(row.id);
         if (row.id.startsWith('movie:')) { this.movieTitleRevision++; } else { this.showTitleRevision++; }
       }
       if (JSON.stringify(prior?.collection ?? null) !== JSON.stringify(row.collection ?? null)) {
@@ -1248,20 +1263,32 @@ struct Index {
       for (const ep of row.episodes) {
         const key = seasonKey + ':' + ep.id;
         keys.add(key);
-        if ((this.episodeNameIndex.get(key) ?? '') !== ep.text.title) { this.episodeSearchRevision++; }
+        if ((this.episodeNameIndex.get(key) ?? '') !== ep.text.title) {
+          this.episodeSearchRevision++; sortDirty.add(row.showId);
+          if (row.showId===this.selectedMedia?.id && row.season===this.localSeason) { episodeDirty.add(ep.id); }
+        }
         this.episodeNameIndex.set(key,ep.text.title);
       }
       for (const key of previous) {
-        if (!keys.has(key)) { this.episodeNameIndex.delete(key); this.episodeSearchRevision++; }
+        if (!keys.has(key)) { this.episodeNameIndex.delete(key); this.episodeSearchRevision++; sortDirty.add(row.showId);
+          if (row.showId===this.selectedMedia?.id && row.season===this.localSeason) { episodeDirty.add(Number(key.substring(key.lastIndexOf(':')+1))); }
+        }
       }
       this.seasonKeys.set(seasonKey,Array.from(keys));
       dirty.add(row.showId);
     }
+    this.progressTitleOrder.dirty(Array.from(sortDirty)); this.progressAllTitleOrder.dirty(Array.from(sortDirty));
     // This state is only observed by the detail and the small recent-title header.
     if (this.selectedMedia) {
       if (changes.titles.some((row: TitlePresentation)=>row.id===this.selectedMedia?.id) ||
           dirty.has(this.selectedMedia.id)) { this.presentationRevision=revision; }
-      if (this.episodePage && changes.seasons.some((row: SeasonPresentation)=>row.showId===this.selectedMedia?.id && row.season===this.localSeason)) { this.updateEpisodePageRows(); }
+      if (this.episodePage && episodeDirty.size) {
+        const item=this.selectedMedia;
+        for (const id of episodeDirty) {
+          const title=this.presentationLanguage==='zh'?this.episodeNameIndex.get(item.id+':'+this.localSeason+':'+id)??'':'';
+          this.episodeRowOwner.updateTitle(this.episodeRowsScope(),id,title);
+        }
+      }
       return;
     }
     const titleChanged=this.presentationLanguage==='zh' && (this.mediaMode==='show'?priorShow!==this.showTitleRevision:priorMovie!==this.movieTitleRevision);
@@ -1273,7 +1300,7 @@ struct Index {
       (this.tab==='progress' && this.progressMode==='next' && ((titleChanged && (this.mediaMode==='show' || this.businessTitlesNeeded())) || (episodeChanged && this.mediaMode==='show' && !!this.nextQuery.trim()))) ||
       (this.tab==='progress' && this.progressMode==='calendar' && (this.mediaMode==='show' ?
         metaChanged || (!!this.calendarQuery.trim() && (titleChanged || episodeChanged)) : titleChanged && !!this.movieCalendarQuery.trim()));
-    if (structural || !this.refreshPresentationRows(Array.from(dirty))) { this.businessPresentationTasks=undefined; this.scheduleLazyRows(); }
+    if (structural || !this.refreshPresentationRows(Array.from(dirty))) { this.scheduleLazyRows(); }
   }
 
   private refreshPresentationRows(ids: string[]): boolean {
@@ -1496,7 +1523,7 @@ struct Index {
       this.presentationWorkVersion++; this.presentationEpoch++;
       this.presentation?.releaseTransient();
       this.episodeNameIndex.clear(); this.seasonKeys.clear(); this.episodeSearchRevision++;
-      this.presentationAttempts.retry();
+      this.presentationAttempts.retry(); this.presentationQueues.clear();
     }
     if (pressure || !this.pageVisible) { this.episodeStore?.releaseProjectionReadCache(); }
     if (pressure) {
@@ -1514,6 +1541,17 @@ struct Index {
     this.updateLazyRows();
   }
 
+  private activateDisplayOwner(scope:string):void {
+    switch(this.scrollSlot()) {
+      case 'discover': this.discoverRows.activate(scope); break;
+      case 'search': this.searchRows.activate(scope); break;
+      case 'show': this.showRows.activate(scope); break;
+      case 'movie': this.movieRowsSource.activate(scope); break;
+      case 'calendar': this.calendarRows.activate(scope); break;
+      case 'movieCalendar': this.movieCalendarRows.activate(scope); break;
+      case 'library': this.collectionRowsSource.activate(scope); break;
+    }
+  }
   private async updateLazyRows(): Promise<void> {
     await Promise.resolve();
     this.lazyPending = false;
@@ -1523,6 +1561,7 @@ struct Index {
     const differ=(input: ListDiffInput)=>diffDisplay(input,consumer);
     const scope = this.viewScope();
     const account = this.currentProgressScope();
+    this.activateDisplayOwner(JSON.stringify([account,scope]));
     const current = (): boolean => this.pageVisible && revision === this.lazyRevision && scope === this.viewScope() && account === this.currentProgressScope() && !this.selectedMedia;
     if (this.tab === 'discover') {
       const items = this.visibleDiscover();
@@ -1635,17 +1674,32 @@ struct Index {
   private calendarRowKey(row: CalendarEntry): string {
     return JSON.stringify([row.key,row.day,row.time,row.season,row.number,row.group,row.header,row.state,row.queued,row.synthetic,this.calendarProtect,this.artwork(row.media),this.displayTitle(row.media),this.calendarEpisodeTitle(row)]);
   }
-  private requestPresentation(): void {
+  private requestPresentation(invalidateBusiness:boolean=true): void {
     if (!this.pageVisible) { return; }
-    this.businessPresentationTasks=undefined;
+    if (invalidateBusiness) { this.businessPresentationTasks=undefined; }
     this.scheduleLazyRows();
     this.requestViewportPresentation();
   }
   private requestViewportPresentation(): void {
     if (!this.pageVisible || !this.presentation) { return; }
-    this.cancelInvisiblePresentationReads();
-    this.presentationWorkVersion++;
-    this.loadPresentation();
+    const token=this.viewportFrame.request();
+    if (token<0) { return; }
+    this.getUIContext().postFrameCallback(new RestoreScrollFrame(()=>{
+      if (!this.viewportFrame.consume(token) || !this.pageVisible || !this.presentation) { return; }
+      this.updatePresentationQueues();
+      this.requestPresentationPublication();
+      this.cancelInvisiblePresentationReads();
+      this.presentationWorkVersion++;
+      this.loadPresentation();
+    }));
+  }
+  private requestPresentationPublication(): void {
+    if (!this.pageVisible) { return; }
+    const token=this.presentationFrame.request();
+    if (token<0) { return; }
+    this.getUIContext().postFrameCallback(new RestoreScrollFrame(()=>{
+      if (this.presentationFrame.consume(token) && this.pageVisible) { this.publishPresentation(); }
+    }));
   }
 
   private addPresentationTask(tasks: Map<string,PresentationTask>, item: Media, artwork: boolean, season: number = 0,
@@ -1664,8 +1718,11 @@ struct Index {
       }
     } else if (this.tab==='progress' && !this.selectedMedia && this.progressMode==='next') {
       if (this.mediaMode==='show' && this.businessTitlesNeeded()) {
-        for (const row of this.progressData('')) {
-          this.addPresentationTask(tasks,row.media,false,this.nextQuery.trim()?row.episode.season:0);
+        const candidates=this.candidateMemo.get(this.progressBusinessKey(),Date.now())??[];
+        for (const row of candidates) {
+          if (this.nextFilter==='all'||this.nextFilter===row.group||(this.nextFilter==='both'&&(row.group==='upcoming'||row.group==='hold'))) {
+            this.addPresentationTask(tasks,row.media,false,this.nextQuery.trim()?row.episode.season:0);
+          }
         }
       } else if (this.mediaMode==='movie' && this.businessTitlesNeeded()) {
         for (const row of this.movieProgressRows('')) { this.addPresentationTask(tasks,row.media,false); }
@@ -1699,25 +1756,42 @@ struct Index {
           this.addPresentationTask(tasks,detail,false,episode.season);
         }
       }
-    } else {
-      // Ordinary scrolling enumerates only native visible entries, not the list.
-      return mergeViewportTasks(this.viewport,this.businessTasks());
-    }
+    } else { return this.viewport.rows(); }
     return Array.from(tasks.values());
   }
   private cancelPresentationReads(): void {
+    this.presentationQueues.clear(); this.viewportFrame.clear(); this.presentationFrame.clear();
     for (const consumer of this.presentationReaders.values()) { consumer.cancel(); }
     this.presentationReaders.clear(); this.presentationReaderTasks.clear();
     this.calendarHydrateConsumer.cancel(); this.calendarHydrateConsumer=new ReadCancel();
     this.calendarHydrationKey='';
   }
+  private updatePresentationQueues(): void {
+    const visible=this.presentationTasks();
+    const business=this.selectedMedia?this.emptyBusinessTasks:this.businessTasks();
+    const language=this.presentationLanguage;
+    const selected=!!this.selectedMedia;
+    const collection=this.tab==='library' && !selected;
+    for (const lane of ['local','title','season','artwork']) {
+      const eligible=(task: PresentationTask): boolean=>{
+        if (task.artwork && !this.selectedMedia && !this.viewport.has(task.media,task.season)) { return false; }
+        if (lane==='local') { return language==='zh' && task.season>0; }
+        if (lane==='title') { return language==='zh' && (task.artwork || selected || this.businessTitlesNeeded()); }
+        if (lane==='season') { return language==='zh' && task.season>0 && (task.artwork || selected || this.businessTitlesNeeded()); }
+        return task.artwork || (collection && this.collectionNeedsMetadata());
+      };
+      this.presentationQueues.lane(lane).update(visible,business,eligible,Date.now());
+    }
+  }
   private cancelInvisiblePresentationReads(): void {
-    if (this.selectedMedia) { return; }
     for (const lane of this.presentationReaderTasks.keys()) {
       const task=this.presentationReaderTasks.get(lane);
-      if (!task) { continue; }
+      if (!task || this.selectedMedia) { continue; }
       if (task.artwork && !this.viewport.has(task.media,task.season)) {
-        this.presentationReaders.get(lane)?.cancel();
+        // A title/season can remain required as business metadata.
+        if (lane==='artwork' || !this.businessTasks().has(ViewportTasks.key(task.media,task.season))) {
+          this.presentationReaders.get(lane)?.cancel();
+        }
       } else if (!task.artwork && !this.businessTasks().has(ViewportTasks.key(task.media,task.season))) {
         this.presentationReaders.get(lane)?.cancel();
       }
@@ -1728,60 +1802,65 @@ struct Index {
     if (this.presentationLanes.has(lane)) { return; }
     this.presentationLanes.add(lane);
     try {
-      let processed=-1;
-      while (this.pageVisible && this.presentation && processed!==this.presentationWorkVersion) {
+      while (this.pageVisible && this.presentation) {
         const repo=this.presentation;
-        processed=this.presentationWorkVersion;
-        const version=processed;
+        const queue=this.presentationQueues.lane(lane);
+        const row=queue.next();
+        if (!row) { break; }
+        const task=row.task;
         const epoch=this.presentationEpoch;
         const client=this.clientId;
         const language=this.presentationLanguage;
         const account=this.currentProgressScope();
         const route=this.viewScope();
-        const selected=this.selectedMedia?.id ?? '';
-        const collection=this.tab==='library' && !selected;
+        const collection=this.tab==='library' && !this.selectedMedia;
         const current=(): boolean=>this.pageVisible && this.presentation===repo && this.presentationEpoch===epoch &&
           this.clientId===client && this.presentationLanguage===language && account===this.currentProgressScope() && route===this.viewScope();
-        const relevant=(): boolean=>current() && version===this.presentationWorkVersion;
-        const tasks=this.presentationTasks();
-        const eligible=(task: PresentationTask): boolean=>{
-          if (task.artwork && !this.selectedMedia && !this.viewport.has(task.media,task.season)) { return false; }
-          if (lane==='local') { return language==='zh' && task.season>0; }
-          if (lane==='title') { return language==='zh' && (task.artwork || !!selected || this.businessTitlesNeeded()); }
-          if (lane==='season') { return language==='zh' && task.season>0 && (task.artwork || !!selected || this.businessTitlesNeeded()); }
-          return task.artwork || (collection && this.collectionNeedsMetadata());
-        };
-        await runPresentationPass(tasks,lane,this.presentationAttempts,JSON.stringify([client,language,account]),relevant,eligible,
-          async (task: PresentationTask): Promise<void>=>{
-            const consumer=new ReadCancel();
-            this.presentationReaders.set(lane,consumer); this.presentationReaderTasks.set(lane,task);
-            try {
+        const key=JSON.stringify([JSON.stringify([client,language,account]),lane,row.key]);
+        const generation=this.presentationAttempts.generation();
+        const consumer=new ReadCancel();
+        let success=false;
+        let until=Number.MAX_SAFE_INTEGER;
+        this.presentationReaders.set(lane,consumer); this.presentationReaderTasks.set(lane,task);
+        try {
+          if (!this.presentationAttempts.allowed(key,Date.now())) {
+            until=this.presentationAttempts.nextAttempt(key); success=true;
+          } else {
             if (lane==='local') { await repo.hydrateSeason(task.media,task.season,consumer); }
             else if (lane==='title') { await repo.translation(task.media,client,language,consumer); }
             else if (lane==='season') { await repo.season(task.media,task.season,client,language,consumer); }
             else {
-              // Publish local poster immediately, even if the remote summary
-              // is slow, unavailable or rate limited. Recheck before I/O.
               await repo.artwork(task.media,'',task.artwork,task.posterUrls,false,consumer);
-              if (current()) { this.publishPresentation(); }
-              if (current() && eligible(task) && !consumer.cancelled()) { await repo.artwork(task.media,client,task.artwork,task.posterUrls,collection,consumer); }
+              if (current()) { this.requestPresentationPublication(); }
+              if (current() && queue.relevant(row) && !consumer.cancelled()) { await repo.artwork(task.media,client,task.artwork,task.posterUrls,collection,consumer); }
             }
-            } finally {
-              if (this.presentationReaders.get(lane)===consumer) { this.presentationReaders.delete(lane); this.presentationReaderTasks.delete(lane); }
+            consumer.check();
+            success=current() && queue.relevant(row);
+            until=repo.taskValidUntil(task,lane,Date.now());
+          }
+        } catch (error) {
+          if (!(error instanceof ReadCancelled) && !consumer.cancelled()) {
+            const failure=presentationFailure(error as Error);
+            this.presentationAttempts.fail(key,failure,generation);
+            success=true; until=this.presentationAttempts.nextAttempt(key);
+            if (current()) {
+              if (failure.category==='limited') { this.presentationStatus='资料服务限流；遵守服务端重试时间，已缓存资料仍可用。'; }
+              else if (failure.category==='authorization') { this.presentationStatus='资料服务授权失败；请检查 Client ID 或图片来源。'; }
+              else if (failure.category!=='missing' && !this.presentationStatus) { this.presentationStatus='部分影视资料暂不可用；其他资料继续加载。'; }
             }
-          },
-          (): void=>{ if (current()) { this.publishPresentation(); } },
-          (error: PresentationFailure): void=>{
-            if (!current()) { return; }
-            if (error.category==='limited') { this.presentationStatus='资料服务限流；遵守服务端重试时间，已缓存资料仍可用。'; }
-            else if (error.category==='authorization') { this.presentationStatus='资料服务授权失败；请检查 Client ID 或图片来源。'; }
-            else if (error.category!=='missing' && !this.presentationStatus) { this.presentationStatus='部分影视资料暂不可用；其他资料继续加载。'; }
-          });
-        // A completed public read can be cached even after its consumer left.
-        // Only the active page may publish it; the next pass adopts the new scope.
-        if (current()) { this.publishPresentation(); }
+          }
+        } finally {
+          if (this.presentationReaders.get(lane)===consumer) { this.presentationReaders.delete(lane); this.presentationReaderTasks.delete(lane); }
+          queue.finish(row,success,until);
+        }
+        if (current()) { this.requestPresentationPublication(); }
+        if (!current()) { break; }
       }
-    } finally { this.presentationLanes.delete(lane); }
+    } finally {
+      this.presentationLanes.delete(lane);
+      // A scope reset may have queued new work while the old flight was unwinding.
+      if (this.pageVisible && this.presentationQueues.lane(lane).hasPending()) { this.presentationLane(lane); }
+    }
   }
 
   private async loadPresentation(): Promise<void> {
@@ -1800,7 +1879,9 @@ struct Index {
     try {
       await this.settings.saveLanguage(language);
       this.presentationLanguage = language;
+      this.updateEpisodePageRows();
       this.presentationEpoch++;
+      this.presentationQueues.clear();
         this.presentationStatus = '';
       this.nextPage = 1;
       this.collectionPage = 1;
@@ -1818,7 +1899,7 @@ struct Index {
       const retry=await repo.repairArtwork(item,uri);
       if (this.presentation!==repo || !this.pageVisible) { return; }
       this.publishPresentation();
-      if (retry) { this.requestViewportPresentation(); }
+      if (retry) { this.presentationQueues.lane('artwork').invalidateMedia(item.id); this.requestViewportPresentation(); }
     } catch (error) {}
   }
 
@@ -2990,7 +3071,7 @@ struct Index {
     this.cloudLocalAllowed = false;
     this.detailSession.clear(); this.detailConsumer=this.detailSession.consumer();
     this.detailRevision++; this.detailResumePending=!!this.selectedMedia;
-    this.episodeRows=[]; this.seasonSummaries=[];
+    this.episodeRowOwner.clear(); this.episodeRowCount=0; this.seasonSummaries=[];
     this.localSeries = undefined;
     this.effectiveEditable = false;
     this.nextShows = [];
@@ -4251,6 +4332,10 @@ struct Index {
     return JSON.stringify([this.displayRevisions.show,this.candidateScope(),
       this.progressFlagScope,this.flagVersion('show'),this.hiddenVersion('show'),prefs.strategy,prefs.count,prefs.days,prefs.newAtTop]);
   }
+  private progressTitleScope(query:string):string {
+    return JSON.stringify([this.progressBusinessKey(),this.presentationLanguage,this.progressPrefs.sort,this.progressPrefs.descending,this.nextFilter,query,
+      this.progressPrefs.sort==='userRating'?this.showRatingVersion:0,this.progressPrefs.sort==='userRating'?this.currentShowRatingKey():'']);
+  }
   private progressSortKey(query: string): string {
     return JSON.stringify([this.progressBusinessKey(),this.presentationLanguage,this.presentationLanguage==='zh' ? this.titleVersion('show') : 0,
       query ? this.episodeSearchRevision : 0,this.progressPrefs.sort,this.progressPrefs.descending,this.nextFilter,query,
@@ -4282,6 +4367,7 @@ struct Index {
   }
   private clearProgressCandidates(): void {
     this.cancelCandidateWake(); this.candidateIndex.clear(); this.candidateMemo.clear();
+    this.progressTitleOrder.clear(); this.progressAllTitleOrder.clear();
     this.progressMemo.clear(); this.progressAllMemo.clear(); this.candidateFailureKey='';
   }
   private retainProgressCandidates(rows: NextShow[]): void {
@@ -4356,9 +4442,13 @@ struct Index {
     if (!candidates) { this.prepareProgressCandidates(businessKey,now); return []; }
     this.scheduleCandidateWake(this.candidateExpiry);
     const ratings=this.progressPrefs.sort==='userRating' ? this.showRatingIndex() : new Map<string,number>();
+    const index=query?this.progressTitleOrder:this.progressAllTitleOrder;
+    const delta=index.update(candidates,this.progressTitleScope(query),now,this.progressPrefs,this.nextFilter,query,
+      (row:ProgressRow)=>this.localizedProgress(row,ratings));
+    if (delta!==undefined) { memo.put(key,delta,now,this.candidateExpiry); return delta; }
     const localized=candidates.map((row: ProgressRow): ProgressRow=>this.localizedProgress(row,ratings));
     const input: ProgressSortInput={rows:localized,prefs:this.progressPrefs,filter:this.nextFilter,query:query};
-    this.runShowSort(input,key,now,this.candidateExpiry);
+    this.runShowSort(input,key,now,this.candidateExpiry,candidates);
     return [];
   }
   private validateNextTarget(row: ProgressRow): boolean {
@@ -4374,7 +4464,7 @@ struct Index {
     // in markNext remain authoritative and are not replaced by this check.
     return sortProgressCandidates([this.localizedProgress(candidate,new Map<string,number>())],this.progressPrefs,this.nextFilter,this.nextQuery).length===1;
   }
-  private async runShowSort(input: ProgressSortInput, key: string, now: number, expiry: number): Promise<void> {
+  private async runShowSort(input: ProgressSortInput, key: string, now: number, expiry: number,candidates:ProgressRow[]): Promise<void> {
     const slot = input.query ? 'show-query' : 'show-all';
     const epoch = this.presentationEpoch;
     const token = this.sortJobs.begin(slot,JSON.stringify([epoch,key]));
@@ -4387,9 +4477,10 @@ struct Index {
           Date.now() < now || Date.now() >= expiry) { return; }
       const memo = input.query ? this.progressMemo : this.progressAllMemo;
       memo.put(key,rows,now,expiry);
+      (input.query?this.progressTitleOrder:this.progressAllTitleOrder).seed(candidates,this.progressTitleScope(input.query),now,expiry,rows);
     } catch (error) { if (!(error instanceof ReadCancelled)) { throw new Error((error as Error).message); } }
     finally {
-      if (this.sortJobs.finish(slot,token) && this.pageVisible) { this.sortedViewRevision++; this.requestPresentation(); }
+      if (this.sortJobs.finish(slot,token) && this.pageVisible) { this.sortedViewRevision++; this.requestPresentation(false); }
     }
   }
   private nextFiltered(): ProgressRow[] { return this.progressData(this.nextQuery); }
@@ -5361,7 +5452,7 @@ struct Index {
       this.movieRatingRows = [];
     }
     this.presentation?.retryArtwork();
-    this.presentationAttempts.retry();
+    this.presentationAttempts.retry(); this.presentationQueues.clear();
     presentationGate.manualProbe();
     this.presentationStatus = '';
     try {
@@ -5965,7 +6056,7 @@ struct Index {
   private async translateDetail(item: Media): Promise<void> {
     if (this.selectedMedia?.id !== item.id) { return; }
     this.presentation?.retryArtwork();
-    this.presentationAttempts.retry();
+    this.presentationAttempts.retry(); this.presentationQueues.clear();
     presentationGate.manualProbe();
     this.presentationStatus = '';
     this.requestPresentation();
@@ -6013,7 +6104,7 @@ struct Index {
     this.detailRevision++; this.detailBusy=false;
     this.effectiveEditable=false;
     this.localSeries=undefined; this.fullSchedule=undefined;
-    this.episodeRows=[]; this.seasonSummaries=[];
+    this.episodeRowOwner.clear(); this.episodeRowCount=0; this.seasonSummaries=[];
     this.progress=undefined; this.progressBusy=false;
   }
   private resumeDetail(): void {
@@ -6027,7 +6118,7 @@ struct Index {
   private closeDetail(): void {
     this.detailSession.clear(); this.detailConsumer=this.detailSession.consumer();
     this.detailResumePending=false;
-    this.episodePage=false; this.episodeRows=[]; this.seasonSummaries=[];
+    this.episodePage=false; this.episodeRowOwner.clear(); this.episodeRowCount=0; this.seasonSummaries=[];
     this.detailScrollOffset=0;
     this.detailBusy=false;
     this.detailRevision++;

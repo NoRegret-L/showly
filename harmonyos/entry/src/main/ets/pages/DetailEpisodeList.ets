@@ -1,10 +1,10 @@
 import { LazyRows } from '../model/LazyRows';
-export interface EpisodeDisplayRow { id: number; number: number; title: string; watched: boolean; }
+import { EpisodeDisplayRow } from '../model/EpisodeRowsOwner';
 // Only the current season is supplied to the native list. Confirmation and
 // data-source ownership belong to this child, not to the global screen.
 @Component
 export struct DetailEpisodeList {
-  @Prop @Watch('updateRows') rows: EpisodeDisplayRow[]=[];
+  @Prop count: number=0;
   @Prop title: string='';
   @Prop season: number=0;
   @Prop completed: number=0;
@@ -13,26 +13,20 @@ export struct DetailEpisodeList {
   @Prop status: string='';
   @State confirming: boolean=false;
   @State confirmWatched: boolean=true;
-  private source: LazyRows<EpisodeDisplayRow>=new LazyRows<EpisodeDisplayRow>();
+  source: LazyRows<EpisodeDisplayRow>=new LazyRows<EpisodeDisplayRow>();
   onBack: ()=>void=()=>{};
   onToggle: (id: number,watched: boolean)=>void=()=>{};
   onMarkSeason: (watched: boolean)=>void=()=>{};
-  aboutToAppear(): void { this.updateRows(); }
-  aboutToDisappear(): void { this.source.replace([],[],[]); }
-  private updateRows(): void {
-    this.source.replace(this.rows,this.rows.map((row: EpisodeDisplayRow)=>row.id.toString()),
-      this.rows.map((row: EpisodeDisplayRow)=>JSON.stringify([row.number,row.title,row.watched])));
-  }
   build() {
     List({ space: 8 }) {
       ListItem() {
         Column({ space: 8 }) {
           Button('返回详情').onClick(()=>{ this.onBack(); })
           Text(this.title+' · 第 '+this.season+' 季').fontSize(22).fontWeight(FontWeight.Bold).width('100%')
-          Text('已看 '+this.completed+' / '+this.rows.length+' 集').fontSize(14).width('100%')
+          Text('已看 '+this.completed+' / '+this.count+' 集').fontSize(14).width('100%')
           if (this.status) { Text(this.status).fontSize(12).width('100%') }
           Row({ space: 8 }) {
-            Button('整季已看').layoutWeight(1).enabled(this.editable && !this.busy && this.completed<this.rows.length)
+            Button('整季已看').layoutWeight(1).enabled(this.editable && !this.busy && this.completed<this.count)
               .onClick(()=>{ this.confirmWatched=true; this.confirming=true; })
             Button('整季撤销').layoutWeight(1).enabled(this.editable && !this.busy && this.completed>0)
               .onClick(()=>{ this.confirmWatched=false; this.confirming=true; })

@@ -64,6 +64,10 @@ export class PresentationAttempts {
     if (error.category==='limited' && now>=error.retryAt) { this.failures.delete(key); return true; }
     return false;
   }
+  nextAttempt(key: string): number {
+    const error=this.failures.get(key);
+    return error?.category==='limited'?error.retryAt:Number.MAX_SAFE_INTEGER;
+  }
   fail(key: string,error: PresentationFailure,generation: number): void {
     if (generation===this.epoch) { this.failures.set(key,error); }
   }
