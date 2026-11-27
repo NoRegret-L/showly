@@ -145,6 +145,14 @@ const order=x=>({states:x.states.slice().sort((a,b)=>a.catalog.showId.localeComp
    assert.equal(next.states.find(x=>x.catalog.showId==='show:2'),first.states.find(x=>x.catalog.showId==='show:2'));
    assert.equal(nextSchedules.get('show:2'),schedules.get('show:2'));
    assert.deepEqual(next.states.find(x=>x.catalog.showId==='show:1').watchedIds,[]);
+   h.resetCounts();
+   const scoped=await h.projectionReadInputs('account-A',new Set(['show:1']));
+   assert.equal(scoped.states.length,1);assert.equal(scoped.intents.length,1);
+   assert.deepEqual(scoped.states[0],next.states.find(x=>x.catalog.showId==='show:1'));
+   const scopedSchedules=await h.projectionReadCatalogs(new Set(['show:1']),true);
+   assert.equal(scopedSchedules.size,1);
+   assert.equal((await h.projectionReadCatalogs(ids)).get('show:2'),schedules.get('show:2'));
+   assert.deepEqual([h.catalogRows,h.eventRows,h.scheduleRows],[0,0,0]);
    assert.deepEqual(order(next),order(await h.projectionLocalInputs('account-A')));
    console.log(f.n+' shows: hot 0 catalog/event/schedule rows and 0 parses; single edit 1 catalog + 2 events + 1 schedule row, 3 parses; full parity passed');
   }finally{JSON.parse=oldParse;}
@@ -191,3 +199,8 @@ assert "this.episodeStore?.releaseProjectionReadCache()" in page
 assert "await store.saveReadCheckpoints(account.uuid, result.matches)" in page
 assert "await readSyncAccount(session)" in page and "await readActivity(session)" in page
 print("Production incremental projection, authoritative fallback, unchanged sync write and verification paths passed")
+
+assert "store.projectionReadInputs(bound,scope.ids)" in lib and "store.projectionReadCatalogs(targetIds,true)" in lib
+assert "store.acknowledgeLibrary(revision)" in lib and "this.libraryProjectionSession.read(" in page
+assert "hiTraceMeter.startTrace(" in lib and "hiTraceMeter.finishTrace(" in lib
+assert "workerInputBytes=utf8ProjectionBytes(payload)" in lib
