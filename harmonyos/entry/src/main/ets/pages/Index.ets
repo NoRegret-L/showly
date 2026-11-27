@@ -3862,7 +3862,7 @@ struct Index {
 
   @Builder
   discoverView() {
-    List({space:12,scroller:this.discoverScroller}) {
+    List({ space: 12, scroller: this.discoverScroller }) {
       ListItem() {
         Column({ space: 12 }) {
           if (this.presentationStatus) { Text(this.presentationStatus).fontSize(12).width('100%') }
@@ -4684,7 +4684,7 @@ struct Index {
 
   @Builder
   nextShowsView() {
-    List({space:10,scroller:this.showScroller}) {
+    List({ space: 10, scroller: this.showScroller }) {
       ListItem() {
         Column({ space: 10 }) {
           this.progressHeader()
@@ -4804,7 +4804,7 @@ struct Index {
 
   @Builder
   personalMovieCalendarView() {
-    List({space:10,scroller:this.movieCalendarScroller}) {
+    List({ space: 10, scroller: this.movieCalendarScroller }) {
       ListItem() {
         Column({ space: 10 }) {
           this.progressHeader()
@@ -4872,7 +4872,7 @@ struct Index {
 
   @Builder
   calendarView() {
-    List({space:10,scroller:this.calendarScroller}) {
+    List({ space: 10, scroller: this.calendarScroller }) {
       ListItem() {
         Column({space:10}) {
           this.progressHeader()
@@ -5032,7 +5032,7 @@ struct Index {
 
   @Builder
   movieProgressView() {
-    List({space:10,scroller:this.movieScroller}) {
+    List({ space: 10, scroller: this.movieScroller }) {
       ListItem() {
         Column({ space: 10 }) {
           this.progressHeader()
@@ -5564,7 +5564,7 @@ struct Index {
 
   @Builder
   collectionView() {
-    List({space:12,scroller:this.collectionScroller}) {
+    List({ space: 12, scroller: this.collectionScroller }) {
       ListItem() {
         Column({ space: 12 }) {
           if (this.presentationStatus) { Text(this.presentationStatus).fontSize(12).width('100%') }
@@ -6135,7 +6135,7 @@ struct Index {
 
   @Builder
   searchView() {
-    List({space:10,scroller:this.searchScroller}) {
+    List({ space: 10, scroller: this.searchScroller }) {
       ListItem() {
         Column({ space: 12 }) {
           if (this.presentationStatus) { Text(this.presentationStatus).fontSize(12).width('100%') }
