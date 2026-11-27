@@ -20,6 +20,7 @@ const build=(id)=> {
  const episodes=[{id:id*10+1,season:1,number:1,title:'One',firstAired:new Date(now-day).toISOString()},
  {id:id*10+2,season:1,number:2,title:'Two',firstAired:new Date(now+day).toISOString()}];
  const full={media,status:'returning series',fetchedAt:now,seasons:[{number:1,firstAired:episodes[0].firstAired,episodes}]};
+ if(id%2===0) full.rating=8.5;
  const remote={id:media.id,title:media.title,watchedEpisodes:1,positions:[{season:1,number:1,plays:1,lastWatchedAt:new Date(now-day).toISOString()}],updatedAt:new Date(now).toISOString()};
  return {full,remote,cloudActive:true,localIds:[],decisions:[],timed:[],checkpoints:[],common:[],now};
 };
@@ -34,7 +35,7 @@ if(process.argv[2]==='write'){
  assert.equal(disk.size,393);
  let hits=0, computed=0;
  const read=(input)=>{const row=p.readPersistedShow(disk.get(input.full.media.id),input,p.showProjectionKey(input));if(row){hits++;return row}computed++;return p.computeProjection(input)};
- for(const input of shows){const old=p.computeProjection(input), value=read(input);assert.deepEqual({...value.source,randomOrder:0},{...old.source,randomOrder:0});assert.deepEqual(value.effective,old.effective);assert.deepEqual(value.sections,old.sections)}
+ for(const input of shows){const old=p.computeProjection(input), value=read(input);assert.deepEqual({...value.source,randomOrder:0},JSON.parse(JSON.stringify({...old.source,randomOrder:0})));assert.equal(value.source.rating,input.full.rating);assert.deepEqual(value.effective,old.effective);assert.deepEqual(value.sections,old.sections)}
  assert.equal(hits,393);assert.equal(computed,0);
  const changed={...shows[0],remote:{...shows[0].remote,positions:[],watchedEpisodes:0}};
  read(changed);shows.slice(1).forEach(read);assert.equal(computed,1);
