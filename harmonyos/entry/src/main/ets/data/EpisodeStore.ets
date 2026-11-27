@@ -202,6 +202,8 @@ export function materializeEffective(catalog: EpisodeCatalog, ids: number[]): Lo
 
 export class EpisodeStore {
   private db: relationalStore.RdbStore;
+  private projectionRevision: number = 0;
+  readModelRevision(): number { return this.projectionRevision; }
   constructor(db: relationalStore.RdbStore) { this.db = db; }
 
   static async open(context: common.UIAbilityContext): Promise<EpisodeStore> {
@@ -260,6 +262,7 @@ export class EpisodeStore {
   }
 
   async saveCommonStates(uuid: string, domain: string, activity: string, updates: CommonUpdate[]): Promise<number> {
+    this.projectionRevision++;
     if (typeof activity !== 'string' || !activity) { throw new Error('Missing baseline revision'); }
     const entries = await this.commonStates(uuid, domain);
     const seen: Set<string> = new Set<string>();
@@ -281,6 +284,7 @@ export class EpisodeStore {
   }
 
   async adoptRemote(uuid: string, episodeId: number, expectedSeq: number, value: boolean, activity: string): Promise<void> {
+    this.projectionRevision++;
     if (await this.boundAccount() !== uuid) { throw new Error('Account mismatch'); }
     const intent = (await this.journalIntents()).find((row: JournalIntent) => row.episodeId === episodeId);
     if (!intent || !intent.catalogKnown || intent.seq !== expectedSeq || intent.watched === value) {
@@ -323,6 +327,7 @@ export class EpisodeStore {
   // Public schedule only: no eligible-catalog replacement, restore verification,
   // journal event, account binding, receipt or upload consent.
   async saveObservedSchedule(full: FullEpisodeCatalog): Promise<void> {
+    this.projectionRevision++;
     validateFullCatalog(full, full.media.id);
     const old = await this.fullCatalog(full.media.id);
     if (old && scheduleEpisodes(old).length > 0 && scheduleEpisodes(full).length === 0) {
@@ -370,6 +375,7 @@ export class EpisodeStore {
   // Read projection acknowledgements are NOT sync_common_state and are
   // never consumed by upload, removal, or queue eligibility.
   async saveReadCheckpoints(uuid: string, updates: ReadCheckpoint[]): Promise<void> {
+    this.projectionRevision++;
     if (!updates.length) { return; }
     const entries = await this.readCheckpoints(uuid);
     for (const update of updates) {
@@ -384,6 +390,7 @@ export class EpisodeStore {
   }
 
   async saveFullCatalog(full: FullEpisodeCatalog): Promise<void> {
+    this.projectionRevision++;
     const catalog = eligibleCatalog(full, full.fetchedAt);
     // Both projections commit together. Keep every journal, receipt and
     // baseline untouched; never make a future/unknown episode eligible.
@@ -400,6 +407,7 @@ export class EpisodeStore {
   }
 
   async saveCatalog(catalog: EpisodeCatalog): Promise<void> {
+    this.projectionRevision++;
     validateCatalog(catalog, catalog.showId);
     // Refuse an unexpectedly empty refresh of an existing nonempty catalog.
     const old = await this.catalog(catalog.showId);
@@ -436,6 +444,7 @@ export class EpisodeStore {
   }
 
   async mark(showId: string, ids: number[], watched: boolean, autoUuid: string = ''): Promise<void> {
+    this.projectionRevision++;
     const catalog = await this.catalog(showId);
     if (!catalog || ids.length === 0) { throw new Error('Missing episode catalog'); }
     if (await this.needsCatalogVerification(showId)) { throw new Error('Restored catalog must be refreshed'); }
@@ -460,6 +469,7 @@ export class EpisodeStore {
 
   // One explicit, durable binding; never silently replace an existing account.
   async bindAccount(uuid: string): Promise<void> {
+    this.projectionRevision++;
     if (!uuid || uuid.trim() !== uuid) { throw new Error('Invalid account'); }
     await this.db.executeSql('INSERT OR IGNORE INTO sync_binding(slot,account_uuid) VALUES(1,?)', [uuid]);
     if (await this.boundAccount() !== uuid) { throw new Error('Account binding mismatch'); }
@@ -599,6 +609,7 @@ export class EpisodeStore {
 
   // Add-only baseline. Never append cloud data to explicit local intent events.
   async importCloudBaseline(uuid: string, ids: number[]): Promise<number> {
+    this.projectionRevision++;
     if (await this.boundAccount() !== uuid || ids.some((id: number) => !validId(id))) {
       throw new Error('Invalid baseline identity');
     }
@@ -719,6 +730,7 @@ export class EpisodeStore {
   }
 
   async restoreMissingShows(states: EpisodeBackupState[]): Promise<number> {
+    this.projectionRevision++;
     const missing = await this.missingBackupShows(states);
     if (!missing.length) { return 0; }
     // All episode additions are one transaction; no events, guards, receipts,

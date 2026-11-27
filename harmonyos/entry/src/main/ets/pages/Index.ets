@@ -1,6 +1,6 @@
 import { common } from '@kit.AbilityKit';
 import { PresentationRepository } from '../data/PresentationRepository';
-import { TitlePresentation, SeasonPresentation, PresentationTask, localizedTitle, localizedEpisode, matchesText } from '../model/MediaPresentation';
+import { TitlePresentation, SeasonPresentation, PresentationTask, matchesText } from '../model/MediaPresentation';
 import { Media, mediaLabel, setWatched } from '../model/Media';
 import { LibraryStore } from '../data/LibraryStore';
 import { MediaStore } from '../data/MediaStore';
@@ -14,6 +14,8 @@ import { syncSelectedMedia, reconcilePendingMedia } from '../data/TraktMediaSync
 import { checkpointEpisodes, checkpointMedia, adoptEpisodeCloud, adoptMediaCloud } from '../data/ThreeWaySync';
 import { threeWayLabel } from '../model/ThreeWay';
 import { NextShow } from '../data/NextShows';
+import { RevisionMemo, projectionKey, progressExpiry } from '../model/ReadModelCache';
+import { ShowProjectionCache } from '../model/ProjectionCompute';
 import { MovieProgressOptions, MovieProgressSource, defaultMovieProgress, validMovieProgress, movieProgressRows as projectMovieProgress, clearMoviePin } from '../model/MovieProgressRules';
 import { ProgressSource, ProgressPreferences, ProgressFlag, ProgressRow, defaultProgress, validProgress, toggleProgressFlag, progressRows, ProgressEntry, progressSections, progressEntries, progressPage, effectiveProgressFilter } from '../model/ProgressRules';
 import { CalendarSnapshot, CalendarEntry, readCalendar, calendarWindow, localDay } from '../data/TraktCalendar';
@@ -25,7 +27,7 @@ import { ClientSettings, validateClientId } from '../data/ClientSettings';
 import { pasteboard } from '@kit.BasicServicesKit';
 import { traktAuth } from '../data/TraktAuth';
 import { CloudLibrary, ShowProgress, readCloudLibrary, mergeNewTitles, readActivity } from '../data/TraktLibrary';
-import { projectLibrary, projectDetail } from '../data/LibraryProjection';
+import { LibraryProjection, projectLibrary, projectDetail } from '../data/LibraryProjection';
 import { allowLocalScope } from '../model/EffectiveState';
 import { hasTrackingEvidence } from '../model/PersonalLibrary';
 import { CollectionGroup, GroupEntry, normalizeMode, progressTabs, collectionRows, collectionGroups, groupEntries, pageGroups } from '../model/NavigationModel';
@@ -62,6 +64,16 @@ struct Index {
   private presentationEpoch: number = 0;
   private presentationRoute: string = '';
   private presentationPublished: number = -1;
+  private titleIndex: Map<string, TitlePresentation> = new Map<string, TitlePresentation>();
+  private episodeNameIndex: Map<string, string> = new Map<string, string>();
+  private libraryRevision: number = 0;
+  private listRevision: number = 0;
+  private libraryMemo: RevisionMemo<PersonalLibraryRow[]> = new RevisionMemo<PersonalLibraryRow[]>();
+  private collectionMemo: RevisionMemo<GroupEntry[]> = new RevisionMemo<GroupEntry[]>();
+  private progressMemo: RevisionMemo<ProgressRow[]> = new RevisionMemo<ProgressRow[]>();
+  private progressAllMemo: RevisionMemo<ProgressRow[]> = new RevisionMemo<ProgressRow[]>();
+  private movieMemo: RevisionMemo<PersonalLibraryRow[]> = new RevisionMemo<PersonalLibraryRow[]>();
+  private movieAllMemo: RevisionMemo<PersonalLibraryRow[]> = new RevisionMemo<PersonalLibraryRow[]>();
   @State updateBusy: boolean = false;
   @State updateStatus: string = '';
   @State availableUpdate?: UpdateInfo = undefined;
@@ -73,7 +85,7 @@ struct Index {
   @State modeStatus: string = '';
   private returnTab: string = 'progress';
   @State @Watch('onPresentationChanged') movieProgressQuery: string = '';
-  @State @Watch('onPresentationChanged') movieProgressOptions: MovieProgressOptions = defaultMovieProgress();
+  @State @Watch('onListInputChanged') movieProgressOptions: MovieProgressOptions = defaultMovieProgress();
   @State movieRandomSeed: number = Date.now();
   @State @Watch('onPresentationChanged') movieProgressPage: number = 1;
   @State @Watch('onPresentationChanged') collectionQuery: string = '';
@@ -124,10 +136,10 @@ struct Index {
   @State localStatus: string = '';
   @State localRecent: Media[] = [];
   @State @Watch('onPresentationChanged') progressMode: string = 'next';
-  @State @Watch('onPresentationChanged') nextShows: NextShow[] = [];
+  @State @Watch('onListInputChanged') nextShows: NextShow[] = [];
   @State nextStatus: string = '';
-  @State @Watch('onPresentationChanged') progressPrefs: ProgressPreferences = defaultProgress();
-  @State @Watch('onPresentationChanged') progressFlags: ProgressFlag[] = [];
+  @State @Watch('onListInputChanged') progressPrefs: ProgressPreferences = defaultProgress();
+  @State @Watch('onListInputChanged') progressFlags: ProgressFlag[] = [];
   @State progressFlagScope: string = '';
   @State progressPrefsBusy: boolean = false;
   @State progressOptions: boolean = false;
@@ -143,7 +155,7 @@ struct Index {
   @State calendarBusy: boolean = false;
   @State calendarStatus: string = '';
   @State @Watch('onPresentationChanged') calendarData?: CalendarSnapshot = undefined;
-  @State @Watch('onPresentationChanged') movieCalendarData?: PersonalMovieSnapshot = undefined;
+  @State @Watch('onListInputChanged') movieCalendarData?: PersonalMovieSnapshot = undefined;
   @State @Watch('onPresentationChanged') movieCalendarMode: string = 'future';
   @State @Watch('onPresentationChanged') movieCalendarQuery: string = '';
   private calendarRevision: number = 0;
@@ -199,13 +211,20 @@ struct Index {
   @State @Watch('onRecoveryGateChanged') setupBusy: boolean = false;
   @State settingsReady: boolean = false;
   @State setupStatus: string = '';
-  @State @Watch('onPresentationChanged') cloud?: CloudLibrary = undefined;
-  @State @Watch('onPresentationChanged') libraryEvidence: LibraryShowEvidence[] = [];
+  @State @Watch('onLibraryInputChanged') cloud?: CloudLibrary = undefined;
+  @State @Watch('onLibraryInputChanged') libraryEvidence: LibraryShowEvidence[] = [];
   private cloudUuid: string = '';
   private cloudFresh: boolean = false;
-  @State cloudLocalAllowed: boolean = false;
+  @State @Watch('onLibraryInputChanged') cloudLocalAllowed: boolean = false;
   @State effectiveEditable: boolean = false;
   private observationPending: boolean = false;
+  private startupScheduled: boolean = false;
+  private projectionMemo: RevisionMemo<LibraryProjection> = new RevisionMemo<LibraryProjection>();
+  private showProjectionCache: ShowProjectionCache = new ShowProjectionCache();
+  private projectionRuns: number = 0;
+  private projectionHits: number = 0;
+  private startupAt: number = Date.now();
+  @State performanceStatus: string = '等待首次个人库计算';
   private projectionPending: boolean = false;
   @State @Watch('onRecoveryGateChanged') cloudBusy: boolean = false;
   @State cloudStatus: string = '';
@@ -223,7 +242,7 @@ struct Index {
   @State libraryStatus: string = '';
   @State searchStatus: string = '';
   private mediaStore?: MediaStore;
-  @State @Watch('onPresentationChanged') mediaRecords: MediaRecord[] = [];
+  @State @Watch('onLibraryInputChanged') mediaRecords: MediaRecord[] = [];
   @State migrationStatus: string = '';
   @State mediaPreview?: MediaPreview = undefined;
   @State mediaPreviewStatus: string = '';
@@ -277,7 +296,10 @@ struct Index {
     this.startNetworkListener();
     if (this.backupBusy) { return; }
     this.requestMediaRecovery();
-    this.requestObservation();
+    const initialized = this.startupScheduled;
+    this.requestObservation(true);
+    this.scheduleInitialRead();
+    if (initialized && !this.signedIn) { this.requestProjection(); }
     if (this.autoActive()) { this.requestRecovery(); }
     else if (this.clientId && !this.setupBusy && !this.cloudBusy && !this.syncBusy) {
       traktAuth.restore(this.clientId);
@@ -368,6 +390,10 @@ struct Index {
   // A busy auth/DB/sync operation no longer drops the network-resume event.
   // Coalesce to a single pending event, not a periodic retry loop.
   private onObservationAuthChanged(): void {
+    this.projectionMemo.clear();
+    this.showProjectionCache.clear();
+    this.libraryRevision++;
+    this.listRevision++;
     this.presentationEpoch++;
     this.presentationBlocked = false;
     this.progressFlags = [];
@@ -396,8 +422,15 @@ struct Index {
     this.requestObservation();
   }
 
-  private requestObservation(): void {
-    if (!this.pageVisible || !this.signedIn || !this.clientId) { return; }
+  private scheduleInitialRead(): void {
+    if (this.startupScheduled || !this.ready || !this.episodeReady || !this.pageVisible) { return; }
+    this.startupScheduled = true;
+    if (this.signedIn) { this.requestObservation(true); }
+    else { this.requestProjection(); }
+  }
+
+  private requestObservation(passive: boolean = false): void {
+    if (!this.pageVisible || !this.signedIn || !this.clientId || (passive && this.cloudBusy)) { return; }
     this.observationPending = true;
     this.onRecoveryGateChanged();
   }
@@ -425,7 +458,7 @@ struct Index {
     if (this.observationPending && this.signedIn) {
       this.observationPending = false;
       this.projectionPending = false;
-      this.loadCloud();
+      this.loadCloud(false);
       return;
     }
     if (this.titleQuickPending && this.titleQuickActive()) {
@@ -558,7 +591,7 @@ struct Index {
       this.resetCollection();
       this.migrationStatus = '收藏数据库已就绪 · ' + records.length + ' 部；旧版 Preferences 保留。';
       this.ready = true;
-      this.requestObservation();
+      this.scheduleInitialRead();
     } catch (error) {
       this.migrationStatus = '收藏迁移或读取失败；仅显示可读的旧版快照，已停止收藏写入。请勿卸载或清除数据。';
       this.libraryStatus = this.migrationStatus;
@@ -573,9 +606,8 @@ struct Index {
       const consent = await this.episodeStore.autoConsent();
       if (consent && consent.clientId === this.clientId) { this.autoConsent = consent; }
       await this.reloadQueue();
-      if (this.tab === 'library' || (this.tab === 'progress' && this.progressMode === 'next')) { await this.loadNextShows(); }
       this.requestRecovery();
-      this.requestObservation();
+      this.scheduleInitialRead();
     } catch (error) {
       this.episodeInitStatus = '分集数据库打开失败，已停止分集写入；旧收藏不受影响。';
     }
@@ -821,20 +853,42 @@ struct Index {
     } catch (error) { this.presentationStatus = '影视资料缓存暂不可用，仍可管理观看记录。'; }
   }
 
+  private onLibraryInputChanged(): void {
+    this.libraryRevision++;
+    this.onListInputChanged();
+  }
+
+  private onListInputChanged(): void {
+    this.listRevision++;
+    this.onPresentationChanged();
+  }
+
   private publishPresentation(): void {
     if (!this.presentation) { return; }
     const revision = this.presentation.revision();
     if (revision === this.presentationPublished) { return; }
     this.presentationPublished = revision;
-    this.presentationTitles = this.presentation.titleRows();
-    this.presentationSeasons = this.presentation.seasonRows();
+    const titles = this.presentation.titleRows();
+    const seasons = this.presentation.seasonRows();
+    this.titleIndex.clear();
+    this.episodeNameIndex.clear();
+    for (const row of titles) { this.titleIndex.set(row.id, row); }
+    for (const row of seasons) {
+      for (const ep of row.episodes) {
+        this.episodeNameIndex.set(row.showId + ':' + row.season + ':' + ep.id, ep.text.title);
+      }
+    }
+    this.listRevision++;
+    this.presentationTitles = titles;
+    this.presentationSeasons = seasons;
     // A localized sort or query can reveal a different page. One more pass
     // only after real cache changes converges to the newly visible artwork.
     if (this.presentationRunning) { this.presentationPending = true; }
   }
 
   private displayTitle(item: Media): string {
-    return localizedTitle(item, this.presentationTitles, this.presentationLanguage);
+    return this.presentationLanguage === 'zh' && this.presentationTitles.length ?
+      this.titleIndex.get(item.id)?.text.title || item.title : item.title;
   }
 
   private displayLabel(item: Media): string {
@@ -845,16 +899,17 @@ struct Index {
   }
 
   private displayEpisode(item: Media, season: number, id: number, original: string): string {
-    return localizedEpisode(item.id, season, id, original, this.presentationSeasons, this.presentationLanguage);
+    return this.presentationLanguage === 'zh' && this.presentationSeasons.length ?
+      this.episodeNameIndex.get(item.id + ':' + season + ':' + id) || original : original;
   }
 
   private displayOverview(item: Media, original: string): string {
     return this.presentationLanguage === 'zh' ?
-      this.presentationTitles.find((row: TitlePresentation) => row.id === item.id)?.text.overview || original : original;
+      (this.presentationTitles.length ? this.titleIndex.get(item.id)?.text.overview : '') || original : original;
   }
 
   private artwork(item: Media): string {
-    return this.presentationTitles.find((row: TitlePresentation) => row.id === item.id)?.posterUri ?? '';
+    return this.presentationTitles.length ? this.titleIndex.get(item.id)?.posterUri ?? '' : '';
   }
 
   private matchesMedia(item: Media, query: string): boolean {
@@ -862,7 +917,10 @@ struct Index {
   }
 
   private onPresentationChanged(): void {
-    const route = this.clientId + ':' + this.tab + ':' + this.mediaMode + ':' + this.progressMode + ':' + (this.selectedMedia?.id ?? '');
+    const route = JSON.stringify([this.clientId, this.tab, this.mediaMode, this.progressMode, this.selectedMedia?.id ?? '',
+      this.nextPage, this.nextQuery, this.movieProgressPage, this.movieProgressQuery, this.collectionPage,
+      this.collectionQuery, this.collectionFilter, this.collectionStatusFilter, this.calendarPage, this.movieCalendarQuery,
+      this.movieCalendarMode, this.schedulePage, this.localSeason, this.presentationLanguage]);
     if (route !== this.presentationRoute) {
       this.presentationRoute = route;
       this.presentationEpoch++;
@@ -918,13 +976,13 @@ struct Index {
       }
       if (this.presentationLanguage === 'zh' && (this.nextQuery.trim() || this.progressPrefs.sort === 'title')) {
         for (const row of this.progressData('')) {
-          this.addPresentationTask(tasks, row.media, false, row.episode.season);
+          this.addPresentationTask(tasks, row.media, false, this.nextQuery.trim() ? row.episode.season : 0);
         }
       }
     } else if (this.tab === 'progress' && this.progressMode === 'next' && this.mediaMode === 'movie') {
       for (const row of this.movieProgressRows().slice((this.movieProgressPage - 1) * this.collectionPageSize,
         this.movieProgressPage * this.collectionPageSize)) { this.addPresentationTask(tasks, row.media, true); }
-      if (this.presentationLanguage === 'zh') {
+      if (this.presentationLanguage === 'zh' && (this.movieProgressQuery.trim() || this.movieProgressOptions.sort === 'title' || this.movieProgressOptions.sort === 'userRating')) {
         for (const row of this.movieProgressRows('')) { this.addPresentationTask(tasks, row.media, false); }
       }
     } else if (this.tab === 'progress' && this.progressMode === 'calendar') {
@@ -960,18 +1018,21 @@ struct Index {
         const current = (): boolean => this.pageVisible && this.presentationEpoch === epoch &&
           this.clientId === client && this.presentationLanguage === language && this.tab === tab &&
           this.mediaMode === mode && this.progressMode === progress && (this.selectedMedia?.id ?? '') === selected;
-        for (const task of this.presentationTasks()) {
+        // Publish once after the current page, then once after the optional
+        // whole-query translation phase. No full state update per item.
+        const tasks = this.presentationTasks();
+        let pagePublished = false;
+        for (const task of tasks) {
           if (!current()) { break; }
+          if (!pagePublished && !task.artwork && !selected) {
+            this.publishPresentation();
+            pagePublished = true;
+          }
           try {
             await repo.title(task.media, client, language, task.artwork, task.posterUrls);
-            if (current()) { this.publishPresentation(); }
             if (!current()) { break; }
-            if (task.season > 0) {
-              await repo.season(task.media, task.season, client, language);
-              if (current()) { this.publishPresentation(); }
-            }
+            if (task.season > 0) { await repo.season(task.media, task.season, client, language); }
           } catch (error) {
-            this.publishPresentation();
             if (current()) {
               this.presentationStatus = '部分海报或译名暂不可用；下拉刷新可重试。';
               this.presentationBlocked = true;
@@ -979,6 +1040,9 @@ struct Index {
             break;
           }
         }
+        // Public metadata can be retained after route change; no private
+        // library records are published here.
+        this.publishPresentation();
       }
     } finally { this.presentationRunning = false; }
   }
@@ -2122,6 +2186,10 @@ struct Index {
   }
 
   private clearCloud(): void {
+    this.projectionMemo.clear();
+    this.showProjectionCache.clear();
+    this.libraryRevision++;
+    this.listRevision++;
     this.resetCalendar();
     this.invalidateSync();
     this.cloud = undefined;
@@ -2145,7 +2213,38 @@ struct Index {
     this.resetCollection();
   }
 
-  private async loadCloud(): Promise<void> {
+  private async readLibraryProjection(store: EpisodeStore, snapshot: CloudLibrary | undefined, uuid: string,
+    clientId: string, fill: boolean, force: boolean, current: () => boolean): Promise<LibraryProjection> {
+    const records = this.mediaRecords;
+    const recordKey = JSON.stringify(records);
+    const key = projectionKey(clientId, uuid, snapshot?.generation ?? -1, snapshot?.activity ?? '',
+      store.readModelRevision(), recordKey);
+    const cached = force ? undefined : this.projectionMemo.get(key, Date.now());
+    if (cached && current()) {
+      this.projectionHits++;
+      this.performanceStatus = '全库计算 ' + this.projectionRuns + ' 次 · 缓存命中 ' + this.projectionHits + ' 次';
+      return cached;
+    }
+    this.projectionRuns++;
+    const result = await projectLibrary(store, records, snapshot, uuid, clientId, fill, current,
+      (done: number, total: number): void => {
+        if (fill) { this.cloudStatus = '计算个人库及补齐目录 ' + done + '/' + total; }
+      }, this.showProjectionCache);
+    if (!current()) { throw new Error('Observation session changed'); }
+    const finalKey = projectionKey(clientId, uuid, snapshot?.generation ?? -1, snapshot?.activity ?? '',
+      store.readModelRevision(), JSON.stringify(this.mediaRecords));
+    // The caller serializes edits with cloudBusy/localBusy. A missing or
+    // failed catalog must be retried, not memoized as complete.
+    if (result.cacheable && recordKey === JSON.stringify(this.mediaRecords) && !result.matches.length) {
+      this.projectionMemo.put(finalKey, result, result.computedAt, result.validUntil);
+    }
+    this.performanceStatus = '全库计算 ' + this.projectionRuns + ' 次 · 缓存命中 ' + this.projectionHits +
+      ' 次 · 本轮重算 ' + result.computedShows + ' 部 / 复用 ' + result.reusedShows + ' 部 · 计算 ' +
+      (Date.now() - result.computedAt) + ' ms' + (this.projectionRuns === 1 ? ' · 启动至首轮计算完成 ' + (Date.now() - this.startupAt) + ' ms' : '');
+    return result;
+  }
+
+  private async loadCloud(force: boolean = true): Promise<void> {
     const store = this.episodeStore;
     if (!store || !this.ready || !this.episodeReady || this.cloudBusy || this.localBusy || this.saving ||
         this.backupBusy || this.syncBusy || this.setupBusy || this.authBusy || !this.clientId) { return; }
@@ -2166,7 +2265,7 @@ struct Index {
       const bound = await store.boundAccount();
       if (!current()) { throw new Error('Session changed'); }
       this.cloudLocalAllowed = allowLocalScope(true, bound, account.uuid);
-      const cached = await store.readRemoteObservation(account.uuid);
+      const cached = this.activeCloud() && this.cloudUuid === account.uuid ? undefined : await store.readRemoteObservation(account.uuid);
       if (!current()) { throw new Error('Session changed'); }
       if (cached) {
         const restored: CloudLibrary = { generation: session.generation, activity: cached.activity,
@@ -2176,23 +2275,35 @@ struct Index {
         this.cloudUuid = account.uuid;
         this.resetCollection();
         this.cloudStatus = '已读取本账户缓存，正在核对云端版本…';
+        this.libraryNotice = '显示已验证账户的上次缓存；正在核对云端版本。';
+        // Local-first render, no network catalog fill and no checkpoint writes.
+        // The existing cloudBusy gate remains active until fresh verification.
+        try {
+          const initial = await this.readLibraryProjection(store, restored, account.uuid, clientId, false, false, current);
+          if (!current()) { throw new Error('Session changed'); }
+          this.nextShows = initial.next;
+          this.libraryEvidence = initial.evidence;
+          this.reloadProgressFlags();
+        } catch (error) {
+          if (!current()) { throw new Error('Session changed'); }
+        }
       }
       let snapshot = this.cloud;
       try {
         const revision = await readActivity(session);
-        if (!snapshot || snapshot.activity !== revision) {
-          snapshot = await readCloudLibrary(session);
-        }
+        const changed = !snapshot || snapshot.activity !== revision;
+        if (changed) { snapshot = await readCloudLibrary(session); }
+        if (!snapshot) { throw new Error('Observation unavailable'); }
         const verified = await readSyncAccount(session);
         if (!current() || verified.uuid !== account.uuid || await readActivity(session) !== snapshot.activity) {
           throw new Error('Account or activity changed');
         }
         if (!current()) { throw new Error('Session changed'); }
-        await store.saveRemoteObservation(account.uuid, snapshot);
+        if (changed) { await store.saveRemoteObservation(account.uuid, snapshot); }
         if (!current()) { throw new Error('Session changed'); }
         this.cloud = snapshot;
         this.cloudUuid = account.uuid;
-        this.libraryEvidence = [];
+        if (changed) { this.libraryEvidence = []; }
         this.cloudFresh = true;
       } catch (error) {
         if (!current() || !this.cloud || this.cloudUuid !== account.uuid) { throw new Error('读取云端失败'); }
@@ -2204,8 +2315,10 @@ struct Index {
         try {
           const records = await reconcileTitleObservation(mediaStore, store, session, account.uuid, snapshot, current);
           if (!current()) { throw new Error('Session changed'); }
-          this.mediaRecords = records;
-          this.items = records.map((record: MediaRecord) => record.media);
+          if (JSON.stringify(records) !== JSON.stringify(this.mediaRecords)) {
+            this.mediaRecords = records;
+            this.items = records.map((record: MediaRecord) => record.media);
+          }
           const consent = await mediaStore.titleConsent();
           if (!current()) { throw new Error('Session changed'); }
           this.titleConsent = consent?.uuid === account.uuid && consent.clientId === clientId ? consent : undefined;
@@ -2227,14 +2340,13 @@ struct Index {
           this.titleQuickStatus = '影视状态协调未完成，请刷新。';
         }
       }
-      const result = await projectLibrary(store, this.mediaRecords, snapshot, account.uuid, clientId,
-        this.cloudFresh, current, (done: number, total: number): void => {
-          this.cloudStatus = '计算个人库及补齐目录 ' + done + '/' + total;
-        });
+      const result = await this.readLibraryProjection(store, snapshot, account.uuid, clientId, this.cloudFresh, force, current);
+      let checkpointChanged = false;
       if (!current()) { throw new Error('Session changed'); }
       if (this.cloudFresh && result.localAllowed && result.matches.length &&
           await readActivity(session) === snapshot.activity && current()) {
         await store.saveReadCheckpoints(account.uuid, result.matches);
+        checkpointChanged = true;
       }
       if (!current()) { throw new Error('Session changed'); }
       this.cloudLocalAllowed = result.localAllowed;
@@ -2246,7 +2358,9 @@ struct Index {
       this.libraryEvidence = result.evidence;
       this.resetCollection();
       await this.refreshEffectiveDetail();
-      this.projectionPending = true;
+      // A newly acknowledged watch time can alter LAST_WATCHED. Only that
+      // real input change requires a follow-up projection.
+      if (checkpointChanged) { this.projectionPending = true; }
       this.libraryNotice = !this.cloudFresh ? '更新未完成，显示上次记录。' : result.missing || result.failed ? '部分剧集资料尚未补齐。' : '';
       this.cloudStatus = (this.cloudFresh ? '云端版本已核对' : '使用上次缓存（非实时）') +
         ' · 缺少目录 ' + result.missing + ' 部 · 下载失败 ' + result.failed + ' 部；未写入 Trakt。' + (result.localAllowed ? '' : ' 当前账户只读；本机库未绑定或属于另一账户。');
@@ -2660,6 +2774,7 @@ struct Index {
     Column({ space: 10 }) {
       Text('电影与待看差异预览').fontSize(22).fontWeight(FontWeight.Bold).width('100%')
       Text(this.migrationStatus).fontSize(12).width('100%')
+      Text('性能诊断：' + this.performanceStatus).fontSize(12).width('100%')
       Text('高级管理用于未授权操作、异常及历史撤销。已有保护凭证只读核对，不会重发。')
         .fontSize(12).width('100%')
       if (!this.syncBound || !this.syncAccount || !traktAuth.isCurrent(this.clientId, this.syncAccount.generation)) {
@@ -2946,6 +3061,7 @@ struct Index {
   }
 
   private invalidateNextShows(): void {
+    this.projectionMemo.clear();
     this.nextShows = [];
     this.libraryEvidence = [];
     this.projectionPending = true;
@@ -2965,9 +3081,8 @@ struct Index {
       const clientId = this.clientId;
       const active = snapshot && this.signedIn && traktAuth.isCurrent(clientId, snapshot.generation) ? snapshot : undefined;
       if (this.signedIn && !active) { this.nextShows = []; this.libraryEvidence = []; return; }
-      const result = await projectLibrary(store, this.mediaRecords, active, uuid, clientId, false,
-        (): boolean => !active || (this.cloudUuid === uuid && traktAuth.isCurrent(clientId, active.generation)),
-        (done: number, total: number): void => {});
+      const result = await this.readLibraryProjection(store, active, uuid, clientId, false, false,
+        (): boolean => this.activeCloud() === active && this.cloudUuid === uuid && this.clientId === clientId);
       if (this.activeCloud() !== active || this.cloudUuid !== uuid || (this.signedIn && !active)) { return; }
       this.nextShows = result.next;
       this.reloadProgressFlags();
@@ -3055,6 +3170,12 @@ struct Index {
 
   private progressData(query: string): ProgressRow[] {
     if (this.signedIn && !this.activeCloud()) { return []; }
+    const now = Date.now();
+    const key = JSON.stringify([this.listRevision, this.presentationLanguage, this.currentProgressScope(),
+      this.activeCloud()?.generation ?? -1, this.progressFlagScope, this.nextFilter, query]);
+    const memo = query ? this.progressMemo : this.progressAllMemo;
+    const cached = memo.get(key, now);
+    if (cached) { return cached; }
     const sources: ProgressSource[] = [];
     for (const row of this.nextShows) {
       const source = row.source;
@@ -3071,7 +3192,9 @@ struct Index {
         episodeNames: names });
     }
     const flags = this.progressFlagScope === this.currentProgressScope() ? this.progressFlags : [];
-    return progressRows(sources, this.progressPrefs, flags, Date.now(), this.nextFilter, query);
+    const rows = progressRows(sources, this.progressPrefs, flags, now, this.nextFilter, query);
+    memo.put(key, rows, now, progressExpiry(sources, this.progressPrefs, now));
+    return rows;
   }
   private nextFiltered(): ProgressRow[] { return this.progressData(this.nextQuery); }
 
@@ -3081,7 +3204,8 @@ struct Index {
 
   private nextPages(): number { return Math.max(1, Math.ceil(this.nextEntries().length / this.collectionPageSize)); }
   private nextSlice(): ProgressEntry[] {
-    return progressPage(this.nextEntries(), Math.min(this.nextPage, this.nextPages()), this.collectionPageSize);
+    const entries = this.nextEntries();
+    return progressPage(entries, Math.min(this.nextPage, Math.max(1, Math.ceil(entries.length / this.collectionPageSize))), this.collectionPageSize);
   }
 
   private async markNext(row: ProgressRow): Promise<void> {
@@ -3619,6 +3743,13 @@ struct Index {
   private movieProgressRows(query: string = this.movieProgressQuery): PersonalLibraryRow[] {
     // Missing snapshot is not evidence of a missing release date.
     if (!this.movieCalendarCurrent()) { return []; }
+    const now = Date.now();
+    const utc = new Date(now).toISOString().substring(0, 10);
+    const key = JSON.stringify([this.listRevision, this.libraryRevision, this.currentProgressScope(), this.activeCloud()?.generation ?? -1,
+      this.presentationLanguage, this.progressFlagScope, this.movieRandomSeed, utc, query]);
+    const memo = query ? this.movieMemo : this.movieAllMemo;
+    const cached = memo.get(key, now);
+    if (cached) { return cached; }
     const metadata = new Map<string, PersonalMovie>();
     for (const movie of this.movieCalendarData?.movies ?? []) { metadata.set(movie.media.id, movie); }
     const sources: MovieProgressSource[] = [];
@@ -3626,14 +3757,15 @@ struct Index {
       const movie = metadata.get(row.media.id);
       if (!movie || movie.localOnly || movie.dateUncertain || row.media.kind !== 'movie') { continue; }
       const translation = this.presentationLanguage === 'zh' ?
-        this.presentationTitles.find((item: TitlePresentation) => item.id === row.media.id)?.text.title ?? '' : '';
+        (this.presentationTitles.length ? this.titleIndex.get(row.media.id)?.text.title ?? '' : '') : '';
       sources.push({ row: row, translation: translation,
         metadata: { id: row.media.id, released: movie.released, year: movie.media.year,
           runtime: movie.runtime, rating: movie.rating, addedAt: movie.addedAt, userRating: movie.userRating } });
     }
     const flags = this.progressFlagScope === this.currentProgressScope() ? this.progressFlags : [];
-    return projectMovieProgress(sources, flags, this.movieProgressOptions, new Date().toISOString().substring(0, 10),
-      query, this.movieRandomSeed);
+    const rows = projectMovieProgress(sources, flags, this.movieProgressOptions, utc, query, this.movieRandomSeed);
+    memo.put(key, rows, now, Date.parse(utc + 'T00:00:00Z') + 86400000);
+    return rows;
   }
 
   private async setMovieProgressSort(sort: string, descending: boolean): Promise<void> {
@@ -3859,13 +3991,20 @@ struct Index {
     const cloud = snapshot && this.signedIn && traktAuth.isCurrent(this.clientId, snapshot.generation) ?
       snapshot : undefined;
     if (this.signedIn && !cloud) { return []; }
+    const key = JSON.stringify([this.libraryRevision, this.signedIn, this.cloudLocalAllowed, this.clientId,
+      this.cloudUuid, cloud?.generation ?? -1, cloud?.activity ?? '']);
+    const now = Date.now();
+    const cached = this.libraryMemo.get(key, now);
+    if (cached) { return cached; }
     const cloudShows = (cloud?.shows ?? []).map((show: ShowProgress): LibraryShowEvidence => {
       const media: Media = { id: show.id, title: show.title, kind: 'show', year: show.year ?? 0, watched: false };
       return { media: media, watchedEpisodes: show.watchedEpisodes };
     });
     const localShows = this.libraryEvidence.filter((show: LibraryShowEvidence) => cloud ? show.merged === true : !show.merged);
-    return buildPersonalLibrary(cloud && !this.cloudLocalAllowed ? [] : this.mediaRecords, cloud?.watchedMovies ?? [], cloud?.watchlist ?? [],
-      cloudShows, localShows);
+    const rows = buildPersonalLibrary(cloud && !this.cloudLocalAllowed ? [] : this.mediaRecords,
+      cloud?.watchedMovies ?? [], cloud?.watchlist ?? [], cloudShows, localShows);
+    this.libraryMemo.put(key, rows, now, Number.MAX_SAFE_INTEGER);
+    return rows;
   }
 
   private collectionSource(): PersonalLibraryRow[] {
@@ -3877,7 +4016,15 @@ struct Index {
   }
 
   private collectionEntries(): GroupEntry[] {
-    return groupEntries(collectionGroups(this.collectionSource(), this.mediaMode, this.collectionFilter, this.collectionStatusFilter));
+    if (this.signedIn && !this.activeCloud()) { return []; }
+    const key = JSON.stringify([this.listRevision, this.libraryRevision, this.presentationLanguage, this.currentProgressScope(),
+      this.activeCloud()?.generation ?? -1, this.collectionQuery, this.mediaMode, this.collectionFilter, this.collectionStatusFilter]);
+    const now = Date.now();
+    const cached = this.collectionMemo.get(key, now);
+    if (cached) { return cached; }
+    const entries = groupEntries(collectionGroups(this.collectionSource(), this.mediaMode, this.collectionFilter, this.collectionStatusFilter));
+    this.collectionMemo.put(key, entries, now, Number.MAX_SAFE_INTEGER);
+    return entries;
   }
 
   private collectionPageGroups(): CollectionGroup[] {

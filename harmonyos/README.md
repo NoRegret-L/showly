@@ -1,4 +1,4 @@
-# Showly HarmonyOS Preview v0.9.3e.2b
+# Showly HarmonyOS Preview v0.9.3e.2c
 
 Unofficial native ArkTS prototype, not a complete Showly port. Your app uses Trakt but is not endorsed or certified by Trakt.
 
@@ -186,3 +186,6 @@ Public SQLite metadata cache and shared persistent artwork retrieval; simplified
 
 ## v0.9.3e.2b — movie progress rules (0.9.3.14, build 38)
 See [movie progress parity](docs/MOVIE_PROGRESS_PARITY.md) for source-derived rules, verification and remaining gaps.
+
+## v0.9.3e.2c — local-first startup and incremental read models (0.9.3.15, build 39)
+See [startup performance](docs/STARTUP_PERFORMANCE.md) for cache invalidation, worker isolation, and acceptance checks.

@@ -12,6 +12,7 @@ export class PresentationRepository {
   private titles: Map<string, TitlePresentation> = new Map<string, TitlePresentation>();
   private seasons: Map<string, SeasonPresentation> = new Map<string, SeasonPresentation>();
   private artAttempted: Set<string> = new Set<string>();
+  private artChecked: Set<string> = new Set<string>();
   private version: number = 0;
   constructor(db: relationalStore.RdbStore, dir: string, oldDir: string) {
     this.db = db; this.dir = dir; this.oldDir = oldDir;
@@ -27,8 +28,8 @@ export class PresentationRepository {
         try {
           const value = JSON.parse(titles.getString(1)) as TitlePresentation;
           if (!validTitle(value) || value.id !== titles.getString(0)) { continue; }
-          const media: Media = { id: value.id, kind: value.id.split(':')[0], title: '', year: 0, watched: false };
-          value.posterUri = cachedPoster(repo.dir, media, value.posterUrls) || cachedPoster(repo.oldDir, media, value.posterUrls);
+          // Validate files only when their card is requested, not at startup.
+          value.posterUri = '';
           repo.titles.set(value.id, value);
         } catch (error) {}
       }
@@ -49,7 +50,7 @@ export class PresentationRepository {
   revision(): number { return this.version; }
   titleRows(): TitlePresentation[] { return Array.from(this.titles.values()); }
   seasonRows(): SeasonPresentation[] { return Array.from(this.seasons.values()); }
-  retryArtwork(): void { this.artAttempted.clear(); }
+  retryArtwork(): void { this.artAttempted.clear(); this.artChecked.clear(); }
   async title(item: Media, clientId: string, language: string, artwork: boolean, hints: string[]): Promise<void> {
     if (!canReadDetails(item)) { return; }
     const prior = this.titles.get(item.id);
@@ -60,7 +61,10 @@ export class PresentationRepository {
     let failed = false;
     // Independent failures cannot erase successful metadata.
     if (artwork) {
-      row.posterUri = cachedPoster(this.dir, item, row.posterUrls) || cachedPoster(this.oldDir, item, row.posterUrls);
+      if (!this.artChecked.has(item.id)) {
+        this.artChecked.add(item.id);
+        row.posterUri = cachedPoster(this.dir, item, row.posterUrls) || cachedPoster(this.oldDir, item, row.posterUrls);
+      }
       if (!row.posterUri && clientId && !this.artAttempted.has(item.id)) {
         this.artAttempted.add(item.id);
         try {
