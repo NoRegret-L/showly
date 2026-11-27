@@ -1,5 +1,4 @@
-import { Media } from './Media';
-import { CollectionDate } from './CollectionRules';
+import { Media, CollectionDate } from './Media';
 import { FullEpisodeCatalog, ScheduledEpisode, scheduleEpisodes, showSections } from './ShowCatalog';
 
 export interface RemotePlayPosition {

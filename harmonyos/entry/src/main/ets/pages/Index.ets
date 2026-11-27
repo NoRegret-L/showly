@@ -1,9 +1,9 @@
 import { common } from '@kit.AbilityKit';
 import { LazyRows } from '../model/LazyRows';
-import { CollectionCandidate, CollectionOptions, CollectionState, CollectionDate, HiddenEntry, defaultCollection, emptyCollectionState, collectionMembers, projectCollection, recentCollection, recordCollectionDate, transitionCollectionDates, hideMedia } from '../model/CollectionRules';
+import { CollectionCandidate, CollectionOptions, CollectionState, HiddenEntry, defaultCollection, emptyCollectionState, collectionMembers, projectCollection, recentCollection, recordCollectionDate, transitionCollectionDates, hideMedia } from '../model/CollectionRules';
 import { PresentationRepository } from '../data/PresentationRepository';
 import { TitlePresentation, SeasonPresentation, PresentationTask, matchesText } from '../model/MediaPresentation';
-import { Media, mediaLabel, setWatched } from '../model/Media';
+import { Media, CollectionDate, mediaLabel, setWatched } from '../model/Media';
 import { LibraryStore } from '../data/LibraryStore';
 import { MediaStore } from '../data/MediaStore';
 import { TitleConsent, TitleChange, TitleIntent, titleEdit } from '../model/TitleQuickState';

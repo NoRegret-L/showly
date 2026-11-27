@@ -6,6 +6,9 @@ export interface Media {
   watched: boolean;
 }
 
+// Shared date record, independent of collection UI or sync rules.
+export interface CollectionDate { id: string; at: number; }
+
 export interface Library {
   schema: number;
   items: Media[];

@@ -1,6 +1,5 @@
 import { http } from '@kit.NetworkKit';
-import { Media } from '../model/Media';
-import { CollectionDate } from '../model/CollectionRules';
+import { Media, CollectionDate } from '../model/Media';
 import { TraktSession, traktAuth } from './TraktAuth';
 import { RemotePlayPosition, RemoteMovieObservation, RemoteLibraryObservation, RemoteShowObservation, validateObservation } from '../model/RemoteObservation';
 

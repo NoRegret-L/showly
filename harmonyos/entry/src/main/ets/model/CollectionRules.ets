@@ -1,11 +1,10 @@
-import { Media } from './Media';
+import { Media, CollectionDate } from './Media';
 import { isTraktMedia } from './MediaState';
 import { PersonalLibraryRow, hasTrackingEvidence } from './PersonalLibrary';
 import { collectionRows } from './NavigationModel';
 import { CollectionMeta, matchesText } from './MediaPresentation';
 
 export interface CollectionOptions { sort: string; descending: boolean; genres: string[]; networks: string[]; upcoming: string; }
-export interface CollectionDate { id: string; at: number; }
 export interface HiddenEntry { media: Media; at: number; }
 export interface CollectionState { hidden: HiddenEntry[]; mine: CollectionDate[]; queue: CollectionDate[]; }
 export interface CollectionCandidate { row: PersonalLibraryRow; translation: string; meta?: CollectionMeta; added?: number; recent?: number; userRating?: number; randomOrder: number; }
