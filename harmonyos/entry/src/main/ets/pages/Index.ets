@@ -24,6 +24,7 @@ import { threeWayLabel } from '../model/ThreeWay';
 import { NextShow } from '../data/NextShows';
 import { RevisionMemo, projectionKey } from '../model/ReadModelCache';
 import { CandidateInput, CandidateBatch, CandidateResult, ProgressCandidateIndex } from '../model/ProgressCandidates';
+import { CacheLifecycle, cacheResidency, memoryEvents } from '../model/CacheLifecycle';
 import { computeCandidateDisplay } from '../data/ProgressCandidateTask';
 import { ShowProjectionCache } from '../model/ProjectionCompute';
 import { MovieProgressOptions, MovieProgressSource, defaultMovieProgress, validMovieProgress, movieProgressRows as projectMovieProgress, clearMoviePin } from '../model/MovieProgressRules';
@@ -116,6 +117,11 @@ struct Index {
   private candidateMemo: RevisionMemo<ProgressRow[]> = new RevisionMemo<ProgressRow[]>();
   private candidateExpiry: number = 0;
   private candidateRuns: number = 0;
+  private cacheLifecycle: CacheLifecycle=new CacheLifecycle();
+  private memoryListener: ()=>void=()=>{ this.handleMemoryPressure(); };
+  private memorySubscribed: boolean=false;
+  private memoryPending: boolean=false;
+  private memoryTimer: number=-1;
   private candidateIndex: ProgressCandidateIndex = new ProgressCandidateIndex();
   private candidateWake: number = -1;
   private candidateWakeAt: number = 0;
@@ -376,6 +382,7 @@ struct Index {
   @State showMediaLogs: boolean = false;
 
   aboutToAppear(): void {
+    if (!this.memorySubscribed) { memoryEvents.subscribe(this.memoryListener); this.memorySubscribed=true; }
     const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
     try {
       this.appearance = new AppearanceStore(context);
@@ -410,10 +417,12 @@ struct Index {
     this.initializePresentation(context);
     this.discoverRepo = openDiscover(context);
     this.searchRepo = openSearch(context);
+    this.updateCacheLifecycle();
   }
 
   onPageShow(): void {
     this.pageVisible = true;
+    this.updateCacheLifecycle();
     this.updateSearchContext();
     if (this.tab === 'discover' && !this.selectedMedia) { this.loadDiscover(this.discoverPage); }
     this.requestPresentation();
@@ -432,6 +441,7 @@ struct Index {
 
   onPageHide(): void {
     this.pageVisible = false;
+    this.updateCacheLifecycle();
     this.cancelCandidateWake();
     this.updateSearchContext();
     this.discoverRevision++;
@@ -450,7 +460,10 @@ struct Index {
   }
 
   aboutToDisappear(): void {
+    if (this.memorySubscribed) { memoryEvents.unsubscribe(this.memoryListener); this.memorySubscribed=false; }
+    if (this.memoryTimer>=0) { clearTimeout(this.memoryTimer); this.memoryTimer=-1; this.memoryPending=false; }
     this.pageVisible = false;
+    this.updateCacheLifecycle();
     this.cancelCandidateWake();
     this.updateSearchContext();
     this.discoverRevision++;
@@ -1180,7 +1193,7 @@ struct Index {
 
   private displayOverview(item: Media, original: string): string {
     return this.presentationLanguage === 'zh' ?
-      (this.presentationRevision > 0 ? this.titleIndex.get(item.id)?.text.overview : '') || original : original;
+      (this.presentationRevision > 0 ? this.presentation?.overview(item.id) : '') || original : original;
   }
 
   private artwork(item: Media): string {
@@ -1197,6 +1210,7 @@ struct Index {
     if (this.viewport.update(item,season,urls,visible,slot)) { this.requestPresentation(); }
   }
   private onPresentationChanged(): void {
+    this.updateCacheLifecycle();
     this.updateSearchContext();
     const scope = this.viewScope();
     if (!this.progressCandidateActive()) { this.cancelCandidateWake(); }
@@ -1212,6 +1226,67 @@ struct Index {
         this.presentationStatus = '';
     }
     this.requestPresentation();
+  }
+
+  private updateCacheLifecycle(): void {
+    const route=this.pageVisible ? this.viewScope() : '';
+    const account=this.currentSearchAccount();
+    if (!this.cacheLifecycle.transition(route,account)) { return; }
+    this.releaseInactiveCaches(false);
+  }
+  private handleMemoryPressure(): void {
+    if (this.memoryPending) { return; }
+    this.memoryPending=true;
+    // Defer cache work out of the native memory callback; no periodic timer.
+    this.memoryTimer=setTimeout(()=>{
+      this.memoryTimer=-1; this.memoryPending=false;
+      if (!this.memorySubscribed) { return; }
+      this.cacheLifecycle.invalidate();
+      this.releaseInactiveCaches(true);
+      if (this.pageVisible) { this.requestPresentation(); }
+    },0);
+  }
+  private releaseInactiveCaches(pressure: boolean): void {
+    const residency=cacheResidency(this.pageVisible,this.tab,this.mediaMode,this.progressMode,!!this.selectedMedia);
+    const generation=this.cacheLifecycle.generation();
+    const scope=residency.search ? this.currentSearchAccount() : '';
+    const promise=this.searchRepo;
+    if (promise) {
+      promise.then((repo: SearchRead)=>{
+        if (!this.cacheLifecycle.current(generation)) { return; }
+        repo.setResidentScope(scope);
+        if (pressure) { repo.releaseCatalogs(); }
+      }).catch(()=>{});
+    }
+    if (!residency.search || pressure) {
+      this.searchLocalVersion++;
+      this.searchCandidateSource=undefined; this.searchCandidateKey=''; this.searchCandidates=[];
+      if (!residency.search) { this.searchRows.replace([],[],[]); }
+      else { this.refreshSearchLocal(); }
+    }
+    // Only derived models are released. In-flight observation / journal writes,
+    // authoritative snapshots and synchronization evidence are untouched.
+    if (!residency.progress) {
+      this.clearProgressCandidates();
+      this.showRows.replace([],[],[]);
+    }
+    if (!residency.calendar) { this.calendarIndex.clear(); this.calendarMemo.clear(); this.calendarRows.replace([],[],[]); }
+    if (!residency.collection) { this.collectionIndexMemos.clear(); this.collectionItemsMemo.clear(); this.recentCollectionMemo.clear(); this.collectionRowsSource.replace([],[],[]); }
+    if (!residency.discover) { this.discoverMemo.clear(); this.discoverRows.replace([],[],[]); }
+    // Keep active detail/season data during foreground pressure; route changes
+    // evict full payloads, but keep lightweight title/sort metadata.
+    if (!pressure || !this.pageVisible) {
+      this.presentationWorkVersion++; this.presentationEpoch++;
+      this.presentation?.releaseTransient();
+      this.episodeNameIndex.clear(); this.seasonKeys.clear(); this.episodeSearchRevision++;
+      this.presentationAttempts.retry();
+    }
+    if (pressure) {
+      this.sortJobs.clear(); this.lazyRevision++;
+      this.movieMetadataMemo.clear(); this.movieMemo.clear(); this.movieAllMemo.clear();
+      // The existing projection may be in use by verified observation. Do not
+      // clear its shared cache mid-flight; derived module caches above suffice.
+    }
   }
 
   private scheduleLazyRows(): void {
@@ -3406,7 +3481,13 @@ struct Index {
   }
   private searchRepository(): Promise<SearchRead> {
     if (!this.searchRepo) { this.searchRepo=openSearch(this.context()); }
-    return this.searchRepo;
+    const repo=this.searchRepo;
+    const scope=this.searchActive() ? this.currentSearchAccount() : '';
+    const generation=this.cacheLifecycle.generation();
+    return repo.then((value: SearchRead): SearchRead=>{
+      if (this.cacheLifecycle.current(generation)) { value.setResidentScope(scope); }
+      return value;
+    });
   }
   private changeSearchText(value: string): void {
     if (value===this.title) { return; }

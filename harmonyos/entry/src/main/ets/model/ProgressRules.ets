@@ -125,7 +125,13 @@ export function progressSource(full: FullEpisodeCatalog, ids: number[], remote: 
     recent = Math.max(recent, watchedAt);
     episodes.push({ episode: ep, watched: isWatched, watchedAt: watchedAt });
   }
-  return { media: full.media, episodes: episodes, recentAt: recent, rating: full.rating, randomOrder: Math.random() };
+  return { media: full.media, episodes: episodes, recentAt: recent, rating: full.rating, randomOrder: stableProgressRandom(full.media.id) };
+}
+export function stableProgressRandom(id: string): number {
+  // FNV-1a 32-bit hash, deterministic permutation key (not a sampling weight).
+  let hash=2166136261;
+  for (let i=0;i<id.length;i++) { hash=Math.imul(hash ^ id.charCodeAt(i),16777619); }
+  return (hash>>>0)/4294967296;
 }
 function position(a: ProgressEpisode, b: ProgressEpisode): number {
   return a.episode.season - b.episode.season || a.episode.number - b.episode.number;

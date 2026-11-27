@@ -1,4 +1,4 @@
-# Showly HarmonyOS Preview v0.9.3e.2d.10
+# Showly HarmonyOS Preview v0.9.3e.2d.11
 
 Unofficial native ArkTS prototype, not a complete Showly port. Your app uses Trakt but is not endorsed or certified by Trakt.
 
@@ -228,3 +228,6 @@ CI #67 published Build 50 from 85dec58 before #68 completed. CI #68 passed all m
 
 ## v0.9.3e.2d.10 — per-show progress candidate read model (0.9.3.28, build 52)
 See [Progress candidates](docs/PROGRESS_CANDIDATES.md).
+
+## v0.9.3e.2d.11 — cache residency (0.9.3.29, build 53)
+See [Cache lifecycle](docs/CACHE_LIFECYCLE.md).

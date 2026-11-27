@@ -19,6 +19,7 @@ export class PresentationRepository {
   private artChecked: Set<string> = new Set<string>();
   private summaryMissing: Set<string> = new Set<string>();
   private version: number = 0;
+  private residency: number = 0;
   private loadedSeasons: Set<string> = new Set<string>();
   private dirtyTitles: Map<string, TitlePresentation> = new Map<string, TitlePresentation>();
   private dirtySeasons: Map<string, SeasonPresentation> = new Map<string, SeasonPresentation>();
@@ -43,14 +44,45 @@ export class PresentationRepository {
           if (!validTitle(value) || value.id !== titles.getString(0)) { continue; }
           // Validate files only when their card is requested, not at startup.
           value.posterUri = '';
-          repo.titles.set(value.id, value);
-          repo.dirtyTitles.set(value.id,value);
+          repo.dirtyTitles.set(value.id,repo.lightTitle(value));
           repo.version++;
         } catch (error) {}
       }
     } finally { titles.close(); }
     // Season payloads are read by exact show/season only when requested.
     return repo;
+  }
+  // Keep only title/sort metadata in the page-wide index; full summaries
+  // hydrate by exact ID, including offline detail entry.
+  private lightTitle(row: TitlePresentation): TitlePresentation {
+    return {id:row.id,text:{title:row.text.title,overview:''},translatedAt:row.translatedAt,
+      posterUrls:[],posterUri:row.posterUri,collection:row.collection};
+  }
+  overview(id: string): string { return this.titles.get(id)?.text.overview ?? ''; }
+  releaseTransient(): void {
+    this.residency++;
+    this.titles.clear(); this.seasons.clear(); this.loadedSeasons.clear(); this.dirtySeasons.clear();
+    this.artChecked.clear(); this.artAttempted.clear(); this.summaryMissing.clear();
+  }
+  private async readTitle(id: string,version: number): Promise<TitlePresentation> {
+    const cached=this.titles.get(id);
+    if (cached) { return cached; }
+    let row=this.emptyTitle(id);
+    const result=await this.db.querySql('SELECT payload FROM presentation_title WHERE id=?',[id]);
+    try {
+      if (result.goToFirstRow()) {
+        try { const parsed=JSON.parse(result.getString(0)) as TitlePresentation;
+          if (validTitle(parsed) && parsed.id===id) { parsed.posterUri=''; row=parsed; }
+        } catch (error) {}
+      }
+    } finally { result.close(); }
+    // A concurrently committed patch wins over a disk read.
+    if (version===this.residency) {
+      const current=this.titles.get(id);
+      if (current) { return current; }
+      this.titles.set(id,row); this.dirtyTitles.set(id,this.lightTitle(row)); this.version++;
+    }
+    return row;
   }
   revision(): number { return this.version; }
   takeChanges(): PresentationChanges {
@@ -68,7 +100,9 @@ export class PresentationRepository {
       () => this.loadArtwork(item,clientId,artwork,hints,collection));
   }
   private async loadArtwork(item: Media, clientId: string, artwork: boolean, hints: string[], collection: boolean): Promise<void> {
-    const prior = this.titles.get(item.id) ?? this.emptyTitle(item.id);
+    const version=this.residency;
+    const prior = await this.readTitle(item.id,version);
+    if (version!==this.residency) { return; }
     let urls = prior.posterUrls.length ? prior.posterUrls : hints;
     let uri = prior.posterUri;
     let meta = prior.collection;
@@ -78,9 +112,9 @@ export class PresentationRepository {
       uri = cachedPoster(this.dir,item,urls) || cachedPoster(this.oldDir,item,urls);
     }
     if (artwork || (urls.length && !prior.posterUrls.length)) {
-      await this.saveTitlePatch(item.id,{posterUrls:urls,posterUri:uri});
+      await this.saveTitlePatch(item.id,{posterUrls:urls,posterUri:uri},version);
     }
-    if (!clientId) { return; }
+    if (!clientId || version!==this.residency) { return; }
     const attempt=JSON.stringify([clientId,item.id,urls]);
     const summaryKey=JSON.stringify([clientId,item.id]);
     let missingSummary=this.summaryMissing.has(summaryKey);
@@ -89,25 +123,27 @@ export class PresentationRepository {
         const detail=await readDetails(item,clientId);
         meta=detail.collection;
         if (!urls.length) { urls=detail.posterUrls; }
-        await this.saveTitlePatch(item.id,{collection:meta,posterUrls:urls});
+        if (version!==this.residency) { return; }
+        await this.saveTitlePatch(item.id,{collection:meta,posterUrls:urls},version);
       } catch (error) {
         const failure: PresentationFailure = presentationFailure(error as Error);
         if (failure.category!=='missing') { throw failure; }
         missingSummary=true;
-        this.summaryMissing.add(summaryKey);
+        if (version===this.residency) { this.summaryMissing.add(summaryKey); }
       }
     }
-    if (!artwork || uri || this.artAttempted.has(attempt)) { return; }
+    if (version!==this.residency || !artwork || uri || this.artAttempted.has(attempt)) { return; }
     if (!urls.length && !missingSummary) {
       try { urls=(await readDetails(item,clientId)).posterUrls; }
       catch (error) {
         const failure: PresentationFailure = presentationFailure(error as Error);
         if (failure.category!=='missing') { throw failure; }
-        this.summaryMissing.add(summaryKey);
+        if (version===this.residency) { this.summaryMissing.add(summaryKey); }
       }
     }
     let failed: PresentationFailure | undefined;
     for (const url of urls) {
+      if (version!==this.residency) { return; }
       const result=await cachePoster(this.dir,item,[url]);
       if (result.uri) { uri=result.uri; break; }
       if (result.failure && result.failure.category!=='missing') {
@@ -115,7 +151,9 @@ export class PresentationRepository {
         failed=result.failure;
       }
     }
-    await this.saveTitlePatch(item.id,{posterUrls:urls,posterUri:uri,collection:meta});
+    if (version!==this.residency) { return; }
+    await this.saveTitlePatch(item.id,{posterUrls:urls,posterUri:uri,collection:meta},version);
+    if (version!==this.residency) { return; }
     if (!uri && failed) { throw failed; }
     // Only a completed result or verified absence is a completed attempt.
     this.artAttempted.add(JSON.stringify([clientId,item.id,urls]));
@@ -124,18 +162,22 @@ export class PresentationRepository {
   async translation(item: Media, clientId: string, language: string): Promise<void> {
     if (language !== 'zh' || !clientId || !canReadDetails(item)) { return; }
     await this.textFlights.run(JSON.stringify([clientId,item.id,language]), async (): Promise<void> => {
-      const old = this.titles.get(item.id);
-      if (!titleNeedsTranslation(old,Date.now())) { return; }
+      const version=this.residency;
+      const old = await this.readTitle(item.id,version);
+      if (version!==this.residency || !titleNeedsTranslation(old,Date.now())) { return; }
       const text = await readChinese(item,clientId);
-      await this.saveTitlePatch(item.id,{ text: { title: text.title, overview: text.overview }, translatedAt: Date.now() });
+      if (version!==this.residency) { return; }
+      await this.saveTitlePatch(item.id,{ text: { title: text.title, overview: text.overview }, translatedAt: Date.now() },version);
     });
   }
   // Serialize only persistence of the same title. Merge field patches against
   // the latest committed value; independent requests cannot erase each other.
-  private async saveTitlePatch(id: string, patch: TitlePatch): Promise<void> {
+  private async saveTitlePatch(id: string, patch: TitlePatch, version: number): Promise<void> {
     const previous = this.titleWrites.get(id) ?? Promise.resolve();
     const task = previous.catch((): void => {}).then(async (): Promise<void> => {
-      const old = this.titles.get(id) ?? this.emptyTitle(id);
+      if (version!==this.residency) { return; }
+      const old = await this.readTitle(id,version);
+      if (version!==this.residency) { return; }
       const row: TitlePresentation = { id: id, text: patch.text ? mergeText(old.text,patch.text) : old.text,
         translatedAt: patch.translatedAt ?? old.translatedAt,
         posterUrls: patch.posterUrls?.length ? patch.posterUrls : old.posterUrls,
@@ -144,7 +186,10 @@ export class PresentationRepository {
       const raw = JSON.stringify(row);
       if (raw === JSON.stringify(old)) { return; }
       await this.db.executeSql('INSERT OR REPLACE INTO presentation_title(id,payload) VALUES(?,?)',[id,raw]);
-      this.titles.set(id,row); this.dirtyTitles.set(id,row); this.version++;
+      // Durable public metadata may complete after eviction; never refill the full cache.
+      if (version===this.residency) { this.titles.set(id,row); }
+      else { this.titles.delete(id); }
+      this.dirtyTitles.set(id,this.lightTitle(row)); this.version++;
     });
     this.titleWrites.set(id,task);
     try { await task; }
@@ -152,14 +197,16 @@ export class PresentationRepository {
   }
   async hydrateSeason(item: Media, season: number): Promise<void> {
     if (item.kind === 'show' && season > 0 && canReadDetails(item)) {
-      await this.hydrateFlights.run(item.id+':'+season,() => this.readSeason(item,season));
+      const version=this.residency;
+      await this.hydrateFlights.run(JSON.stringify([item.id,season,version]),() => this.readSeason(item,season,version));
     }
   }
-  private async readSeason(item: Media, season: number): Promise<void> {
+  private async readSeason(item: Media, season: number, version: number): Promise<void> {
     const key = item.id + ':' + season;
     if (this.loadedSeasons.has(key)) { return; }
     const rows = await this.db.querySql('SELECT payload FROM presentation_season WHERE show_id=? AND season=?',[item.id,season]);
     try {
+      if (version!==this.residency) { return; }
       if (rows.goToFirstRow()) {
         try {
           const row = JSON.parse(rows.getString(0)) as SeasonPresentation;
@@ -174,15 +221,19 @@ export class PresentationRepository {
   async season(item: Media, season: number, clientId: string, language: string): Promise<void> {
     if (language !== 'zh' || item.kind !== 'show' || season <= 0 || !canReadDetails(item)) { return; }
     const key = item.id + ':' + season;
+    const version=this.residency;
     await this.seasonFlights.run(JSON.stringify([clientId,key,language]), () => this.loadSeason(item,season,clientId));
+    if (version===this.residency && !this.loadedSeasons.has(key)) { await this.hydrateSeason(item,season); }
   }
   private async loadSeason(item: Media, season: number, clientId: string): Promise<void> {
     const key = item.id + ':' + season;
+    const version=this.residency;
     await this.hydrateSeason(item,season);
-    if (!clientId) { return; }
+    if (version!==this.residency || !clientId) { return; }
     const old = this.seasons.get(key);
     if (!seasonNeedsTranslation(old, Date.now())) { return; }
     const next = await readChineseSeason(item, season, clientId);
+    if (version!==this.residency) { return; }
     const merged: EpisodePresentation[] = [];
     for (const episode of next.episodes) {
       const previous = old?.episodes.find((value: EpisodePresentation) => value.id === episode.id && value.number === episode.number);
@@ -195,6 +246,7 @@ export class PresentationRepository {
     if (!validSeason(next)) { throw new Error('Invalid merged season'); }
     await this.db.executeSql('INSERT OR REPLACE INTO presentation_season(show_id,season,payload) VALUES(?,?,?)',
       [next.showId, next.season, JSON.stringify(next)]);
+    if (version!==this.residency) { return; }
     this.seasons.set(key, next);
     this.dirtySeasons.set(key,next);
     this.version++;

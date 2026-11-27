@@ -18,7 +18,7 @@ class DiskSearch implements SearchStorage {
   }
   async write(scope: string,rows: SearchRecord[]): Promise<void> {
     const values: ValuesBucket[]=rows.map((row: SearchRecord): ValuesBucket=>({scope:scope,id:row.media.id,payload:JSON.stringify(row)}));
-    if (values.length && await this.db.batchInsert('search_catalog',values)!==values.length) { throw new Error('Search index write failed'); }
+    if (values.length && await this.db.batchInsertWithConflictResolution('search_catalog',values,relationalStore.ConflictResolution.ON_CONFLICT_REPLACE)!==values.length) { throw new Error('Search index write failed'); }
   }
   async recents(scope: string): Promise<string[]> {
     const result=await this.db.querySql('SELECT query FROM search_recent WHERE scope=? ORDER BY seq DESC LIMIT ?',[scope,SEARCH_RECENTS]);
