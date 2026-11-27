@@ -65,7 +65,18 @@ console.log('Movie progress candidate, sorter, pin and watched transition fixtur
 """,encoding="utf-8")
     subprocess.run(["node","test.cjs"],cwd=work,check=True)
 source=(root/"pages"/"Index.ets").read_text()
-assert "return projectMovieProgress(sources" in source
+# Validate the cached miss path still calls the original movie rules and
+# returns exactly that result; also require the fast path to be guarded.
+movie_rows=source.split("  private movieProgressRows(",1)[1].split("  private async setMovieProgressSort(",1)[0]
+guard=movie_rows.index("if (!this.movieCalendarCurrent()) { return []; }")
+hit=movie_rows.index("const cached = memo.get(key, now);")
+hit_return=movie_rows.index("if (cached) { return cached; }")
+compute=movie_rows.index("const rows = projectMovieProgress(sources, flags, this.movieProgressOptions, utc, query, this.movieRandomSeed);")
+cache=movie_rows.index("memo.put(key, rows, now, Date.parse(utc + 'T00:00:00Z') + 86400000);")
+result=movie_rows.index("return rows;")
+assert guard < hit < hit_return < compute < cache < result
+assert "this.currentProgressScope()" in movie_rows and "this.activeCloud()?.generation" in movie_rows
+assert "this.listRevision" in movie_rows and "this.libraryRevision" in movie_rows
 assert "this.markMovieProgress(row.media)" in source
 assert "await this.changeMediaIntent(row.media, 'movie', 'yes')" in source
 assert "await this.clearWatchedMoviePin(item, pinScope)" in source
