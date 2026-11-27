@@ -61,3 +61,22 @@ export function searchRows(input: SearchInput): Media[] {
   }
   return rows.map((row: SearchCandidate)=>row.media);
 }
+
+// Keep ID ordering and candidate identity across translation-only updates.
+// Catalog/account/membership changes still use the original full reconstruction.
+export class SearchCandidateTitles {
+  private rows:SearchCandidate[]=[];
+  private positions:Map<string,number>=new Map<string,number>();
+  private patches:number=0;
+  clear():void{this.rows=[];this.positions.clear();}
+  seed(rows:SearchCandidate[]):void{
+    this.clear();this.rows=rows;
+    for(let i=0;i<rows.length;i++){this.positions.set(rows[i].media.id,i);}
+  }
+  patch(id:string,title:string):void{
+    const pos=this.positions.get(id);if(pos===undefined){return;}
+    const old=this.rows[pos];if(old.localized===title){return;}
+    this.rows[pos]={media:old.media,votes:old.votes,localized:title};this.patches++;
+  }
+  patchCount():number{return this.patches;}
+}

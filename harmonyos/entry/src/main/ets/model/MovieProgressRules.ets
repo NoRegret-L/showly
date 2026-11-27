@@ -52,10 +52,15 @@ function randomKey(id: string, seed: number): number {
 export function movieProgressRows(sources: MovieProgressSource[], flags: ProgressFlag[],
   options: MovieProgressOptions, utcDay: string, query: string, seed: number): PersonalLibraryRow[] {
   const pins = new Set<string>(flags.filter((flag: ProgressFlag) => flag.pinned).map((flag: ProgressFlag) => flag.id));
-  const filtered = sources.filter((source: MovieProgressSource) => eligibleMovie(source, utcDay) &&
-    matchesText(query, source.row.media.title, source.translation));
-  const direction = options.descending ? -1 : 1;
-  filtered.sort((a: MovieProgressSource, b: MovieProgressSource): number => {
+  const filtered = sources.filter((source: MovieProgressSource) => movieSortEligible(source,utcDay,query));
+  filtered.sort((a: MovieProgressSource, b: MovieProgressSource): number => compareMovieSources(a,b,options,pins,seed));
+  return filtered.map((source: MovieProgressSource) => source.row);
+}
+export function movieSortEligible(source: MovieProgressSource,utcDay:string,query:string):boolean {
+  return eligibleMovie(source,utcDay) && matchesText(query,source.row.media.title,source.translation);
+}
+export function compareMovieSources(a:MovieProgressSource,b:MovieProgressSource,options:MovieProgressOptions,pins:Set<string>,seed:number):number {
+    const direction = options.descending ? -1 : 1;
     const pinned = Number(pins.has(b.row.media.id)) - Number(pins.has(a.row.media.id));
     if (pinned) { return pinned; }
     const am = a.metadata; const bm = b.metadata;
@@ -70,8 +75,6 @@ export function movieProgressRows(sources: MovieProgressSource[], flags: Progres
     }
     if (options.sort === 'random') { return randomKey(a.row.media.id, seed) - randomKey(b.row.media.id, seed); }
     return numberOrder(am.addedAt, bm.addedAt, options.descending);
-  });
-  return filtered.map((source: MovieProgressSource) => source.row);
 }
 export function clearMoviePin(flags: ProgressFlag[], id: string): ProgressFlag[] {
   return flags.filter((flag: ProgressFlag) => flag.id !== id);

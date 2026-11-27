@@ -96,13 +96,19 @@ export function collectionReleased(x: CollectionCandidate, mode: string, now: nu
   if (x.meta.release) { return false; }
   return mode === 'upcoming' ? x.row.media.year > year : x.row.media.year > 0 && x.row.media.year < year;
 }
-export function projectCollection(items: CollectionCandidate[], options: CollectionOptions, section: string, query: string, now: number): CollectionCandidate[] {
-  const result = items.filter((x: CollectionCandidate) => matchesText(query,x.row.media.title,x.translation) &&
+export function collectionSortEligible(x:CollectionCandidate,options:CollectionOptions,section:string,query:string,now:number):boolean {
+  return matchesText(query,x.row.media.title,x.translation) &&
     (!options.genres.length || !!x.meta?.genres.some((g: string) => options.genres.includes(g.toLowerCase()))) &&
     (x.row.media.kind !== 'show' || !options.networks.length || (!!x.meta && options.networks.includes(x.meta.network))) &&
-    (section !== 'queue' || collectionReleased(x,options.upcoming,now)));
-  const dir = options.descending ? -1 : 1;
-  result.sort((a: CollectionCandidate,b: CollectionCandidate): number => {
+    (section !== 'queue' || collectionReleased(x,options.upcoming,now));
+}
+export function projectCollection(items: CollectionCandidate[], options: CollectionOptions, section: string, query: string, now: number): CollectionCandidate[] {
+  const result=items.filter((x:CollectionCandidate)=>collectionSortEligible(x,options,section,query,now));
+  result.sort((a:CollectionCandidate,b:CollectionCandidate)=>compareCollectionCandidates(a,b,options,section));
+  return result;
+}
+export function compareCollectionCandidates(a:CollectionCandidate,b:CollectionCandidate,options:CollectionOptions,section:string):number {
+    const dir = options.descending ? -1 : 1;
     if (options.sort === 'title') { return dir*cmp(title(a),title(b)); }
     if (options.sort === 'rating') { return numeric(a.meta?.rating,b.meta?.rating,options.descending); }
     if (options.sort === 'runtime') { return numeric(a.meta?.runtime,b.meta?.runtime,options.descending); }
@@ -118,8 +124,6 @@ export function projectCollection(items: CollectionCandidate[], options: Collect
       return dir*(cmp(ad,bd) || year);
     }
     return numeric(a.added,b.added,options.descending);
-  });
-  return result;
 }
 export function recentCollection(items: CollectionCandidate[], amount: number): PersonalLibraryRow[] {
   return items.filter((x: CollectionCandidate) => x.added !== undefined)

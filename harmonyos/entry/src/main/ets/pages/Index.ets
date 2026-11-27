@@ -1,3 +1,4 @@
+import { StableDisplayOrder } from '../model/StableDisplayOrder';
 import { PageDisplayRows } from '../model/PageDisplayRows';
 import { ProgressTitleOrder } from '../model/ProgressTitleOrder';
 import { PresentationQueues, FramePublication } from '../model/PresentationQueue';
@@ -16,7 +17,7 @@ import { DisplayRevisions, LatestDisplayJobs } from '../model/DisplayJobs';
 import { ProgressSortInput, MovieSortInput, CollectionSortInput } from '../model/DisplaySort';
 import { diffDisplay, showDisplay, movieDisplay, collectionDisplay } from '../data/DisplayTasks';
 import { ViewportTasks, addPresentationTask } from '../model/ViewportTasks';
-import { CollectionCandidate, CollectionOptions, CollectionState, HiddenEntry, defaultCollection, emptyCollectionState, collectionMembers, recentCollection, recordCollectionDate, transitionCollectionDates, hideMedia } from '../model/CollectionRules';
+import { CollectionCandidate, CollectionOptions, CollectionState, HiddenEntry, defaultCollection, emptyCollectionState, collectionMembers, recentCollection, recordCollectionDate, transitionCollectionDates, hideMedia, collectionSortEligible, compareCollectionCandidates } from '../model/CollectionRules';
 import { PresentationAttempts, PresentationFailure, presentationFailure } from '../model/PresentationPolicy';
 import { presentationGate } from '../data/PresentationHttp';
 import { PresentationRepository } from '../data/PresentationRepository';
@@ -39,13 +40,13 @@ import { CandidateInput, CandidateBatch, CandidateResult, ProgressCandidateIndex
 import { CacheLifecycle, cacheResidency, memoryEvents } from '../model/CacheLifecycle';
 import { computeCandidateDisplay } from '../data/ProgressCandidateTask';
 import { ShowProjectionCache } from '../model/ProjectionCompute';
-import { MovieProgressOptions, MovieProgressSource, defaultMovieProgress, validMovieProgress, movieProgressRows as projectMovieProgress, clearMoviePin } from '../model/MovieProgressRules';
+import { MovieProgressOptions, MovieProgressSource, defaultMovieProgress, validMovieProgress, movieProgressRows as projectMovieProgress, clearMoviePin, movieSortEligible, compareMovieSources } from '../model/MovieProgressRules';
 import { ProgressSource, ProgressPreferences, ProgressFlag, ProgressRow, defaultProgress, validProgress, toggleProgressFlag, selectProgress, sortProgressCandidates, ProgressEntry, progressSections, progressEntries, progressPage, effectiveProgressFilter } from '../model/ProgressRules';
 import { CalendarSource, CalendarInput, CalendarEntry, CalendarIndex, CalendarText, CalendarJobInput, calendarClockKey, calendarExpiry, calendarPageRows, calendarTitleHidden } from '../model/CalendarRules';
 import { calendarDisplay } from '../data/CalendarTask';
 import { PersonalMovie, PersonalMovieSnapshot, readPersonalMovieDate, CollectionRating, readCollectionRatings } from '../data/TraktLibrary';
 import { MovieCalendarItem, filterMovies, moviePage } from '../data/MovieCalendar';
-import { SearchRecord, SearchCandidate, SearchInput, SearchOptions, SearchGeneration, defaultSearch, publicSearchRecord, searchScope, validSearchRecord } from '../model/SearchRules';
+import { SearchRecord, SearchCandidate, SearchInput, SearchOptions, SearchGeneration, defaultSearch, publicSearchRecord, searchScope, validSearchRecord, SearchCandidateTitles } from '../model/SearchRules';
 import { SearchRead } from '../model/SearchRead';
 import { openSearch } from '../data/SearchRepository';
 import { searchDisplay } from '../data/SearchTask';
@@ -417,6 +418,10 @@ struct Index {
   private searchCandidateSource?: SearchRecord[];
   private searchCandidateKey: string = '';
   private searchCandidates: SearchCandidate[] = [];
+  private searchTitleIndex=new SearchCandidateTitles();
+  private movieTitleOrder=new StableDisplayOrder<MovieProgressSource>((x:MovieProgressSource)=>x.row);
+  private movieAllTitleOrder=new StableDisplayOrder<MovieProgressSource>((x:MovieProgressSource)=>x.row);
+  private collectionTitleOrder=new StableDisplayOrder<CollectionCandidate>((x:CollectionCandidate)=>x.row);
   private searchHistoryGeneration: SearchGeneration = new SearchGeneration();
   @State libraryStatus: string = '';
   @State searchStatus: string = '';
@@ -1247,6 +1252,10 @@ struct Index {
       const prior = this.titleIndex.get(row.id);
       if ((prior?.text.title ?? '') !== row.text.title) {
         this.titleSortRevision++; sortDirty.add(row.id);
+        if(this.presentationLanguage==='zh'){
+          this.searchTitleIndex.patch(row.id,row.text.title);
+          this.movieTitleOrder.dirty(row.id);this.movieAllTitleOrder.dirty(row.id);this.collectionTitleOrder.dirty(row.id);
+        }
         if (row.id.startsWith('movie:')) { this.movieTitleRevision++; } else { this.showTitleRevision++; }
       }
       if (JSON.stringify(prior?.collection ?? null) !== JSON.stringify(row.collection ?? null)) {
@@ -1501,7 +1510,7 @@ struct Index {
     }
     if (!residency.search || pressure) {
       this.invalidateSearchLocal();
-      this.searchCandidateSource=undefined; this.searchCandidateKey=''; this.searchCandidates=[];
+      this.searchCandidateSource=undefined; this.searchCandidateKey=''; this.searchCandidates=[]; this.searchTitleIndex.clear();
       if (!residency.search) { this.searchRows.replace([],[],[]); }
       else { this.refreshSearchLocal(); }
     }
@@ -1512,10 +1521,10 @@ struct Index {
       this.showRows.replace([],[],[]);
     }
     if (!residency.calendar) { this.calendarIndex.clear(); this.calendarMemo.clear(); this.calendarRows.replace([],[],[]); }
-    if (!residency.movieProgress) { this.movieMemo.clear(); this.movieAllMemo.clear(); this.movieRowsSource.replace([],[],[]); }
+    if (!residency.movieProgress) { this.movieMemo.clear(); this.movieAllMemo.clear(); this.movieTitleOrder.clear(); this.movieAllTitleOrder.clear(); this.movieRowsSource.replace([],[],[]); }
     if (!residency.movieCalendar) { this.movieCalendarRows.replace([],[],[]); }
     if (!residency.movieProgress && !residency.movieCalendar && !residency.collection) { this.movieMetadataMemo.clear(); }
-    if (!residency.collection) { this.collectionIndexMemos.clear(); this.collectionItemsMemo.clear(); this.recentCollectionMemo.clear(); this.collectionRowsSource.replace([],[],[]); }
+    if (!residency.collection) { this.collectionIndexMemos.clear(); this.collectionItemsMemo.clear(); this.collectionTitleOrder.clear(); this.recentCollectionMemo.clear(); this.collectionRowsSource.replace([],[],[]); }
     if (!residency.discover) { this.discoverMemo.clear(); this.discoverRows.replace([],[],[]); }
     // Keep active detail/season data during foreground pressure; route changes
     // evict full payloads, but keep lightweight title/sort metadata.
@@ -1528,7 +1537,7 @@ struct Index {
     if (pressure || !this.pageVisible) { this.episodeStore?.releaseProjectionReadCache(); }
     if (pressure) {
       this.sortJobs.clear(); this.invalidateLazyWork();
-      this.movieMetadataMemo.clear(); this.movieMemo.clear(); this.movieAllMemo.clear();
+      this.movieMetadataMemo.clear(); this.movieMemo.clear(); this.movieAllMemo.clear(); this.movieTitleOrder.clear(); this.movieAllTitleOrder.clear();
       // The existing projection may be in use by verified observation. Do not
       // clear its shared cache mid-flight; derived module caches above suffice.
     }
@@ -3024,6 +3033,7 @@ struct Index {
   }
 
   private clearCloud(): void {
+    this.movieTitleOrder.clear();this.movieAllTitleOrder.clear();this.collectionTitleOrder.clear();
     this.clearProgressCandidates();
     this.resetSearchAccount();
     this.viewport.clear();
@@ -3787,7 +3797,7 @@ struct Index {
   private resetSearchAccount(): void {
     this.cancelSearchRead(); this.searchHistoryGeneration.cancel(); this.invalidateSearchLocal();
     this.searchAccount=''; this.searchRemote=[]; this.searchSubmitted=false; this.searching=false;
-    this.searchCandidateSource=undefined; this.searchCandidateKey=''; this.searchCandidates=[];
+    this.searchCandidateSource=undefined; this.searchCandidateKey=''; this.searchCandidates=[]; this.searchTitleIndex.clear();
     this.searchRecents=[]; this.searchStatus=''; this.title=''; this.results=[];
     this.searchRows.replace([],[],[]);
   }
@@ -3805,7 +3815,7 @@ struct Index {
       this.searchAccount=scope;
       this.cancelSearchRead(); this.searchHistoryGeneration.cancel(); this.invalidateSearchLocal();
       this.searchRemote=[]; this.searchSubmitted=false; this.searching=false; this.searchRecents=[];
-      this.searchCandidateSource=undefined; this.searchCandidateKey=''; this.searchCandidates=[];
+      this.searchCandidateSource=undefined; this.searchCandidateKey=''; this.searchCandidates=[]; this.searchTitleIndex.clear();
       if (previous) { this.title=''; }
       this.searchStatus=''; this.results=[]; this.searchRows.replace([],[],[]);
     }
@@ -3878,7 +3888,7 @@ struct Index {
         if (!current()) { continue; }
         const candidate=(row: SearchRecord): SearchCandidate=>({media:row.media,votes:row.votes,localized:language==='zh' ? this.titleIndex.get(row.media.id)?.text.title ?? '' : ''});
         const key=JSON.stringify([scope,this.libraryRevision,this.cloudLocalAllowed,this.activeCloud()?.generation ?? -1,
-          this.activeCloud()?.activity ?? '',language,language==='zh' ? this.titleSortRevision : 0]);
+          this.activeCloud()?.activity ?? '',language]);
         if (this.searchCandidateSource!==stored || this.searchCandidateKey!==key) {
           const merged=new Map<string,SearchRecord>();
           for (const row of stored) { if (validSearchRecord(row)) { merged.set(row.media.id,row); } }
@@ -3891,6 +3901,7 @@ struct Index {
           const ordered=Array.from(merged.values());
           ordered.sort((a: SearchRecord,b: SearchRecord)=>a.media.id<b.media.id ? -1 : a.media.id>b.media.id ? 1 : 0);
           this.searchCandidates=ordered.map(candidate);
+          this.searchTitleIndex.seed(this.searchCandidates);
           this.searchCandidateSource=stored; this.searchCandidateKey=key;
         }
         const input: SearchInput={catalog:this.searchCandidates,remote:this.searchRemote.map(candidate),
@@ -5196,9 +5207,9 @@ struct Index {
       .onScrollIndex((start: number,end: number,center: number)=>{ this.onListScroll('calendar',start); })
   }
 
-  private movieSortKey(query: string, utc: string): string {
+  private movieSortKey(query: string, utc: string, includeTitles:boolean=true): string {
     return JSON.stringify([this.displayRevisions.movie,this.libraryRevision,this.currentProgressScope(),this.activeCloud()?.generation ?? -1,
-      this.presentationLanguage,this.presentationLanguage==='zh' && (query || this.movieProgressOptions.sort==='title' || this.movieProgressOptions.sort==='userRating') ? this.titleVersion('movie') : 0,this.progressFlagScope,this.flagVersion('movie'),this.hiddenVersion('movie'),
+      this.presentationLanguage,includeTitles && this.presentationLanguage==='zh' && (query || this.movieProgressOptions.sort==='title' || this.movieProgressOptions.sort==='userRating') ? this.titleVersion('movie') : 0,this.progressFlagScope,this.flagVersion('movie'),this.hiddenVersion('movie'),
       this.movieProgressOptions,this.movieRandomSeed,utc,query]);
   }
   private movieProgressRows(query: string = this.movieProgressQuery, live: boolean = false, prepare: boolean = false): PersonalLibraryRow[] {
@@ -5212,6 +5223,15 @@ struct Index {
     if (cached) { return cached; }
     if (!live && !prepare) { return []; }
     if (!live && this.sortJobs.matches(query ? 'movie-query' : 'movie-all',JSON.stringify([this.presentationEpoch,key]))) { return []; }
+    const order=query?this.movieTitleOrder:this.movieAllTitleOrder;
+    const expiry=Date.parse(utc+'T00:00:00Z')+86400000;
+    if(!live){
+      const flags=this.progressFlagScope===this.currentProgressScope()?this.progressFlags:[];
+      const pins=new Set<string>(flags.filter((f:ProgressFlag)=>f.pinned).map((f:ProgressFlag)=>f.id));
+      const delta=order.update(this.movieSortKey(query,utc,false),now,(x:MovieProgressSource):MovieProgressSource=>({row:x.row,metadata:x.metadata,translation:this.presentationLanguage==='zh'?this.titleIndex.get(x.row.media.id)?.text.title??'':''}),
+        (x:MovieProgressSource)=>movieSortEligible(x,utc,query),(a:MovieProgressSource,b:MovieProgressSource)=>compareMovieSources(a,b,this.movieProgressOptions,pins,this.movieRandomSeed));
+      if(delta){memo.put(key,delta,now,expiry);return delta;}
+    }
     const metadata = this.movieMetadataIndex();
     const sources: MovieProgressSource[] = [];
     for (const row of this.personalLibrary()) {
@@ -5224,7 +5244,6 @@ struct Index {
           runtime: movie.runtime, rating: movie.rating, addedAt: movie.addedAt, userRating: movie.userRating } });
     }
     const flags = this.progressFlagScope === this.currentProgressScope() ? this.progressFlags : [];
-    const expiry = Date.parse(utc + 'T00:00:00Z') + 86400000;
     if (live) {
       const rows = projectMovieProgress(sources,flags,this.movieProgressOptions,utc,query,this.movieRandomSeed);
       memo.put(key,rows,now,expiry);
@@ -5246,6 +5265,8 @@ struct Index {
           (input.query && input.query !== this.movieProgressQuery) || key !== this.movieSortKey(input.query,input.utc) ||
           Date.now() < now || Date.now() >= expiry) { return; }
       const memo = input.query ? this.movieMemo : this.movieAllMemo;
+      const order=input.query?this.movieTitleOrder:this.movieAllTitleOrder;
+      order.seed(this.movieSortKey(input.query,input.utc,false),now,expiry,input.sources,rows);
       memo.put(key,rows,now,expiry);
     } catch (error) { if (!(error instanceof ReadCancelled)) { throw new Error((error as Error).message); } }
     finally {
@@ -5714,11 +5735,11 @@ struct Index {
     return rows;
   }
   private collectionSource(): PersonalLibraryRow[] { return this.collectionBase(); }
-  private collectionSortKey(): string {
+  private collectionSortKey(includeTitles:boolean=true): string {
     const options = this.collectionFilter === 'other' ? defaultCollection() : this.collectionOptions;
     return JSON.stringify([this.displayRevisions.collection,this.libraryRevision,this.collectionScope,this.currentProgressScope(),
       this.mediaMode,this.collectionFilter,this.collectionStatusFilter,this.collectionQuery,options,this.presentationLanguage,
-      this.presentationLanguage==='zh' && (this.collectionQuery.trim() || options.sort==='title' || options.sort==='userRating') ? this.titleVersion(this.mediaMode) : 0,this.collectionNeedsMetadata() ? this.metaVersion(this.mediaMode) : 0]);
+      includeTitles && this.presentationLanguage==='zh' && (this.collectionQuery.trim() || options.sort==='title' || options.sort==='userRating') ? this.titleVersion(this.mediaMode) : 0,this.collectionNeedsMetadata() ? this.metaVersion(this.mediaMode) : 0]);
   }
   private collectionItems(prepare: boolean = false): PersonalLibraryRow[] {
     if (this.signedIn && !this.activeCloud()) { return []; }
@@ -5728,6 +5749,10 @@ struct Index {
     const cached = this.sortedViewRevision >= 0 ? this.collectionItemsMemo.get(key,now) : undefined;
     if (cached) { return cached; }
     if (!prepare || this.sortJobs.matches('collection',JSON.stringify([this.presentationEpoch,key]))) { return []; }
+    const delta=this.collectionTitleOrder.update(this.collectionSortKey(false),now,(x:CollectionCandidate):CollectionCandidate=>({row:x.row,translation:this.presentationLanguage==='zh'?this.titleIndex.get(x.row.media.id)?.text.title??'':'',meta:x.meta,added:x.added,recent:x.recent,userRating:x.userRating,randomOrder:x.randomOrder}),
+      (x:CollectionCandidate)=>collectionSortEligible(x,options,this.collectionFilter,this.collectionQuery,now),
+      (a:CollectionCandidate,b:CollectionCandidate)=>compareCollectionCandidates(a,b,options,this.collectionFilter));
+    if(delta){this.collectionItemsMemo.put(key,delta,now,this.collectionTitleOrder.validUntil());return delta;}
     const candidates = this.collectionCandidates(this.collectionSource(),this.collectionFilter);
     let expiry = Number.MAX_SAFE_INTEGER;
     if (this.collectionFilter === 'queue' && options.upcoming !== 'all') {
@@ -5751,6 +5776,7 @@ struct Index {
       if (!this.sortJobs.current(slot,token) || !this.pageVisible || this.selectedMedia || this.tab !== 'library' ||
           epoch !== this.presentationEpoch || key !== this.collectionSortKey() ||
           (this.signedIn && !this.activeCloud()) || Date.now() < input.now || Date.now() >= expiry) { return; }
+      this.collectionTitleOrder.seed(this.collectionSortKey(false),input.now,expiry,input.candidates,rows);
       this.collectionItemsMemo.put(key,rows,input.now,expiry);
     } catch (error) { if (!(error instanceof ReadCancelled)) { throw new Error((error as Error).message); } }
     finally {
