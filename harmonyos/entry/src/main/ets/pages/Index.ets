@@ -5,6 +5,8 @@ import { ProgressSortInput, MovieSortInput, CollectionSortInput } from '../model
 import { diffDisplay, showDisplay, movieDisplay, collectionDisplay } from '../data/DisplayTasks';
 import { ViewportTasks, addPresentationTask } from '../model/ViewportTasks';
 import { CollectionCandidate, CollectionOptions, CollectionState, HiddenEntry, defaultCollection, emptyCollectionState, collectionMembers, recentCollection, recordCollectionDate, transitionCollectionDates, hideMedia } from '../model/CollectionRules';
+import { PresentationAttempts, PresentationFailure, runPresentationPass } from '../model/PresentationPolicy';
+import { presentationGate } from '../data/PresentationHttp';
 import { PresentationRepository } from '../data/PresentationRepository';
 import { TitlePresentation, PresentationTask, matchesText } from '../model/MediaPresentation';
 import { Media, CollectionDate, mediaLabel, setWatched } from '../model/Media';
@@ -74,9 +76,9 @@ struct Index {
   @State presentationStatus: string = '';
   @State languageBusy: boolean = false;
   private presentation?: PresentationRepository;
-  private presentationRunning: boolean = false;
-  private presentationPending: boolean = false;
-  private presentationBlocked: boolean = false;
+  private presentationLanes: Set<string> = new Set<string>();
+  private presentationAttempts: PresentationAttempts = new PresentationAttempts();
+  private presentationWorkVersion: number = 0;
   private presentationEpoch: number = 0;
   private presentationRoute: string = '';
   private presentationPublished: number = -1;
@@ -387,7 +389,6 @@ struct Index {
   onPageShow(): void {
     this.pageVisible = true;
     if (this.tab === 'discover' && !this.selectedMedia) { this.loadDiscover(this.discoverPage); }
-    this.presentationBlocked = false;
     this.requestPresentation();
     this.startNetworkListener();
     if (this.backupBusy) { return; }
@@ -410,7 +411,7 @@ struct Index {
     this.lazyRevision++;
     this.viewport.clear();
     this.cancelCatalogRepair();
-    this.presentationPending = false;
+    this.presentationWorkVersion++;
     this.presentationEpoch++;
     this.recoveryPending = false;
     this.mediaRecoveryPending = false;
@@ -427,7 +428,7 @@ struct Index {
     this.lazyRevision++;
     this.viewport.clear();
     this.cancelCatalogRepair();
-    this.presentationPending = false;
+    this.presentationWorkVersion++;
     this.presentationEpoch++;
     this.recoveryPending = false;
     this.mediaRecoveryPending = false;
@@ -465,6 +466,8 @@ struct Index {
           this.requestRecovery();
           this.requestMediaRecovery();
           this.requestObservation();
+          this.presentationAttempts.retry();
+          this.requestPresentation();
         }
       });
       listener.on('netLost', (handle: connection.NetHandle) => {
@@ -528,7 +531,6 @@ struct Index {
     this.sortJobs.clear();
     this.lazyRevision++;
     this.presentationEpoch++;
-    this.presentationBlocked = false;
     this.progressFlags = [];
     this.progressFlagScope = '';
     this.progressMenuId = '';
@@ -1119,7 +1121,6 @@ struct Index {
     this.presentationRevision = revision;
     // A localized sort or query can reveal a different page. One more pass
     // only after real cache changes converges to the newly visible artwork.
-    if (this.presentationRunning) { this.presentationPending = true; }
     this.scheduleLazyRows();
   }
 
@@ -1169,8 +1170,7 @@ struct Index {
     if (route !== this.presentationRoute) {
       this.presentationRoute = route;
       this.presentationEpoch++;
-      this.presentationBlocked = false;
-      this.presentationStatus = '';
+        this.presentationStatus = '';
     }
     this.requestPresentation();
   }
@@ -1296,9 +1296,9 @@ struct Index {
   }
   private requestPresentation(): void {
     this.scheduleLazyRows();
-    if (!this.pageVisible || !this.presentation || this.presentationBlocked) { return; }
-    this.presentationPending = true;
-    if (!this.presentationRunning) { this.loadPresentation(); }
+    if (!this.pageVisible || !this.presentation) { return; }
+    this.presentationWorkVersion++;
+    this.loadPresentation();
   }
 
   private addPresentationTask(tasks: Map<string,PresentationTask>, item: Media, artwork: boolean, season: number = 0,
@@ -1361,74 +1361,62 @@ struct Index {
     return Array.from(tasks.values());
   }
 
-  private async presentationLane(repo: PresentationRepository, tasks: PresentationTask[], client: string, language: string,
-    collection: boolean, text: boolean, current: () => boolean): Promise<boolean> {
-    let pagePublished = false;
-    if (text && language === 'zh') {
-      // Publish already cached visible translations before any remote wait.
-      try {
-        for (const task of tasks) {
-          if (!current()) { break; }
-          if (task.artwork && !this.selectedMedia && !this.viewport.has(task.media,task.season)) { continue; }
-          if (task.artwork && task.season > 0) { await repo.hydrateSeason(task.media,task.season); }
-        }
-        this.publishPresentation();
-      } catch (error) { this.publishPresentation(); return true; }
-    }
-    for (const task of tasks) {
-      if (!current()) { break; }
-      if (task.artwork && !this.selectedMedia && !this.viewport.has(task.media,task.season)) { continue; }
-      if (!pagePublished && !task.artwork) { this.publishPresentation(); pagePublished = true; }
-      try {
-        if (text) {
-          // Local season translation does not depend on the title or artwork request.
-          if (task.season > 0) { await repo.season(task.media,task.season,client,language); }
-          if (current()) { await repo.translation(task.media,client,language); }
-        } else {
-          await repo.artwork(task.media,client,task.artwork,task.posterUrls,collection);
-        }
-      } catch (error) {
-        this.publishPresentation();
-        return true;
+  private async presentationLane(lane: string): Promise<void> {
+    if (this.presentationLanes.has(lane)) { return; }
+    this.presentationLanes.add(lane);
+    try {
+      let processed=-1;
+      while (this.pageVisible && this.presentation && processed!==this.presentationWorkVersion) {
+        const repo=this.presentation;
+        processed=this.presentationWorkVersion;
+        const version=processed;
+        const epoch=this.presentationEpoch;
+        const client=this.clientId;
+        const language=this.presentationLanguage;
+        const account=this.currentProgressScope();
+        const route=this.viewScope();
+        const selected=this.selectedMedia?.id ?? '';
+        const collection=this.tab==='library' && !selected;
+        const current=(): boolean=>this.pageVisible && this.presentation===repo && this.presentationEpoch===epoch &&
+          this.clientId===client && this.presentationLanguage===language && account===this.currentProgressScope() && route===this.viewScope();
+        const relevant=(): boolean=>current() && version===this.presentationWorkVersion;
+        const tasks=this.presentationTasks();
+        const eligible=(task: PresentationTask): boolean=>{
+          if (task.artwork && !this.selectedMedia && !this.viewport.has(task.media,task.season)) { return false; }
+          if (lane==='local') { return language==='zh' && task.season>0; }
+          if (lane==='title') { return language==='zh' && (task.artwork || !!selected); }
+          if (lane==='season') { return language==='zh' && task.season>0 && (task.artwork || !!selected); }
+          return task.artwork || collection;
+        };
+        await runPresentationPass(tasks,lane,this.presentationAttempts,JSON.stringify([client,language,account]),relevant,eligible,
+          async (task: PresentationTask): Promise<void>=>{
+            if (lane==='local') { await repo.hydrateSeason(task.media,task.season); }
+            else if (lane==='title') { await repo.translation(task.media,client,language); }
+            else if (lane==='season') { await repo.season(task.media,task.season,client,language); }
+            else { await repo.artwork(task.media,client,task.artwork,task.posterUrls,collection); }
+          },
+          (): void=>{ if (current()) { this.publishPresentation(); } },
+          (error: PresentationFailure): void=>{
+            if (!current()) { return; }
+            if (error.category==='limited') { this.presentationStatus='资料服务限流；遵守服务端重试时间，已缓存资料仍可用。'; }
+            else if (error.category==='authorization') { this.presentationStatus='资料服务授权失败；请检查 Client ID 或图片来源。'; }
+            else if (error.category!=='missing' && !this.presentationStatus) { this.presentationStatus='部分影视资料暂不可用；其他资料继续加载。'; }
+          });
+        // A completed public read can be cached even after its consumer left.
+        // Only the active page may publish it; the next pass adopts the new scope.
+        if (current()) { this.publishPresentation(); }
       }
-    }
-    this.publishPresentation();
-    return false;
+    } finally { this.presentationLanes.delete(lane); }
   }
 
   private async loadPresentation(): Promise<void> {
-    const repo = this.presentation;
-    if (!repo || this.presentationRunning) { return; }
-    // Let state setters finish before collecting current-page tasks.
-    await Promise.resolve();
-    if (this.presentationRunning || !this.pageVisible || this.presentationBlocked) { return; }
-    this.presentationRunning = true;
-    try {
-      while (this.presentationPending && this.pageVisible && !this.presentationBlocked) {
-        this.presentationPending = false;
-        const client = this.clientId;
-        const language = this.presentationLanguage;
-        const tab = this.tab;
-        const mode = this.mediaMode;
-        const progress = this.progressMode;
-        const selected = this.selectedMedia?.id ?? '';
-        const epoch = this.presentationEpoch;
-        const current = (): boolean => this.pageVisible && this.presentationEpoch === epoch &&
-          this.clientId === client && this.presentationLanguage === language && this.tab === tab &&
-          this.mediaMode === mode && this.progressMode === progress && (this.selectedMedia?.id ?? '') === selected;
-        // Two independent resource lanes, one sequential producer per lane.
-        // No arbitrary concurrency multiplier; neither waits on the other's I/O.
-        const tasks = this.presentationTasks();
-        const failed = await Promise.all([
-          this.presentationLane(repo,tasks,client,language,tab === 'library' && !selected,false,current),
-          this.presentationLane(repo,tasks,client,language,false,true,current)
-        ]);
-        if (current() && failed.some((value: boolean) => value)) {
-          this.presentationStatus = '部分海报或译名暂不可用；下拉刷新可重试。';
-          this.presentationBlocked = true;
-        }
-      }
-    } finally { this.presentationRunning = false; }
+    if (!this.presentation || !this.pageVisible) { return; }
+    // Independent resource lanes, not a configurable concurrency multiplier.
+    // A slow season never holds the title, local hydration or artwork lane.
+    await Promise.all([
+      this.presentationLane('local'),this.presentationLane('title'),
+      this.presentationLane('season'),this.presentationLane('artwork')
+    ]);
   }
 
   private async changePresentationLanguage(language: string): Promise<void> {
@@ -1438,8 +1426,7 @@ struct Index {
       await this.settings.saveLanguage(language);
       this.presentationLanguage = language;
       this.presentationEpoch++;
-      this.presentationBlocked = false;
-      this.presentationStatus = '';
+        this.presentationStatus = '';
       this.nextPage = 1;
       this.collectionPage = 1;
       this.movieProgressPage = 1;
@@ -4772,7 +4759,8 @@ struct Index {
       this.movieRatingRows = [];
     }
     this.presentation?.retryArtwork();
-    this.presentationBlocked = false;
+    this.presentationAttempts.retry();
+    presentationGate.manualProbe();
     this.presentationStatus = '';
     try {
       if (this.selectedMedia) {
@@ -4924,8 +4912,7 @@ struct Index {
         this.collectionGenreDraft = options.genres.join(',');
         this.collectionNetworkDraft = options.networks.join(',');
         this.resetCollection();
-        this.presentationBlocked = false;
-        this.onPresentationChanged();
+            this.onPresentationChanged();
       }
     } catch (error) { this.collectionRuleStatus = '收藏排序或筛选保存失败。'; }
     finally { this.collectionEditBusy = false; }
@@ -5379,7 +5366,8 @@ struct Index {
   private async translateDetail(item: Media): Promise<void> {
     if (this.selectedMedia?.id !== item.id) { return; }
     this.presentation?.retryArtwork();
-    this.presentationBlocked = false;
+    this.presentationAttempts.retry();
+    presentationGate.manualProbe();
     this.presentationStatus = '';
     this.requestPresentation();
   }

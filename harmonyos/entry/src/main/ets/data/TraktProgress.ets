@@ -1,4 +1,5 @@
 import { http } from '@kit.NetworkKit';
+import { checkPresentationService, presentationHttpError, traktPresentationService } from './PresentationHttp';
 import { TraktSession, traktAuth } from './TraktAuth';
 import { Media } from '../model/Media';
 import { canReadDetails } from './TraktDetails';
@@ -83,6 +84,8 @@ export async function readChinese(item: Media, clientId: string): Promise<Chines
   if (!clientId || !canReadDetails(item)) {
     throw new Error('Invalid translation request');
   }
+  const service=traktPresentationService(clientId);
+  checkPresentationService(service);
   const request = http.createHttp();
   try {
     const response = await request.request('https://api.trakt.tv/' +
@@ -94,7 +97,7 @@ export async function readChinese(item: Media, clientId: string): Promise<Chines
     });
     if (response.responseCode === 404) { return { title: '', overview: '' }; }
     if (response.responseCode !== 200 || typeof response.result !== 'string') {
-      throw new Error('Translation HTTP ' + response.responseCode);
+      throw presentationHttpError(service,response.responseCode,JSON.stringify(response.header),true);
     }
     const rows = JSON.parse(response.result) as Translation[];
     if (!Array.isArray(rows)) {
@@ -113,6 +116,8 @@ export async function readChineseSeason(item: Media, season: number, clientId: s
   if (!clientId || item.kind !== 'show' || !canReadDetails(item) || !Number.isSafeInteger(season) || season <= 0) {
     throw new Error('Invalid season translation identity');
   }
+  const service=traktPresentationService(clientId);
+  checkPresentationService(service);
   const request = http.createHttp();
   try {
     const response = await request.request('https://api.trakt.tv/shows/' + item.id.substring(5) +
@@ -122,7 +127,7 @@ export async function readChineseSeason(item: Media, season: number, clientId: s
       expectDataType: http.HttpDataType.STRING
     });
     if (response.responseCode === 404) { return { showId: item.id, season: season, fetchedAt: Date.now(), episodes: [] }; }
-    if (response.responseCode !== 200 || typeof response.result !== 'string') { throw new Error('Season translation HTTP ' + response.responseCode); }
+    if (response.responseCode !== 200 || typeof response.result !== 'string') { throw presentationHttpError(service,response.responseCode,JSON.stringify(response.header),true); }
     const rows = JSON.parse(response.result) as RemoteSeasonTranslation[];
     if (!Array.isArray(rows)) { throw new Error('Invalid season translation response'); }
     const episodes: EpisodePresentation[] = [];

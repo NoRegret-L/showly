@@ -1,4 +1,6 @@
 import { http } from '@kit.NetworkKit';
+import { PresentationFailure } from '../model/PresentationPolicy';
+import { checkPresentationService, presentationHttpError, traktPresentationService } from './PresentationHttp';
 import { fileIo, fileUri } from '@kit.CoreFileKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { Media } from '../model/Media';
@@ -63,6 +65,8 @@ export async function readDetails(item: Media, clientId: string, reload: boolean
 }
 async function fetchDetails(item: Media, clientId: string, key: string, epoch: number): Promise<MediaDetail> {
   const id = item.id.substring(item.kind.length + 1);
+  const service=traktPresentationService(clientId);
+  checkPresentationService(service);
   const request = http.createHttp();
   try {
     const response = await request.request('https://api.trakt.tv/' +
@@ -72,7 +76,7 @@ async function fetchDetails(item: Media, clientId: string, key: string, epoch: n
       expectDataType: http.HttpDataType.STRING
     });
     if (response.responseCode !== 200 || typeof response.result !== 'string') {
-      throw new Error('Trakt summary HTTP ' + response.responseCode);
+      throw presentationHttpError(service,response.responseCode,JSON.stringify(response.header),true);
     }
     const data = JSON.parse(response.result) as Summary;
     if (typeof data.title !== 'string' || !data.ids || data.ids.trakt !== Number(id)) {
@@ -110,6 +114,7 @@ export function clearDetailMemory(): void {
 export interface PosterResult {
   uri: string;
   status: string;
+  failure?: PresentationFailure;
 }
 
 // The API examples and CDN hosts change over time. Validate the authority and
@@ -211,6 +216,8 @@ async function downloadPoster(cacheDir: string, item: Media, candidates: string[
   } catch (error) {
     // Cache miss; download below.
   }
+  const service='poster:'+host;
+  checkPresentationService(service);
   const request = http.createHttp();
   const temp = path + '.' + Date.now() + '.' + (++posterWriteSequence) + '.part';
   let response: http.HttpResponse;
@@ -222,20 +229,21 @@ async function downloadPoster(cacheDir: string, item: Media, candidates: string[
     });
   } catch (error) {
     const code = (error as BusinessError).code;
-    return { uri: '', status: networkError(code) + '（' + host + '，错误码 ' + code + '）' };
+    return { uri: '', status: networkError(code) + '（' + host + '，错误码 ' + code + '）', failure:new PresentationFailure('temporary',0) };
   } finally {
     request.destroy();
   }
   if (response.responseCode !== 200) {
-    return { uri: '', status: '海报 CDN HTTP ' + response.responseCode + ' · ' + host };
+    return { uri: '', status: '海报 CDN HTTP ' + response.responseCode + ' · ' + host,
+      failure:presentationHttpError(service,response.responseCode,JSON.stringify(response.header),false) };
   }
   if (!(response.result instanceof ArrayBuffer)) {
-    return { uri: '', status: '海报 CDN 返回 HTTP 200，但响应不是二进制图片 · ' + host };
+    return { uri: '', status: '海报 CDN 返回 HTTP 200，但响应不是二进制图片 · ' + host, failure:new PresentationFailure('temporary',200) };
   }
   const bytes = response.result;
   const signature = new Uint8Array(bytes);
   if (!imageFormat(signature)) {
-    return { uri: '', status: '海报 CDN 未返回支持的图片文件头 · ' + host };
+    return { uri: '', status: '海报 CDN 未返回支持的图片文件头 · ' + host, failure:new PresentationFailure('temporary',200) };
   }
   try {
     const file = fileIo.openSync(temp, fileIo.OpenMode.CREATE | fileIo.OpenMode.WRITE_ONLY | fileIo.OpenMode.TRUNC);
@@ -250,7 +258,7 @@ async function downloadPoster(cacheDir: string, item: Media, candidates: string[
     fileIo.renameSync(temp, path);
     return { uri: fileUri.getUriFromPath(path), status: '海报已下载并缓存 · ' + host };
   } catch (error) {
-    return { uri: '', status: '海报下载成功，但本地缓存写入失败（错误码 ' + (error as BusinessError).code + '）' };
+    return { uri: '', status: '海报下载成功，但本地缓存写入失败（错误码 ' + (error as BusinessError).code + '）', failure:new PresentationFailure('temporary',0) };
   } finally {
     try {
       if (fileIo.accessSync(temp)) {

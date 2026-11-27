@@ -2,6 +2,7 @@ import { relationalStore } from '@kit.ArkData';
 import { common } from '@kit.AbilityKit';
 import { Media } from '../model/Media';
 import { ReadFlight } from '../model/ReadFlight';
+import { PresentationFailure, presentationFailure } from '../model/PresentationPolicy';
 import { TitlePresentation, SeasonPresentation, EpisodePresentation, TranslationText, CollectionMeta, validTitle, validSeason, titleNeedsTranslation, seasonNeedsTranslation, mergeText } from '../model/MediaPresentation';
 import { readDetails, cachePoster, cachedPoster, canReadDetails } from './TraktDetails';
 import { readChinese, readChineseSeason } from './TraktProgress';
@@ -24,6 +25,7 @@ export class PresentationRepository {
   private artFlights = new ReadFlight<void>();
   private textFlights = new ReadFlight<void>();
   private seasonFlights = new ReadFlight<void>();
+  private hydrateFlights = new ReadFlight<void>();
   constructor(db: relationalStore.RdbStore, dir: string, oldDir: string) {
     this.db = db; this.dir = dir; this.oldDir = oldDir;
   }
@@ -69,33 +71,47 @@ export class PresentationRepository {
     let urls = prior.posterUrls.length ? prior.posterUrls : hints;
     let uri = prior.posterUri;
     let meta = prior.collection;
-    let failed = false;
-    if (collection && clientId && !meta) {
-      const detail = await readDetails(item,clientId);
-      meta = detail.collection;
-      if (!urls.length) { urls = detail.posterUrls; }
-      await this.saveTitlePatch(item.id,{ collection: meta, posterUrls: urls });
+    // Local file reuse is independent of a failed/limited metadata request.
+    if (artwork && !this.artChecked.has(item.id)) {
+      this.artChecked.add(item.id);
+      uri = cachedPoster(this.dir,item,urls) || cachedPoster(this.oldDir,item,urls);
     }
-    if (artwork) {
-      if (!this.artChecked.has(item.id)) {
-        this.artChecked.add(item.id);
-        uri = cachedPoster(this.dir,item,urls) || cachedPoster(this.oldDir,item,urls);
-      }
-      if (!uri && clientId && !this.artAttempted.has(item.id)) {
-        this.artAttempted.add(item.id);
-        try {
-          if (!urls.length) { urls = (await readDetails(item,clientId)).posterUrls; }
-          for (const url of urls) {
-            const result = await cachePoster(this.dir,item,[url]);
-            if (result.uri) { uri = result.uri; break; }
-          }
-        } catch (error) { failed = !(error as Error).message.includes('HTTP 404'); }
-      }
-      await this.saveTitlePatch(item.id,{ posterUrls: urls, posterUri: uri, collection: meta });
-    } else if (urls.length && !prior.posterUrls.length) {
-      await this.saveTitlePatch(item.id,{ posterUrls: urls });
+    if (artwork || (urls.length && !prior.posterUrls.length)) {
+      await this.saveTitlePatch(item.id,{posterUrls:urls,posterUri:uri});
     }
-    if (failed) { throw new Error('Artwork request failed'); }
+    if (!clientId) { return; }
+    const attempt=JSON.stringify([clientId,item.id,urls]);
+    let missingSummary=false;
+    if (collection && !meta) {
+      try {
+        const detail=await readDetails(item,clientId);
+        meta=detail.collection;
+        if (!urls.length) { urls=detail.posterUrls; }
+        await this.saveTitlePatch(item.id,{collection:meta,posterUrls:urls});
+      } catch (error) {
+        if (presentationFailure(error as Error).category!=='missing') { throw error; }
+        missingSummary=true;
+      }
+    }
+    if (!artwork || uri || this.artAttempted.has(attempt)) { return; }
+    if (!urls.length && !missingSummary) {
+      try { urls=(await readDetails(item,clientId)).posterUrls; }
+      catch (error) { if (presentationFailure(error as Error).category!=='missing') { throw error; } }
+    }
+    let failed: PresentationFailure | undefined;
+    for (const url of urls) {
+      const result=await cachePoster(this.dir,item,[url]);
+      if (result.uri) { uri=result.uri; break; }
+      if (result.failure && result.failure.category!=='missing') {
+        if (result.failure.category==='limited') { throw result.failure; }
+        failed=result.failure;
+      }
+    }
+    await this.saveTitlePatch(item.id,{posterUrls:urls,posterUri:uri,collection:meta});
+    if (!uri && failed) { throw failed; }
+    // Only a completed result or verified absence is a completed attempt.
+    this.artAttempted.add(JSON.stringify([clientId,item.id,urls]));
+    this.artAttempted.add(attempt);
   }
   async translation(item: Media, clientId: string, language: string): Promise<void> {
     if (language !== 'zh' || !clientId || !canReadDetails(item)) { return; }
@@ -127,7 +143,9 @@ export class PresentationRepository {
     finally { if (this.titleWrites.get(id) === task) { this.titleWrites.delete(id); } }
   }
   async hydrateSeason(item: Media, season: number): Promise<void> {
-    if (item.kind === 'show' && season > 0 && canReadDetails(item)) { await this.readSeason(item,season); }
+    if (item.kind === 'show' && season > 0 && canReadDetails(item)) {
+      await this.hydrateFlights.run(item.id+':'+season,() => this.readSeason(item,season));
+    }
   }
   private async readSeason(item: Media, season: number): Promise<void> {
     const key = item.id + ':' + season;
@@ -148,11 +166,11 @@ export class PresentationRepository {
   async season(item: Media, season: number, clientId: string, language: string): Promise<void> {
     if (language !== 'zh' || item.kind !== 'show' || season <= 0 || !canReadDetails(item)) { return; }
     const key = item.id + ':' + season;
-    await this.seasonFlights.run(key, () => this.loadSeason(item,season,clientId));
+    await this.seasonFlights.run(JSON.stringify([clientId,key,language]), () => this.loadSeason(item,season,clientId));
   }
   private async loadSeason(item: Media, season: number, clientId: string): Promise<void> {
     const key = item.id + ':' + season;
-    await this.readSeason(item,season);
+    await this.hydrateSeason(item,season);
     if (!clientId) { return; }
     const old = this.seasons.get(key);
     if (!seasonNeedsTranslation(old, Date.now())) { return; }
