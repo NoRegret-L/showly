@@ -1,3 +1,4 @@
+import { ReadCancelled } from './ReadFlight';
 import { PresentationTask } from './MediaPresentation';
 
 // Only response status and protocol-defined retry information control a
@@ -93,6 +94,7 @@ export async function runPresentationPass(tasks: PresentationTask[],lane: string
     const generation=attempts.generation();
     try { await work(task); }
     catch (error) {
+      if (error instanceof ReadCancelled) { continue; }
       const failure=presentationFailure(error as Error);
       // A scroll or route change suppresses publication, not the failure of
       // the resource in its captured scope. An explicit retry wins a race.

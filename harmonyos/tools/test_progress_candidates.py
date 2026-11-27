@@ -44,7 +44,7 @@ page=(root/"pages"/"Index.ets").read_text()
 projection=(root/"data"/"LibraryProjection.ets").read_text()
 task=(root/"data"/"ProgressCandidateTask.ets").read_text()
 assert "progressRow.sourceStateKey = work.key" in projection and "progressRow.sourceCatalogKey = work.catalogKey" in projection
-assert "inputs:plan.pending" in page and "await taskpool.execute(progressCandidateTask" in task
+assert "inputs:plan.pending" in page and "executeDisplayTask(new taskpool.Task(progressCandidateTask" in task
 assert "this.candidateIndex.retain(" in page and "this.candidateIndex.remove(showId)" in page
 assert "this.scheduleCandidateWake(output.expiry)" in page and "this.cancelCandidateWake()" in page
 mark=page.split("  private async markNext(",1)[1].split("  private invalidateMovieCalendar",1)[0]

@@ -56,7 +56,7 @@ assert "calendar.push({media:row.media,full:full,watchedIds:effective?.complete 
 assert "this.publishLocalCalendar(initial)" in page and page.count("this.publishLocalCalendar(result)")==2
 assert "this.calendarSourceScope===this.calendarScopeKey()" in page
 assert "this.sortJobs.current('calendar',token)" in page and "key===this.calendarKey()" in page
-assert "await taskpool.execute(calendarTask" in task
+assert "executeDisplayTask(new taskpool.Task(calendarTask" in task
 assert "row.synthetic ? 0 : row.season" in page
 view=page.split("  calendarView() {",1)[1].split("  private movieSortKey(",1)[0]
 assert "mark" not in view and "journal" not in view

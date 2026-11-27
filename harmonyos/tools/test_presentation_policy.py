@@ -69,7 +69,7 @@ assert "presentationBlocked" not in page
 assert "this.presentationLane('local')" in page and "this.presentationLane('title')" in page and "this.presentationLane('season')" in page
 assert "version===this.presentationWorkVersion" in page and "account===this.currentProgressScope()" in page
 assert "await repo.hydrateSeason(" in page and "await repo.translation(" in page and "await repo.season(" in page
-assert "await repo.artwork(task.media,\'\',task.artwork,task.posterUrls,false)" in page
+assert "await repo.artwork(task.media,\'\',task.artwork,task.posterUrls,false,consumer)" in page
 assert "this.summaryMissing.add(summaryKey)" in repo
 assert "throw error;" not in repo
 assert repo.count("const failure: PresentationFailure = presentationFailure(error as Error);")==2

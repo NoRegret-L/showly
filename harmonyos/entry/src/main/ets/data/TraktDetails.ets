@@ -43,7 +43,7 @@ export interface MediaDetail {
 let posterWriteSequence: number = 0;
 const summaries: Map<string, MediaDetail> = new Map<string, MediaDetail>();
 const summaryFlights = new ConsumerReadFlight<MediaDetail>();
-const posterFlights = new ReadFlight<PosterResult>();
+const posterFlights = new ConsumerReadFlight<PosterResult>();
 let summaryEpoch = 0;
 
 export function canReadDetails(item: Media): boolean {
@@ -193,10 +193,10 @@ export function cachedPoster(cacheDir: string, item: Media, candidates: string[]
   }
   return '';
 }
-export async function cachePoster(cacheDir: string, item: Media, candidates: string[]): Promise<PosterResult> {
-  return posterFlights.run(JSON.stringify([cacheDir,item.id,candidates]), () => downloadPoster(cacheDir,item,candidates));
+export async function cachePoster(cacheDir: string, item: Media, candidates: string[], consumer?: ReadCancel): Promise<PosterResult> {
+  return posterFlights.run(JSON.stringify([cacheDir,item.id,candidates]), (scope: ReadCancel) => downloadPoster(cacheDir,item,candidates,scope),consumer);
 }
-async function downloadPoster(cacheDir: string, item: Media, candidates: string[]): Promise<PosterResult> {
+async function downloadPoster(cacheDir: string, item: Media, candidates: string[], scope: ReadCancel): Promise<PosterResult> {
   if (!canReadDetails(item) || candidates.length === 0) {
     return { uri: '', status: 'Trakt API 未返回海报地址（images.poster 为空）' };
   }
@@ -225,7 +225,11 @@ async function downloadPoster(cacheDir: string, item: Media, candidates: string[
   }
   const service='poster:'+host;
   checkPresentationService(service);
+  scope.check();
   const request = http.createHttp();
+  let closed=false;
+  const close=(): void=>{ if (!closed) { closed=true; request.destroy(); } };
+  scope.subscribe(close);
   const temp = path + '.' + Date.now() + '.' + (++posterWriteSequence) + '.part';
   let response: http.HttpResponse;
   try {
@@ -235,11 +239,13 @@ async function downloadPoster(cacheDir: string, item: Media, candidates: string[
       expectDataType: http.HttpDataType.ARRAY_BUFFER
     });
   } catch (error) {
+    scope.check();
     const code = (error as BusinessError).code;
     return { uri: '', status: networkError(code) + '（' + host + '，错误码 ' + code + '）', failure:new PresentationFailure('temporary',0) };
   } finally {
-    request.destroy();
+    scope.unsubscribe(close); close();
   }
+  scope.check();
   if (response.responseCode !== 200) {
     return { uri: '', status: '海报 CDN HTTP ' + response.responseCode + ' · ' + host,
       failure:presentationHttpError(service,response.responseCode,JSON.stringify(response.header),false) };

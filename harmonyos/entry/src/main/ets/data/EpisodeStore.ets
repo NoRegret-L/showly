@@ -1,3 +1,4 @@
+import { ReadCancel, ConsumerReadFlight } from '../model/ReadFlight';
 import { relationalStore } from '@kit.ArkData';
 import { common } from '@kit.AbilityKit';
 import { http } from '@kit.NetworkKit';
@@ -108,11 +109,20 @@ export function validateCatalog(catalog: EpisodeCatalog, showId: string): void {
 }
 
 // Public catalog only; no account history, no Authorization header.
-export async function fetchFullEpisodeCatalog(item: Media, clientId: string): Promise<FullEpisodeCatalog> {
+const catalogFlights = new ConsumerReadFlight<FullEpisodeCatalog>();
+export async function fetchFullEpisodeCatalog(item: Media, clientId: string, consumer?: ReadCancel): Promise<FullEpisodeCatalog> {
+  const full=await catalogFlights.run(JSON.stringify([clientId,item.id]), (scope: ReadCancel)=>readFullEpisodeCatalog(item,clientId,scope),consumer);
+  return {media:item,status:full.status,fetchedAt:full.fetchedAt,seasons:full.seasons,rating:full.rating};
+}
+async function readFullEpisodeCatalog(item: Media, clientId: string, scope: ReadCancel): Promise<FullEpisodeCatalog> {
   if (!clientId || item.kind !== 'show' || !canReadDetails(item)) {
     throw new Error('Invalid catalog request');
   }
+  scope.check();
   const request = http.createHttp();
+  let closed=false;
+  const close=(): void=>{ if (!closed) { closed=true; request.destroy(); } };
+  scope.subscribe(close);
   try {
     const response = await request.request('https://api.trakt.tv/shows/' + item.id.substring(5) +
       '/seasons?extended=full,episodes', {
@@ -121,6 +131,7 @@ export async function fetchFullEpisodeCatalog(item: Media, clientId: string): Pr
         'trakt-api-key': clientId, 'User-Agent': 'Showly-HarmonyOS-Personal/0.7.3' },
       expectDataType: http.HttpDataType.STRING
     });
+    scope.check();
     if (response.responseCode !== 200 || typeof response.result !== 'string') {
       throw new Error('Episode catalog HTTP ' + response.responseCode);
     }
@@ -145,15 +156,16 @@ export async function fetchFullEpisodeCatalog(item: Media, clientId: string): Pr
     let status = '';
     let rating: number | undefined = undefined;
     try {
-      const details = await readDetails(item, clientId, true);
+      const details = await readDetails(item, clientId, true, scope);
       status = details.status;
       if (details.rating > 0 && details.rating <= 10) { rating = details.rating; }
-    } catch (error) {}
+    } catch (error) { scope.check(); }
+    scope.check();
     const result: FullEpisodeCatalog = { media: item, status: status, fetchedAt: Date.now(), seasons: seasons, rating: rating };
     validateFullCatalog(result, item.id);
     return result;
   } finally {
-    request.destroy();
+    scope.unsubscribe(close); close();
   }
 }
 

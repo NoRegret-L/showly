@@ -77,7 +77,7 @@ const repo=new DiscoverRead(disk,net);
     (work/"saved.json").write_text(json.dumps(records));db.close()
     subprocess.run(["node","test.cjs","read"],cwd=work,check=True)
 page=(root/"pages"/"Index.ets").read_text()
-assert "repo.load(clientId,request,force,publish)" in page
+assert "repo.load(clientId,request,force,publish,consumer)" in page
 assert "revision === this.discoverRevision && clientId === this.clientId" in page
 assert "this.discoverOptions === options" in page
 assert "this.discoverOptions.hideCollection && (!this.ready || (this.signedIn && !this.activeCloud()))" in page

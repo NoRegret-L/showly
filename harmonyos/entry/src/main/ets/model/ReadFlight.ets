@@ -17,12 +17,14 @@ export class ReadFlight<T> {
   }
 }
 
+export class ReadCancelled extends Error { constructor() { super('Read cancelled'); } }
+
 /** A cancel signal belongs to one consumer, not to an account or shared flight. */
 export class ReadCancel {
   private stopped: boolean=false;
   private listeners: Set<()=>void>=new Set<()=>void>();
   cancelled(): boolean { return this.stopped; }
-  check(): void { if (this.stopped) { throw new Error('Read cancelled'); } }
+  check(): void { if (this.stopped) { throw new ReadCancelled(); } }
   subscribe(listener: ()=>void): void { if (this.stopped) { listener(); } else { this.listeners.add(listener); } }
   unsubscribe(listener: ()=>void): void { this.listeners.delete(listener); }
   cancel(): void {
@@ -58,11 +60,11 @@ export class ConsumerReadFlight<T> {
       }
     };
     return new Promise<T>((resolve,reject)=>{
-      const stop=(): void=>{ release(); reject(new Error('Read cancelled')); };
+      const stop=(): void=>{ release(); reject(new ReadCancelled()); };
       consumer?.subscribe(stop);
       flight.task.then((value: T)=>{
         consumer?.unsubscribe(stop); release();
-        if (consumer?.cancelled()) { reject(new Error('Read cancelled')); } else { resolve(value); }
+        if (consumer?.cancelled()) { reject(new ReadCancelled()); } else { resolve(value); }
       }).catch((error: Error)=>{
         consumer?.unsubscribe(stop); release(); reject(error);
       });

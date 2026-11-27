@@ -1,3 +1,4 @@
+import { ReadCancel } from '../model/ReadFlight';
 import { http } from '@kit.NetworkKit';
 import { checkPresentationService, presentationHttpError, traktPresentationService } from './PresentationHttp';
 import { TraktSession, traktAuth } from './TraktAuth';
@@ -80,13 +81,17 @@ export async function readSeriesProgress(item: Media, session: TraktSession): Pr
   }
 }
 
-export async function readChinese(item: Media, clientId: string): Promise<ChineseText> {
+export async function readChinese(item: Media, clientId: string, scope?: ReadCancel): Promise<ChineseText> {
   if (!clientId || !canReadDetails(item)) {
     throw new Error('Invalid translation request');
   }
   const service=traktPresentationService(clientId);
   checkPresentationService(service);
+  scope?.check();
   const request = http.createHttp();
+  let closed=false;
+  const close=(): void=>{ if (!closed) { closed=true; request.destroy(); } };
+  scope?.subscribe(close);
   try {
     const response = await request.request('https://api.trakt.tv/' +
       (item.kind === 'movie' ? 'movies/' : 'shows/') + item.id.substring(item.kind.length + 1) +
@@ -95,6 +100,7 @@ export async function readChinese(item: Media, clientId: string): Promise<Chines
       header: { 'Content-Type': 'application/json', 'trakt-api-version': '2', 'trakt-api-key': clientId },
       expectDataType: http.HttpDataType.STRING
     });
+    scope?.check();
     if (response.responseCode === 404) { return { title: '', overview: '' }; }
     if (response.responseCode !== 200 || typeof response.result !== 'string') {
       throw presentationHttpError(service,response.responseCode,JSON.stringify(response.header),true);
@@ -106,19 +112,23 @@ export async function readChinese(item: Media, clientId: string): Promise<Chines
     const text = chineseText(rows.map((row: Translation): TranslationCandidate => ({ title: row.title, overview: row.overview, language: row.language, country: row.country })));
     return { title: text.title, overview: text.overview };
   } finally {
-    request.destroy();
+    scope?.unsubscribe(close); close();
   }
 }
 
 interface SeasonTranslationIds { trakt: number; }
 interface RemoteSeasonTranslation { season: number; number: number; ids: SeasonTranslationIds; translations?: TranslationCandidate[]; }
-export async function readChineseSeason(item: Media, season: number, clientId: string): Promise<SeasonPresentation> {
+export async function readChineseSeason(item: Media, season: number, clientId: string, scope?: ReadCancel): Promise<SeasonPresentation> {
   if (!clientId || item.kind !== 'show' || !canReadDetails(item) || !Number.isSafeInteger(season) || season <= 0) {
     throw new Error('Invalid season translation identity');
   }
   const service=traktPresentationService(clientId);
   checkPresentationService(service);
+  scope?.check();
   const request = http.createHttp();
+  let closed=false;
+  const close=(): void=>{ if (!closed) { closed=true; request.destroy(); } };
+  scope?.subscribe(close);
   try {
     const response = await request.request('https://api.trakt.tv/shows/' + item.id.substring(5) +
       '/seasons/' + season + '?translations=zh', {
@@ -126,6 +136,7 @@ export async function readChineseSeason(item: Media, season: number, clientId: s
       header: { 'Content-Type': 'application/json', 'trakt-api-version': '2', 'trakt-api-key': clientId },
       expectDataType: http.HttpDataType.STRING
     });
+    scope?.check();
     if (response.responseCode === 404) { return { showId: item.id, season: season, fetchedAt: Date.now(), episodes: [] }; }
     if (response.responseCode !== 200 || typeof response.result !== 'string') { throw presentationHttpError(service,response.responseCode,JSON.stringify(response.header),true); }
     const rows = JSON.parse(response.result) as RemoteSeasonTranslation[];
@@ -139,5 +150,5 @@ export async function readChineseSeason(item: Media, season: number, clientId: s
     const result: SeasonPresentation = { showId: item.id, season: season, fetchedAt: Date.now(), episodes: episodes };
     if (!validSeason(result)) { throw new Error('Invalid translated episode identity'); }
     return result;
-  } finally { request.destroy(); }
+  } finally { scope?.unsubscribe(close); close(); }
 }

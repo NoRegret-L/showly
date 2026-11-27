@@ -32,7 +32,9 @@ export class LazyRows<T> implements IDataSource, ScrollRows {
     const input = this.input(ids,keys);
     // No worker transfer for a content-only delta or empty list transition.
     const structural = input.oldIds.length > 0 && ids.length > 0 && !sameListOrder(input.oldIds,ids);
-    const edits = structural ? await differ(input) : planListDiff(input);
+    let edits: ListEdit[];
+    try { edits = structural ? await differ(input) : planListDiff(input); }
+    catch (error) { if (revision !== this.revision || !current()) { return false; } throw error; }
     if (revision !== this.revision || !current()) { return false; }
     this.apply(rows,ids,keys,edits);
     return true;

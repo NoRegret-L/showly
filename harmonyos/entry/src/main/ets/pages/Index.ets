@@ -1,12 +1,13 @@
+import { ListDiffInput } from '../model/ListDiff';
 import { FrameCallback, LengthMetrics } from '@kit.ArkUI';
 import { ScrollRows, ScrollAnchor, ScrollAnchors, captureAnchor, resolveAnchor } from '../model/ScrollAnchor';
-import { ReadCancel } from '../model/ReadFlight';
+import { ReadCancel, ReadCancelled } from '../model/ReadFlight';
 import { common } from '@kit.AbilityKit';
 import { LazyRows } from '../model/LazyRows';
 import { DisplayRevisions, LatestDisplayJobs } from '../model/DisplayJobs';
 import { ProgressSortInput, MovieSortInput, CollectionSortInput } from '../model/DisplaySort';
 import { diffDisplay, showDisplay, movieDisplay, collectionDisplay } from '../data/DisplayTasks';
-import { ViewportTasks, addPresentationTask } from '../model/ViewportTasks';
+import { ViewportTasks, addPresentationTask, mergeViewportTasks } from '../model/ViewportTasks';
 import { CollectionCandidate, CollectionOptions, CollectionState, HiddenEntry, defaultCollection, emptyCollectionState, collectionMembers, recentCollection, recordCollectionDate, transitionCollectionDates, hideMedia } from '../model/CollectionRules';
 import { PresentationAttempts, PresentationFailure, runPresentationPass } from '../model/PresentationPolicy';
 import { presentationGate } from '../data/PresentationHttp';
@@ -140,6 +141,13 @@ struct Index {
   private cacheLifecycle: CacheLifecycle=new CacheLifecycle();
   private searchConsumer: ReadCancel=new ReadCancel();
   private detailConsumer: ReadCancel=new ReadCancel();
+  private discoverConsumer: ReadCancel=new ReadCancel();
+  private searchLocalConsumer: ReadCancel=new ReadCancel();
+  private lazyConsumer: ReadCancel=new ReadCancel();
+  private presentationReaders: Map<string, ReadCancel>=new Map<string, ReadCancel>();
+  private presentationReaderTasks: Map<string, PresentationTask>=new Map<string, PresentationTask>();
+  private businessPresentationTasks?: Map<string,PresentationTask>;
+  private calendarHydrateConsumer: ReadCancel=new ReadCancel();
   private memoryListener: ()=>void=()=>{ this.handleMemoryPressure(); };
   private memorySubscribed: boolean=false;
   private memoryPending: boolean=false;
@@ -466,10 +474,10 @@ struct Index {
     this.updateCacheLifecycle();
     this.cancelCandidateWake();
     this.updateSearchContext();
-    this.discoverRevision++;
+    this.cancelDiscoverRead();
     this.discoverBusy = false;
     this.sortJobs.clear();
-    this.lazyRevision++;
+    this.invalidateLazyWork();
     this.viewport.clear();
     this.cancelCatalogRepair();
     this.presentationWorkVersion++;
@@ -488,10 +496,10 @@ struct Index {
     this.updateCacheLifecycle();
     this.cancelCandidateWake();
     this.updateSearchContext();
-    this.discoverRevision++;
+    this.cancelDiscoverRead();
     this.discoverBusy = false;
     this.sortJobs.clear();
-    this.lazyRevision++;
+    this.invalidateLazyWork();
     this.viewport.clear();
     this.cancelCatalogRepair();
     this.presentationWorkVersion++;
@@ -597,7 +605,7 @@ struct Index {
     this.libraryIndex.clear();
     this.libraryMemo.clear();
     this.sortJobs.clear();
-    this.lazyRevision++;
+    this.invalidateLazyWork();
     this.presentationEpoch++;
     this.progressFlags = [];
     this.progressFlagScope = '';
@@ -878,7 +886,7 @@ struct Index {
       this.fullSchedule = full;
       this.schedulePage = 1;
       if ((refresh || !full) && clientId) {
-        full = await fetchFullEpisodeCatalog(item, clientId);
+        full = await fetchFullEpisodeCatalog(item, clientId,this.detailConsumer);
         if (revision !== this.detailRevision || this.clientId !== clientId) { return; }
         if (refresh && this.canEditLibrary()) {
           this.invalidateSync();
@@ -886,6 +894,7 @@ struct Index {
         } else {
           await store.saveObservedSchedule(full);
         }
+        if (revision !== this.detailRevision || this.clientId !== clientId) { return; }
         this.fullSchedule = full;
         this.invalidateNextShows();
         this.requestProjection();
@@ -1306,7 +1315,7 @@ struct Index {
   }
   private viewScope(): string { return this.tab + ':' + this.mediaMode + ':' + this.progressMode + ':' + (this.selectedMedia?.id ?? ''); }
   private viewportChanged(item: Media, season: number, urls: string[], visible: boolean, tab: string, mode: string, slot: string = ''): void {
-    if (!this.pageVisible || this.selectedMedia || tab !== this.tab || (mode && mode !== this.progressMode) || !canReadDetails(item)) { return; }
+    if (!this.pageVisible || this.selectedMedia || tab !== this.tab || (mode && mode !== this.progressMode) || (tab!=='search' && item.kind!==this.mediaMode) || !canReadDetails(item)) { return; }
     if (this.viewport.update(item,season,urls,visible,slot)) { this.requestViewportPresentation(); }
   }
   private onShowViewChanged(): void { if (this.pageVisible && !this.selectedMedia && this.tab==='progress' && this.mediaMode==='show' && this.progressMode==='next') { this.onPresentationChanged(); } }
@@ -1330,6 +1339,8 @@ struct Index {
       this.movieCalendarMode, this.schedulePage, this.localSeason, this.presentationLanguage, this.collectionOptions]);
     if (route !== this.presentationRoute) {
       this.presentationRoute = route;
+      this.cancelPresentationReads();
+      this.sortJobs.clear();
       this.presentationEpoch++;
         this.presentationStatus = '';
     }
@@ -1341,6 +1352,10 @@ struct Index {
     const account=this.currentSearchAccount();
     if (this.scrollAccount!==account) { this.scrollAccount=account; this.scrollAnchors.clear(); this.scrollIndices.clear(); this.scrollScheduled=undefined; }
     if (!this.cacheLifecycle.transition(route,account)) { return; }
+    this.cancelPresentationReads();
+    this.businessPresentationTasks=undefined;
+    this.invalidateLazyWork();
+    if (!this.pageVisible || this.selectedMedia || this.tab!=='discover') { this.cancelDiscoverRead(); this.discoverBusy=false; }
     this.releaseInactiveCaches(false);
   }
   private handleMemoryPressure(): void {
@@ -1351,6 +1366,8 @@ struct Index {
       this.memoryTimer=-1; this.memoryPending=false;
       if (!this.memorySubscribed) { return; }
       this.cacheLifecycle.invalidate();
+      this.cancelPresentationReads();
+      this.businessPresentationTasks=undefined;
       this.releaseInactiveCaches(true);
       if (this.pageVisible) { this.requestPresentation(); }
     },0);
@@ -1368,7 +1385,7 @@ struct Index {
       }).catch(()=>{});
     }
     if (!residency.search || pressure) {
-      this.searchLocalVersion++;
+      this.invalidateSearchLocal();
       this.searchCandidateSource=undefined; this.searchCandidateKey=''; this.searchCandidates=[];
       if (!residency.search) { this.searchRows.replace([],[],[]); }
       else { this.refreshSearchLocal(); }
@@ -1394,7 +1411,7 @@ struct Index {
       this.presentationAttempts.retry();
     }
     if (pressure) {
-      this.sortJobs.clear(); this.lazyRevision++;
+      this.sortJobs.clear(); this.invalidateLazyWork();
       this.movieMetadataMemo.clear(); this.movieMemo.clear(); this.movieAllMemo.clear();
       // The existing projection may be in use by verified observation. Do not
       // clear its shared cache mid-flight; derived module caches above suffice.
@@ -1402,7 +1419,7 @@ struct Index {
   }
 
   private scheduleLazyRows(): void {
-    this.lazyRevision++;
+    this.invalidateLazyWork();
     if (this.lazyPending) { return; }
     this.lazyPending = true;
     this.updateLazyRows();
@@ -1413,6 +1430,8 @@ struct Index {
     this.lazyPending = false;
     if (!this.pageVisible || this.selectedMedia) { return; }
     const revision = this.lazyRevision;
+    const consumer=this.lazyConsumer;
+    const differ=(input: ListDiffInput)=>diffDisplay(input,consumer);
     const scope = this.viewScope();
     const account = this.currentProgressScope();
     const current = (): boolean => this.pageVisible && revision === this.lazyRevision && scope === this.viewScope() && account === this.currentProgressScope() && !this.selectedMedia;
@@ -1422,19 +1441,19 @@ struct Index {
       const rows: DiscoverItem[][] = [];
       for (let i=0;i<items.length;i+=2) { rows.push(items.slice(i,i+2)); }
       const committed = await this.discoverRows.submit(rows,rows.map((row: DiscoverItem[]) => row.map((item: DiscoverItem) => item.media.id).join(',')),
-        rows.map((row: DiscoverItem[]) => this.discoverRowKey(row)),diffDisplay,current);
+        rows.map((row: DiscoverItem[]) => this.discoverRowKey(row)),differ,current);
       if (committed && current()) { this.discoverTotal = result.total; this.discoverShownPage = result.page; this.discoverPages = result.pages; this.restoreScroll('discover'); }
       return;
     }
     if (this.tab === 'search') {
-      const committed=await this.searchRows.submit(this.results,this.results.map((item: Media) => item.id),this.results.map((item: Media) => this.searchRowKey(item)),diffDisplay,current);
+      const committed=await this.searchRows.submit(this.results,this.results.map((item: Media) => item.id),this.results.map((item: Media) => this.searchRowKey(item)),differ,current);
       if (committed && current()) { this.restoreScroll('search'); }
       return;
     }
     if (this.tab === 'progress' && this.progressMode === 'calendar') {
       if (this.mediaMode === 'movie') {
         const rows = this.movieCalendarCurrent() ? this.movieSlice() : [];
-        const committed=await this.movieCalendarRows.submit(rows,rows.map((row: MovieCalendarItem) => row.movie.media.id),rows.map((row: MovieCalendarItem) => this.movieCalendarKey(row)),diffDisplay,current);
+        const committed=await this.movieCalendarRows.submit(rows,rows.map((row: MovieCalendarItem) => row.movie.media.id),rows.map((row: MovieCalendarItem) => this.movieCalendarKey(row)),differ,current);
         if (committed && current()) { this.restoreScroll('movieCalendar'); }
       } else {
         const prepared = this.prepareCalendar();
@@ -1442,7 +1461,7 @@ struct Index {
         const pages = Math.max(1,Math.ceil(prepared.length/this.collectionPageSize));
         const summary: DisplaySummary = {key:this.calendarDisplayKey(),total:prepared.length,page:Math.min(this.calendarPage,pages),pages:pages};
         const rows = prepared;
-        const committed = await this.calendarRows.submit(rows,rows.map((row: CalendarEntry) => row.key),rows.map((row: CalendarEntry) => this.calendarRowKey(row)),diffDisplay,current);
+        const committed = await this.calendarRows.submit(rows,rows.map((row: CalendarEntry) => row.key),rows.map((row: CalendarEntry) => this.calendarRowKey(row)),differ,current);
         if (committed && current()) { this.calendarSummary = summary; }
       if (committed && current()) { this.restoreScroll('calendar'); }
       }
@@ -1463,7 +1482,7 @@ struct Index {
         }
       }
       const committed = await this.collectionRowsSource.submit(rows, rows.map((group: CollectionGroup) => group.key),
-        rows.map((group: CollectionGroup) => this.collectionGroupKey(group)),diffDisplay,current);
+        rows.map((group: CollectionGroup) => this.collectionGroupKey(group)),differ,current);
       if (committed && current()) { this.collectionSummary = summary; }
       if (committed && current()) { this.restoreScroll('library'); }
       return;
@@ -1477,7 +1496,7 @@ struct Index {
       const rows = prepared;
       const summary: DisplaySummary = {key:this.movieDisplayKey(),total:prepared.length,page:this.movieProgressPage,pages:Math.max(1,Math.ceil(prepared.length/this.collectionPageSize))};
       const committed = await this.movieRowsSource.submit(rows, rows.map((row: PersonalLibraryRow) => row.media.id),
-        rows.map((row: PersonalLibraryRow) => this.movieRowKey(row)),diffDisplay,current);
+        rows.map((row: PersonalLibraryRow) => this.movieRowKey(row)),differ,current);
       if (committed && current()) { this.movieSummary = summary; }
       if (committed && current()) { this.restoreScroll('movie'); }
     } else {
@@ -1489,7 +1508,7 @@ struct Index {
       const pages = this.nextPages();
       const summary: DisplaySummary = {key:this.showDisplayKey(),total:this.nextFiltered().length,page:Math.min(this.nextPage,pages),pages:pages};
       const committed = await this.showRows.submit(rows, rows.map((entry: ProgressEntry) => entry.key),
-        rows.map((entry: ProgressEntry) => this.showRowKey(entry)),diffDisplay,current);
+        rows.map((entry: ProgressEntry) => this.showRowKey(entry)),differ,current);
       if (committed && current()) { this.showSummary = summary; }
       if (committed && current()) { this.restoreScroll('show'); }
     }
@@ -1529,11 +1548,13 @@ struct Index {
   }
   private requestPresentation(): void {
     if (!this.pageVisible) { return; }
+    this.businessPresentationTasks=undefined;
     this.scheduleLazyRows();
     this.requestViewportPresentation();
   }
   private requestViewportPresentation(): void {
     if (!this.pageVisible || !this.presentation) { return; }
+    this.cancelInvisiblePresentationReads();
     this.presentationWorkVersion++;
     this.loadPresentation();
   }
@@ -1545,56 +1566,70 @@ struct Index {
     addPresentationTask(tasks,item,artwork,season,urls);
   }
 
+  private businessTasks(): Map<string,PresentationTask> {
+    if (this.businessPresentationTasks) { return this.businessPresentationTasks; }
+    const tasks=new Map<string,PresentationTask>();
+    if (this.tab==='library' && !this.selectedMedia) {
+      if (this.collectionNeedsMetadata() || this.businessTitlesNeeded()) {
+        for (const row of this.collectionBase()) { this.addPresentationTask(tasks,row.media,false); }
+      }
+    } else if (this.tab==='progress' && !this.selectedMedia && this.progressMode==='next') {
+      if (this.mediaMode==='show' && this.businessTitlesNeeded()) {
+        for (const row of this.progressData('')) {
+          this.addPresentationTask(tasks,row.media,false,this.nextQuery.trim()?row.episode.season:0);
+        }
+      } else if (this.mediaMode==='movie' && this.businessTitlesNeeded()) {
+        for (const row of this.movieProgressRows('')) { this.addPresentationTask(tasks,row.media,false); }
+      }
+    } else if (this.tab==='progress' && !this.selectedMedia && this.progressMode==='calendar' && this.mediaMode==='movie' && this.businessTitlesNeeded()) {
+      for (const row of this.movieRows(this.movieCalendarMode,'')) { this.addPresentationTask(tasks,row.media,false); }
+    }
+    this.businessPresentationTasks=tasks;
+    return tasks;
+  }
+
+  private businessTitlesNeeded(): boolean {
+    if (this.presentationLanguage!=='zh') { return false; }
+    if (this.tab==='library') { return !!this.collectionQuery.trim() || this.collectionOptions.sort==='title'; }
+    if (this.tab!=='progress') { return false; }
+    if (this.progressMode==='next') {
+      return this.mediaMode==='show' ? !!this.nextQuery.trim() || this.progressPrefs.sort==='title' :
+        !!this.movieProgressQuery.trim() || this.movieProgressOptions.sort==='title' || this.movieProgressOptions.sort==='userRating';
+    }
+    return this.progressMode==='calendar' && this.mediaMode==='movie' && !!this.movieCalendarQuery.trim();
+  }
+
   private presentationTasks(): PresentationTask[] {
     const tasks = new Map<string,PresentationTask>();
-    const detail = this.selectedMedia;
+    const detail=this.selectedMedia;
     if (detail) {
-      this.addPresentationTask(tasks, detail, true, this.localSeason > 0 ? this.localSeason : 0, this.detail?.posterUrls ?? []);
-      if (this.fullSchedule && detail.kind === 'show') {
-        for (const episode of this.extraSchedule().slice((this.schedulePage - 1) * this.collectionPageSize, this.schedulePage * this.collectionPageSize)) {
-          this.addPresentationTask(tasks, detail, false, episode.season);
+      this.addPresentationTask(tasks,detail,true,this.localSeason>0?this.localSeason:0,this.detail?.posterUrls??[]);
+      if (this.fullSchedule && detail.kind==='show') {
+        for (const episode of this.extraSchedule().slice((this.schedulePage-1)*this.collectionPageSize,this.schedulePage*this.collectionPageSize)) {
+          this.addPresentationTask(tasks,detail,false,episode.season);
         }
       }
-    } else if (this.tab === 'discover') {
-      for (const item of this.visibleDiscover()) { this.addPresentationTask(tasks, item.media, true, 0, item.posterUrls); }
-    } else if (this.tab === 'search') {
-      for (const item of this.results) { this.addPresentationTask(tasks, item, true); }
-    } else if (this.tab === 'library') {
-      for (const row of this.collectionSlice()) { this.addPresentationTask(tasks, row.media, true); }
-      // A Chinese query must also check translations of candidates not yet visible.
-      if (this.collectionPage === 1 && this.collectionFilter === 'mine') {
-        for (const row of this.recentCollectionRows()) { this.addPresentationTask(tasks, row.media, true); }
-      }
-      if (this.collectionNeedsMetadata() || (this.presentationLanguage === 'zh' && (this.collectionQuery.trim() || this.collectionOptions.sort === 'title'))) {
-        for (const row of this.collectionBase()) {
-          this.addPresentationTask(tasks, row.media, false);
-        }
-      }
-    } else if (this.tab === 'progress' && this.progressMode === 'next' && this.mediaMode === 'show') {
-      for (const entry of this.nextSlice()) {
-        if (entry.row) { this.addPresentationTask(tasks, entry.row.media, true, entry.row.episode.season); }
-      }
-      if (this.presentationLanguage === 'zh' && (this.nextQuery.trim() || this.progressPrefs.sort === 'title')) {
-        for (const row of this.progressData('')) {
-          this.addPresentationTask(tasks, row.media, false, this.nextQuery.trim() ? row.episode.season : 0);
-        }
-      }
-    } else if (this.tab === 'progress' && this.progressMode === 'next' && this.mediaMode === 'movie') {
-      for (const row of this.movieProgressRows()) { this.addPresentationTask(tasks, row.media, true); }
-      if (this.presentationLanguage === 'zh' && (this.movieProgressQuery.trim() || this.movieProgressOptions.sort === 'title' || this.movieProgressOptions.sort === 'userRating')) {
-        for (const row of this.movieProgressRows('')) { this.addPresentationTask(tasks, row.media, false); }
-      }
-    } else if (this.tab === 'progress' && this.progressMode === 'calendar') {
-      if (this.mediaMode === 'show') {
-        for (const row of this.calendarSlice()) { this.addPresentationTask(tasks, row.media, true, row.synthetic ? 0 : row.season); }
-      } else {
-        for (const row of this.movieSlice()) { this.addPresentationTask(tasks, row.movie.media, true); }
-        if (this.movieCalendarQuery.trim() && this.presentationLanguage === 'zh') {
-          for (const row of this.movieRows(this.movieCalendarMode, '')) { this.addPresentationTask(tasks, row.media, false); }
-        }
-      }
+    } else {
+      // Ordinary scrolling enumerates only native visible entries, not the list.
+      return mergeViewportTasks(this.viewport,this.businessTasks());
     }
     return Array.from(tasks.values());
+  }
+  private cancelPresentationReads(): void {
+    for (const consumer of this.presentationReaders.values()) { consumer.cancel(); }
+    this.presentationReaders.clear(); this.presentationReaderTasks.clear();
+    this.calendarHydrateConsumer.cancel(); this.calendarHydrateConsumer=new ReadCancel();
+    this.calendarHydrationKey='';
+  }
+  private cancelInvisiblePresentationReads(): void {
+    if (this.selectedMedia) { return; }
+    for (const [lane,task] of this.presentationReaderTasks) {
+      if (task.artwork && !this.viewport.has(task.media,task.season)) {
+        this.presentationReaders.get(lane)?.cancel();
+      } else if (!task.artwork && !this.businessTasks().has(ViewportTasks.key(task.media,task.season))) {
+        this.presentationReaders.get(lane)?.cancel();
+      }
+    }
   }
 
   private async presentationLane(lane: string): Promise<void> {
@@ -1620,21 +1655,27 @@ struct Index {
         const eligible=(task: PresentationTask): boolean=>{
           if (task.artwork && !this.selectedMedia && !this.viewport.has(task.media,task.season)) { return false; }
           if (lane==='local') { return language==='zh' && task.season>0; }
-          if (lane==='title') { return language==='zh' && (task.artwork || !!selected); }
-          if (lane==='season') { return language==='zh' && task.season>0 && (task.artwork || !!selected); }
-          return task.artwork || collection;
+          if (lane==='title') { return language==='zh' && (task.artwork || !!selected || this.businessTitlesNeeded()); }
+          if (lane==='season') { return language==='zh' && task.season>0 && (task.artwork || !!selected || this.businessTitlesNeeded()); }
+          return task.artwork || (collection && this.collectionNeedsMetadata());
         };
         await runPresentationPass(tasks,lane,this.presentationAttempts,JSON.stringify([client,language,account]),relevant,eligible,
           async (task: PresentationTask): Promise<void>=>{
-            if (lane==='local') { await repo.hydrateSeason(task.media,task.season); }
-            else if (lane==='title') { await repo.translation(task.media,client,language); }
-            else if (lane==='season') { await repo.season(task.media,task.season,client,language); }
+            const consumer=new ReadCancel();
+            this.presentationReaders.set(lane,consumer); this.presentationReaderTasks.set(lane,task);
+            try {
+            if (lane==='local') { await repo.hydrateSeason(task.media,task.season,consumer); }
+            else if (lane==='title') { await repo.translation(task.media,client,language,consumer); }
+            else if (lane==='season') { await repo.season(task.media,task.season,client,language,consumer); }
             else {
               // Publish local poster immediately, even if the remote summary
               // is slow, unavailable or rate limited. Recheck before I/O.
-              await repo.artwork(task.media,'',task.artwork,task.posterUrls,false);
+              await repo.artwork(task.media,'',task.artwork,task.posterUrls,false,consumer);
               if (current()) { this.publishPresentation(); }
-              if (relevant() && eligible(task)) { await repo.artwork(task.media,client,task.artwork,task.posterUrls,collection); }
+              if (current() && eligible(task) && !consumer.cancelled()) { await repo.artwork(task.media,client,task.artwork,task.posterUrls,collection,consumer); }
+            }
+            } finally {
+              if (this.presentationReaders.get(lane)===consumer) { this.presentationReaders.delete(lane); this.presentationReaderTasks.delete(lane); }
             }
           },
           (): void=>{ if (current()) { this.publishPresentation(); } },
@@ -2829,7 +2870,7 @@ struct Index {
     this.libraryIndex.clear();
     this.libraryMemo.clear();
     this.sortJobs.clear();
-    this.lazyRevision++;
+    this.invalidateLazyWork();
     this.resetCalendar();
     this.invalidateSync();
     this.cloud = undefined;
@@ -3554,7 +3595,7 @@ struct Index {
     this.searchGeneration.cancel(); this.searchConsumer.cancel(); this.searchConsumer=new ReadCancel();
   }
   private resetSearchAccount(): void {
-    this.cancelSearchRead(); this.searchHistoryGeneration.cancel(); this.searchLocalVersion++;
+    this.cancelSearchRead(); this.searchHistoryGeneration.cancel(); this.invalidateSearchLocal();
     this.searchAccount=''; this.searchRemote=[]; this.searchSubmitted=false; this.searching=false;
     this.searchCandidateSource=undefined; this.searchCandidateKey=''; this.searchCandidates=[];
     this.searchRecents=[]; this.searchStatus=''; this.title=''; this.results=[];
@@ -3572,7 +3613,7 @@ struct Index {
     if (changed) {
       const previous=this.searchAccount;
       this.searchAccount=scope;
-      this.cancelSearchRead(); this.searchHistoryGeneration.cancel(); this.searchLocalVersion++;
+      this.cancelSearchRead(); this.searchHistoryGeneration.cancel(); this.invalidateSearchLocal();
       this.searchRemote=[]; this.searchSubmitted=false; this.searching=false; this.searchRecents=[];
       this.searchCandidateSource=undefined; this.searchCandidateKey=''; this.searchCandidates=[];
       if (previous) { this.title=''; }
@@ -3580,7 +3621,7 @@ struct Index {
     }
     if (!active) {
       if (this.searching) { this.cancelSearchRead(); this.searching=false; this.searchStatus='搜索已停止，可重新提交。'; }
-      this.searchLocalVersion++;
+      this.invalidateSearchLocal();
       return;
     }
     if (changed || entered) { this.loadSearchHistory(); }
@@ -3615,7 +3656,7 @@ struct Index {
   }
   private changeSearchText(value: string): void {
     if (value===this.title) { return; }
-    this.cancelSearchRead(); this.searchLocalVersion++;
+    this.cancelSearchRead(); this.invalidateSearchLocal();
     this.title=value; this.searching=false; this.searchSubmitted=false;
     this.searchRemote=[]; this.searchOptions=defaultSearch(); this.searchStatus='';
     this.searchRows.replace([],[],[]); this.results=[];
@@ -3627,7 +3668,7 @@ struct Index {
   }
   private refreshSearchLocal(): void {
     if (!this.searchActive()) { return; }
-    this.searchLocalVersion++;
+    this.invalidateSearchLocal();
     if (!this.searchLocalRunning) { this.runSearchLocal(); }
   }
   private async runSearchLocal(): Promise<void> {
@@ -3665,7 +3706,7 @@ struct Index {
         const input: SearchInput={catalog:this.searchCandidates,remote:this.searchRemote.map(candidate),
           query:query,suggestions:!submitted,options:options};
         try {
-          const rows=await searchDisplay(input);
+          const rows=await searchDisplay(input,this.searchLocalConsumer);
           if (!current()) { continue; }
           this.results=rows;
           if (!submitted) { this.searchStatus=query.length<2 ? '输入至少2个字符查看本地建议。' : '本地建议 · '+rows.length+' 部'; }
@@ -3715,8 +3756,20 @@ struct Index {
     } catch (error) {}
   }
 
+  private cancelDiscoverRead(): number {
+    this.discoverConsumer.cancel(); this.discoverConsumer=new ReadCancel();
+    return ++this.discoverRevision;
+  }
+  private invalidateSearchLocal(): void {
+    this.searchLocalConsumer.cancel(); this.searchLocalConsumer=new ReadCancel();
+    this.searchLocalVersion++;
+  }
+  private invalidateLazyWork(): void {
+    this.lazyConsumer.cancel(); this.lazyConsumer=new ReadCancel();
+    this.lazyRevision++;
+  }
   private resetDiscover(): void {
-    ++this.discoverRevision;
+    this.cancelDiscoverRead();
     this.discoverFeed = undefined;
     this.discoverFeedKey = '';
     this.discoverMemo.clear();
@@ -3745,15 +3798,17 @@ struct Index {
     return count + this.currentCollectionState().hidden.filter((row: HiddenEntry) => row.media.kind === this.mediaMode).length;
   }
   private async loadDiscover(page: number = 1, force: boolean = false): Promise<void> {
-    if (this.setupBusy || !this.clientId || page < 1 || !this.pageVisible || this.tab !== 'discover') { return; }
-    const revision = ++this.discoverRevision;
+    if (this.setupBusy || !this.clientId || page < 1 || !this.pageVisible || this.selectedMedia || this.tab !== 'discover') { return; }
+    const revision = this.cancelDiscoverRead();
+    const consumer=this.discoverConsumer;
+    const account=this.currentSearchAccount();
     const clientId = this.clientId;
     const kind = this.mediaMode;
     const options = this.discoverOptions;
     const request = discoverRequest(kind,options,this.discoverCollectionSize());
     const key = discoverKey(clientId,request);
     const current = (): boolean => revision === this.discoverRevision && clientId === this.clientId &&
-      kind === this.mediaMode && this.pageVisible && this.tab === 'discover' && this.discoverOptions === options;
+      kind === this.mediaMode && this.pageVisible && !this.selectedMedia && this.tab === 'discover' && this.discoverOptions === options && account===this.currentSearchAccount();
     const publish = (feed: DiscoverFeed, fresh: boolean): void => {
       if (!current()) { return; }
       this.discoverFeed = feed;
@@ -3785,7 +3840,7 @@ struct Index {
       if (!this.discoverRepo) { this.discoverRepo = openDiscover(this.context()); }
       const repo = await this.discoverRepo;
       if (!current()) { return; }
-      const feed = await repo.load(clientId,request,force,publish);
+      const feed = await repo.load(clientId,request,force,publish,consumer);
       if (!current()) { return; }
       publish(feed,true);
     } catch (error) {
@@ -4164,7 +4219,7 @@ struct Index {
       if (plan.pending.length) {
         this.candidateRuns+=plan.pending.length;
         const batch: CandidateBatch={inputs:plan.pending,prefs:plan.prefs,now:now};
-        built=await computeCandidateDisplay(batch);
+        built=await computeCandidateDisplay(batch,this.sortJobs.consumer('show-candidates',token));
       } else { await Promise.resolve(); }
       if (!current() || Date.now()<now) { return; }
       const output=this.candidateIndex.commit(plan,built);
@@ -4217,14 +4272,15 @@ struct Index {
     const token = this.sortJobs.begin(slot,JSON.stringify([epoch,key]));
     if (!token) { return; }
     try {
-      const rows = await showDisplay(input);
+      const rows = await showDisplay(input,this.sortJobs.consumer(slot,token));
       if (!this.sortJobs.current(slot,token) || !this.pageVisible || this.selectedMedia || this.tab !== 'progress' ||
           this.mediaMode !== 'show' || this.progressMode !== 'next' || epoch !== this.presentationEpoch ||
           (input.query && input.query !== this.nextQuery) || key !== this.progressSortKey(input.query) ||
           Date.now() < now || Date.now() >= expiry) { return; }
       const memo = input.query ? this.progressMemo : this.progressAllMemo;
       memo.put(key,rows,now,expiry);
-    } finally {
+    } catch (error) { if (!(error instanceof ReadCancelled)) { throw error; } }
+    finally {
       if (this.sortJobs.finish(slot,token) && this.pageVisible) { this.sortedViewRevision++; this.requestPresentation(); }
     }
   }
@@ -4454,7 +4510,7 @@ struct Index {
         (row.queued || hasTrackingEvidence(row))).map((row: PersonalLibraryRow)=>row.media.id);
       const input: CalendarJobInput={plan:plan,now:now,mode:this.showCalendarMode,premieres:this.calendarPremieres,query:this.calendarQuery,
         hidden:hidden,members:members,titles:titles,episodes:episodes};
-      const output=await calendarDisplay(input);
+      const output=await calendarDisplay(input,this.sortJobs.consumer('calendar',token));
       if (!current() || Date.now()<now || Date.now()>=calendarExpiry(now)) { return; }
       this.calendarIndex.commit(inputs,output.built);
       this.calendarMemo.put(key,output.entries,now,calendarExpiry(now));
@@ -4468,6 +4524,8 @@ struct Index {
     if (!repo || !this.calendarQuery.trim() || this.presentationLanguage!=='zh' || !this.calendarCurrent()) { return; }
     const key=JSON.stringify([this.calendarSourceScope,this.calendarSourceVersion]);
     if (key===this.calendarHydrationKey) { return; }
+    this.calendarHydrateConsumer.cancel(); this.calendarHydrateConsumer=new ReadCancel();
+    const consumer=this.calendarHydrateConsumer;
     this.calendarHydrationKey=key;
     try {
       for (const source of this.calendarSources) {
@@ -4477,11 +4535,11 @@ struct Index {
             if (this.calendarHydrationKey===key) { this.calendarHydrationKey=''; }
             return;
           }
-          await repo.hydrateSeason(source.media,season.number);
+          await repo.hydrateSeason(source.media,season.number,consumer);
         }
       }
-    } catch (error) { if (this.calendarHydrationKey===key) { this.calendarHydrationKey=''; } }
-    finally { this.publishPresentation(); }
+    } catch (error) { if (this.calendarHydrateConsumer===consumer && this.calendarHydrationKey===key) { this.calendarHydrationKey=''; } }
+    finally { if (this.calendarHydrateConsumer===consumer && !consumer.cancelled()) { this.publishPresentation(); } }
   }
   private async loadCalendar(): Promise<void> {
     if (this.calendarBusy || this.authBusy || this.setupBusy || this.syncBusy) { return; }
@@ -4983,14 +5041,15 @@ struct Index {
     const token = this.sortJobs.begin(slot,JSON.stringify([epoch,key]));
     if (!token) { return; }
     try {
-      const rows = await movieDisplay(input);
+      const rows = await movieDisplay(input,this.sortJobs.consumer(slot,token));
       if (!this.sortJobs.current(slot,token) || !this.pageVisible || this.selectedMedia || this.tab !== 'progress' ||
           this.mediaMode !== 'movie' || this.progressMode !== 'next' || epoch !== this.presentationEpoch || !this.movieCalendarCurrent() ||
           (input.query && input.query !== this.movieProgressQuery) || key !== this.movieSortKey(input.query,input.utc) ||
           Date.now() < now || Date.now() >= expiry) { return; }
       const memo = input.query ? this.movieMemo : this.movieAllMemo;
       memo.put(key,rows,now,expiry);
-    } finally {
+    } catch (error) { if (!(error instanceof ReadCancelled)) { throw error; } }
+    finally {
       if (this.sortJobs.finish(slot,token) && this.pageVisible) { this.sortedViewRevision++; this.requestPresentation(); }
     }
   }
@@ -5488,12 +5547,13 @@ struct Index {
     const token = this.sortJobs.begin(slot,JSON.stringify([epoch,key]));
     if (!token) { return; }
     try {
-      const rows = await collectionDisplay(input);
+      const rows = await collectionDisplay(input,this.sortJobs.consumer(slot,token));
       if (!this.sortJobs.current(slot,token) || !this.pageVisible || this.selectedMedia || this.tab !== 'library' ||
           epoch !== this.presentationEpoch || key !== this.collectionSortKey() ||
           (this.signedIn && !this.activeCloud()) || Date.now() < input.now || Date.now() >= expiry) { return; }
       this.collectionItemsMemo.put(key,rows,input.now,expiry);
-    } finally {
+    } catch (error) { if (!(error instanceof ReadCancelled)) { throw error; } }
+    finally {
       if (this.sortJobs.finish(slot,token) && this.pageVisible) { this.sortedViewRevision++; this.requestPresentation(); }
     }
   }
@@ -5959,7 +6019,7 @@ struct Index {
     if (value==='search' || value==='account' || value==='cloud') { this.rememberScroll(); }
     if (this.tab === 'progress' || this.tab === 'discover' || this.tab === 'library') { this.returnTab = this.tab; }
     this.closeDetail();
-    if (this.tab === 'discover' && value !== 'discover') { this.discoverRevision++; this.discoverBusy = false; }
+    if (this.tab === 'discover' && value !== 'discover') { this.cancelDiscoverRead(); this.discoverBusy = false; }
     if (this.tab === 'library' && value !== 'library' && this.collectionBusy) { this.resetCollection(); }
     this.tab = value === 'cloud' ? 'account' : value;
     if (value === 'cloud') { this.advancedSync = true; }

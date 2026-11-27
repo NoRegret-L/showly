@@ -81,7 +81,7 @@ repo=(root/"data"/"SearchRepository.ets").read_text()
 task=(root/"data"/"SearchTask.ets").read_text()
 assert "this.searchGeneration.current(token)" in page and "scope===this.currentSearchAccount()" in page
 assert "this.searchRows.replace([],[],[])" in page and "this.searchRows.submit(" in page
-assert "await searchDisplay(input)" in page and "await taskpool.execute(searchTask" in task
+assert "await searchDisplay(input,this.searchLocalConsumer)" in page and "executeDisplayTask(new taskpool.Task(searchTask" in task
 assert "this.searchCandidateSource!==stored || this.searchCandidateKey!==key" in page
 assert "repo.rememberCatalog(scope,rows)" in page and "repo.remember(scope,query)" in page
 assert "search_catalog WHERE scope=?" in repo and "search_recent WHERE scope=?" in repo

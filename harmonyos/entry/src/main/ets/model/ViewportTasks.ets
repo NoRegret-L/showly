@@ -35,3 +35,12 @@ export function addPresentationTask(tasks: Map<string,PresentationTask>, item: M
   }
   tasks.set(key,{media:item,season:season,posterUrls:urls,artwork:artwork});
 }
+
+// The input is the native visible index plus explicitly required business
+// metadata. There is no dependency on the backing list length.
+export function mergeViewportTasks(viewport: ViewportTasks, business: Map<string,PresentationTask>): PresentationTask[] {
+  const tasks=new Map<string,PresentationTask>();
+  for (const task of viewport.rows()) { addPresentationTask(tasks,task.media,true,task.season,task.posterUrls); }
+  for (const task of business.values()) { addPresentationTask(tasks,task.media,false,task.season,task.posterUrls); }
+  return Array.from(tasks.values());
+}

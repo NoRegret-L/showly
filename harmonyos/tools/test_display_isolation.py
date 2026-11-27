@@ -88,13 +88,13 @@ assert "this.listRevision" not in page
 assert "this.displayRevisions.showsChanged()" in page and "this.displayRevisions.moviesChanged()" in page
 assert "this.displayRevisions.collectionChanged()" in page
 assert "this.flagVersion('show')" in page and "this.hiddenVersion('show')" in page
-assert page.count("diffDisplay,current)")==7
+assert page.count("differ,current)")==7
 assert page.count("this.sortJobs.current(slot,token)")==3
 assert page.count("epoch !== this.presentationEpoch")>=3
 assert "this.validateNextTarget(row)" in page
 assert "this.movieProgressRows('',true).find(" in page
-assert "await taskpool.execute(showDisplayTask" in tasks and "await taskpool.execute(movieDisplayTask" in tasks and "await taskpool.execute(collectionDisplayTask" in tasks
-assert "await taskpool.execute(diffDisplayTask" in tasks
+assert "executeDisplayTask(new taskpool.Task(showDisplayTask" in tasks and "executeDisplayTask(new taskpool.Task(movieDisplayTask" in tasks and "executeDisplayTask(new taskpool.Task(collectionDisplayTask" in tasks
+assert "executeDisplayTask(new taskpool.Task(diffDisplayTask" in tasks
 assert "await store.saveReadCheckpoints(account.uuid, result.matches)" in page
 assert "await readSyncAccount(session)" in page and "await readActivity(session)" in page
 print("Display worker, domain dependency, live mark verification and native list wiring passed")

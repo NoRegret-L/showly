@@ -1,3 +1,4 @@
+import { ReadCancel } from '../model/ReadFlight';
 import { http } from '@kit.NetworkKit';
 import { Media } from '../model/Media';
 import { DiscoverItem, DiscoverRequest } from '../model/DiscoverRules';
@@ -11,20 +12,26 @@ interface DiscoverTitle {
 }
 interface DiscoverRow { movie?: DiscoverTitle; show?: DiscoverTitle; }
 export class TraktDiscoverTransport implements DiscoverTransport {
-  async read(client: string, options: DiscoverRequest, mode: string, page: number, limit: number): Promise<ChartPage> {
+  async read(client: string, options: DiscoverRequest, mode: string, page: number, limit: number, scope?: ReadCancel): Promise<ChartPage> {
     if (!client || !['movie','show'].includes(options.kind) || !['trending','popular','anticipated'].includes(mode) ||
         !Number.isSafeInteger(page) || page < 1 || !Number.isSafeInteger(limit) || limit < 1) { throw new Error('Invalid discovery request'); }
     const endpoint = options.kind === 'movie' ? 'movies' : 'shows';
     let url = 'https://api.trakt.tv/' + endpoint + '/' + mode + '?extended=full&page=' + page + '&limit=' + limit;
     if (options.genres.length) { url += '&genres=' + encodeURIComponent(options.genres.join(',')); }
     if (options.kind === 'show' && options.networks.length) { url += '&networks=' + encodeURIComponent(options.networks.join(',')); }
+    scope?.check();
     const request = http.createHttp();
+    let closed=false;
+    const close=(): void=>{ if (!closed) { closed=true; request.destroy(); } };
+    scope?.subscribe(close);
     try {
+      scope?.check();
       const response = await request.request(url,{
         method:http.RequestMethod.GET,
         header:{'Content-Type':'application/json','trakt-api-version':'2','trakt-api-key':client,'User-Agent':'Showly-HarmonyOS-Personal/0.7.0'},
         expectDataType:http.HttpDataType.STRING
       });
+      scope?.check();
       if (response.responseCode !== 200 || typeof response.result !== 'string') { throw new Error('Trakt discovery HTTP ' + response.responseCode); }
       const rows = JSON.parse(response.result) as DiscoverRow[];
       if (!Array.isArray(rows)) { throw new Error('Invalid discovery response'); }
@@ -41,6 +48,6 @@ export class TraktDiscoverTransport implements DiscoverTransport {
       const headers = JSON.parse(JSON.stringify(response.header).toLowerCase()) as Record<string,string>;
       return {items:items,page:Number(headers['x-pagination-page']),pages:Number(headers['x-pagination-page-count']),
         limit:Number(headers['x-pagination-limit']),count:rows.length};
-    } finally { request.destroy(); }
+    } finally { scope?.unsubscribe(close); close(); }
   }
 }
