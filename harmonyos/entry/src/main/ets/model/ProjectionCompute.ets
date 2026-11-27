@@ -101,8 +101,13 @@ export function readPersistedShow(entry: ShowMemoEntry | undefined, input: Proje
   if (out.effective.ids.some((id: number) => !known.has(id))) { return undefined; }
   for (let i = 0; i < episodes.length; i++) {
     const row = out.source.episodes[i];
-    if (!row || JSON.stringify(row.episode) !== JSON.stringify(episodes[i]) ||
-        row.watched !== watched.has(episodes[i].id) || !Number.isFinite(row.watchedAt)) { return undefined; }
+    const ep = episodes[i];
+    // Compare every field consumed by the resolver/renderer, without
+    // allocating two JSON strings per episode. The full input key is still exact.
+    if (!row || !row.episode || row.episode.id !== ep.id || row.episode.season !== ep.season ||
+        row.episode.number !== ep.number || row.episode.title !== ep.title ||
+        row.episode.firstAired !== ep.firstAired || row.watched !== watched.has(ep.id) ||
+        !Number.isFinite(row.watchedAt)) { return undefined; }
   }
   return out;
 }

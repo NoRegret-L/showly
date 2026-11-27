@@ -1,5 +1,5 @@
 import { Media } from '../model/Media';
-import { EpisodeStore, EpisodeBackupState, LocalEpisode, JournalIntent } from './EpisodeStore';
+import { EpisodeStore, EpisodeBackupState, LocalEpisode } from './EpisodeStore';
 import { showSections } from '../model/ShowCatalog';
 import { ProgressSource } from '../model/ProgressRules';
 
@@ -28,8 +28,12 @@ export function projectShow(state: EpisodeBackupState, lastSeq: number): NextSho
 }
 
 export async function readNextShows(store: EpisodeStore): Promise<NextShow[]> {
-  const states = await store.backupStates();
-  const intents = await store.journalIntents();
+  const revision = store.readModelRevision();
+  const inputs = await store.projectionLocalInputs(await store.boundAccount());
+  const states = inputs.states;
+  const intents = inputs.intents;
+  const schedules = await store.projectionCatalogs(new Set<string>(states.map((state: EpisodeBackupState) => state.catalog.showId)));
+  if (store.readModelRevision() !== revision) { throw new Error('Local read inputs changed'); }
   const latest: Map<string, number> = new Map<string, number>();
   for (const intent of intents) {
     latest.set(intent.showId, Math.max(latest.get(intent.showId) ?? 0, intent.seq));
@@ -38,7 +42,7 @@ export async function readNextShows(store: EpisodeStore): Promise<NextShow[]> {
   const now = Date.now();
   for (const state of states) {
     const row = projectShow(state, latest.get(state.catalog.showId) ?? 0);
-    const full = await store.fullCatalog(state.catalog.showId);
+    const full = schedules.get(state.catalog.showId);
     if (full) { row.sections = showSections(full, state.watchedIds, now); }
     result.push(row);
   }

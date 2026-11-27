@@ -2,6 +2,7 @@ import { relationalStore } from '@kit.ArkData';
 import { common } from '@kit.AbilityKit';
 import { http } from '@kit.NetworkKit';
 import { Media } from '../model/Media';
+import { ReadEpisodeIdentity, ReadJournalEvent, validReadIds, replayWatchedIds } from '../model/BatchEpisodeRead';
 import { CommonEntry, CommonUpdate, commonId } from '../model/ThreeWay';
 import { canReadDetails, readDetails } from './TraktDetails';
 import { RemoteLibraryObservation, validateObservation } from '../model/RemoteObservation';
@@ -63,6 +64,10 @@ export interface JournalIntent {
 export interface EpisodeBackupState {
   catalog: EpisodeCatalog;
   watchedIds: number[];
+}
+export interface ProjectionLocalInputs {
+  states: EpisodeBackupState[];
+  intents: JournalIntent[];
 }
 export interface LocalEpisodeState {
   episode: LocalEpisode;
@@ -204,6 +209,12 @@ export class EpisodeStore {
   private db: relationalStore.RdbStore;
   private projectionRevision: number = 0;
   readModelRevision(): number { return this.projectionRevision; }
+  private readQueries: number = 0;
+  readQueryCount(): number { return this.readQueries; }
+  private async queryRead(sql: string, args: relationalStore.ValueType[] = []): Promise<relationalStore.ResultSet> {
+    this.readQueries++;
+    return this.db.querySql(sql, args);
+  }
   constructor(db: relationalStore.RdbStore) { this.db = db; }
 
   static async open(context: common.UIAbilityContext): Promise<EpisodeStore> {
@@ -238,6 +249,9 @@ export class EpisodeStore {
     await db.executeSql('CREATE TABLE IF NOT EXISTS sync_play_archive (account_uuid TEXT NOT NULL, episode_id INTEGER NOT NULL, history_id INTEGER NOT NULL, watched_at TEXT NOT NULL, archived_at INTEGER NOT NULL, PRIMARY KEY(account_uuid,history_id))');
     await db.executeSql('CREATE TABLE IF NOT EXISTS episode_restore_baseline (show_id TEXT PRIMARY KEY, episode_ids TEXT NOT NULL, verified INTEGER NOT NULL DEFAULT 0 CHECK(verified IN (0,1)))');
     await db.executeSql("CREATE TABLE IF NOT EXISTS sync_common_state (account_uuid TEXT NOT NULL, domain TEXT NOT NULL CHECK(domain='episode'), payload TEXT NOT NULL, PRIMARY KEY(account_uuid,domain))");
+    // Optional derived cache must not block opening the authoritative store.
+    try { await db.executeSql('CREATE TABLE IF NOT EXISTS progress_projection_cache (scope TEXT PRIMARY KEY,payload TEXT NOT NULL)'); }
+    catch (error) { /* reads and writes of the optional cache can fail safely */ }
     return new EpisodeStore(db);
   }
 
@@ -245,7 +259,7 @@ export class EpisodeStore {
   // backup, unknown local default, or pending mutation is a common baseline.
   async commonStates(uuid: string, domain: string): Promise<Map<string, CommonEntry>> {
     if (!uuid || await this.boundAccount() !== uuid || domain !== 'episode') { throw new Error('Invalid baseline scope'); }
-    const rows = await this.db.querySql('SELECT payload FROM sync_common_state WHERE account_uuid=? AND domain=?', [uuid, domain]);
+    const rows = await this.queryRead('SELECT payload FROM sync_common_state WHERE account_uuid=? AND domain=?', [uuid, domain]);
     const result: Map<string, CommonEntry> = new Map<string, CommonEntry>();
     try {
       if (!rows.goToFirstRow()) { return result; }
@@ -303,7 +317,7 @@ export class EpisodeStore {
   }
 
   async catalog(showId: string): Promise<EpisodeCatalog | undefined> {
-    const result = await this.db.querySql('SELECT catalog FROM episode_catalog WHERE show_id = ?', [showId]);
+    const result = await this.queryRead('SELECT catalog FROM episode_catalog WHERE show_id = ?', [showId]);
     try {
       if (!result.goToFirstRow()) { return undefined; }
       const catalog = JSON.parse(result.getString(0)) as EpisodeCatalog;
@@ -317,8 +331,7 @@ export class EpisodeStore {
   // Derived read cache only. Existing personal/sync tables are not modified.
   async readProjectionCache(scope: string): Promise<string> {
     try {
-      await this.db.executeSql('CREATE TABLE IF NOT EXISTS progress_projection_cache (scope TEXT PRIMARY KEY,payload TEXT NOT NULL)');
-      const rows = await this.db.querySql('SELECT payload FROM progress_projection_cache WHERE scope=?', [scope]);
+      const rows = await this.queryRead('SELECT payload FROM progress_projection_cache WHERE scope=?', [scope]);
       try { return rows.goToFirstRow() ? rows.getString(0) : ''; } finally { rows.close(); }
     } catch (error) { return ''; }
   }
@@ -328,8 +341,94 @@ export class EpisodeStore {
     } catch (error) { /* optional cache; never block the library */ }
   }
 
+  // One query regardless of number of targets. Unrelated public catalog
+  // payloads are not parsed or retained. No write-eligible metadata changes.
+  async projectionCatalogs(ids: Set<string>): Promise<Map<string, FullEpisodeCatalog>> {
+    const result = new Map<string, FullEpisodeCatalog>();
+    if (!ids.size) { return result; }
+    const rows = await this.queryRead('SELECT show_id,payload FROM episode_schedule ORDER BY show_id');
+    try {
+      while (rows.goToNextRow()) {
+        const id = rows.getString(0);
+        if (!ids.has(id)) { continue; }
+        const full = JSON.parse(rows.getString(1)) as FullEpisodeCatalog;
+        validateFullCatalog(full,id);
+        result.set(id,full);
+      }
+    } finally { rows.close(); }
+    return result;
+  }
+
+  // Read-only batch for a projection already protected by the page's
+  // cloudBusy/localBusy gate. Do not use it to authorize a write.
+  async projectionLocalInputs(bound: string): Promise<ProjectionLocalInputs> {
+    const revision = this.projectionRevision;
+    if (await this.boundAccount() !== bound) { throw new Error('Account binding changed'); }
+    const catalogs = new Map<string, EpisodeCatalog>();
+    const restored = new Map<string, number[]>();
+    const episodes = new Map<string, Map<number, LocalEpisode>>();
+    const rows = await this.queryRead('SELECT c.show_id,c.catalog,r.episode_ids FROM episode_catalog c LEFT JOIN episode_restore_baseline r ON r.show_id=c.show_id ORDER BY c.show_id');
+    try {
+      while (rows.goToNextRow()) {
+        const id = rows.getString(0);
+        const catalog = JSON.parse(rows.getString(1)) as EpisodeCatalog;
+        validateCatalog(catalog,id);
+        catalogs.set(id,catalog);
+        const index = new Map<number, LocalEpisode>();
+        for (const episode of catalog.episodes) { index.set(episode.id,episode); }
+        episodes.set(id,index);
+        if (!rows.isColumnNull(2)) {
+          const ids = JSON.parse(rows.getString(2)) as number[];
+          if (!validReadIds(ids,true,false)) { throw new Error('Invalid restored baseline'); }
+          restored.set(id,ids);
+        }
+      }
+    } finally { rows.close(); }
+    const baseline = new Set<number>(bound ? await this.cloudBaseline(bound) : []);
+    const events = new Map<string, ReadJournalEvent[]>();
+    const latest = new Map<number, JournalIntent>();
+    const journal = await this.queryRead('SELECT show_id,episode_ids,watched,seq,auto_uuid,changed_at FROM episode_event ORDER BY seq');
+    try {
+      while (journal.goToNextRow()) {
+        const showId = journal.getString(0);
+        if (!/^show:[1-9][0-9]*$/.test(showId)) { throw new Error('Invalid journal show'); }
+        const ids = JSON.parse(journal.getString(1)) as number[];
+        const watched = journal.getLong(2);
+        const seq = journal.getLong(3);
+        const autoUuid = journal.getString(4);
+        const changedAt = journal.getLong(5);
+        if (!validReadIds(ids,false,true) || (watched !== 0 && watched !== 1)) { throw new Error('Invalid journal event'); }
+        if (!validId(seq) || !validId(changedAt)) { throw new Error('Invalid event sequence'); }
+        let list = events.get(showId);
+        if (!list) { list = []; events.set(showId,list); }
+        list.push({ ids: ids, watched: watched === 1 });
+        const catalog = catalogs.get(showId);
+        const index = episodes.get(showId);
+        for (const id of ids) {
+          const prior = latest.get(id);
+          if (prior && prior.showId !== showId) { throw new Error('Conflicting episode identity'); }
+          const episode = index?.get(id);
+          latest.set(id,{ seq: seq, autoUuid: autoUuid, changedAt: changedAt, episodeId: id, showId: showId,
+            watched: watched === 1, catalogKnown: !!episode, label: episode ?
+              (catalog?.title ?? showId) + ' · S' + episode.season + 'E' + episode.number :
+              showId + ' · Trakt episode ' + id });
+        }
+      }
+    } finally { journal.close(); }
+    const states: EpisodeBackupState[] = [];
+    catalogs.forEach((catalog: EpisodeCatalog, id: string) => {
+      const identities: ReadEpisodeIdentity[] = catalog.episodes.map((ep: LocalEpisode): ReadEpisodeIdentity =>
+        ({ id: ep.id, season: ep.season }));
+      states.push({ catalog: catalog, watchedIds: replayWatchedIds(identities,baseline,restored.get(id) ?? [],events.get(id) ?? []) });
+    });
+    if (await this.boundAccount() !== bound || this.projectionRevision !== revision) {
+      throw new Error('Local read inputs changed');
+    }
+    return { states: states, intents: Array.from(latest.values()) };
+  }
+
   async fullCatalog(showId: string): Promise<FullEpisodeCatalog | undefined> {
-    const rows = await this.db.querySql('SELECT payload FROM episode_schedule WHERE show_id=?', [showId]);
+    const rows = await this.queryRead('SELECT payload FROM episode_schedule WHERE show_id=?', [showId]);
     try {
       if (!rows.goToFirstRow()) { return undefined; }
       const full = JSON.parse(rows.getString(0)) as FullEpisodeCatalog;
@@ -353,7 +452,7 @@ export class EpisodeStore {
 
   async readRemoteObservation(uuid: string): Promise<RemoteLibraryObservation | undefined> {
     if (!uuid || uuid.trim() !== uuid) { throw new Error('Invalid observation scope'); }
-    const rows = await this.db.querySql('SELECT payload FROM remote_library_observation WHERE account_uuid=?', [uuid]);
+    const rows = await this.queryRead('SELECT payload FROM remote_library_observation WHERE account_uuid=?', [uuid]);
     try {
       if (!rows.goToFirstRow()) { return undefined; }
       const snapshot = JSON.parse(rows.getString(0)) as RemoteLibraryObservation;
@@ -372,7 +471,7 @@ export class EpisodeStore {
   async readCheckpoints(uuid: string): Promise<Map<number, ReadCheckpoint>> {
     if (!uuid || await this.boundAccount() !== uuid) { throw new Error('Invalid read checkpoint scope'); }
     const result: Map<number, ReadCheckpoint> = new Map<number, ReadCheckpoint>();
-    const rows = await this.db.querySql('SELECT payload FROM episode_read_checkpoint WHERE account_uuid=?', [uuid]);
+    const rows = await this.queryRead('SELECT payload FROM episode_read_checkpoint WHERE account_uuid=?', [uuid]);
     try {
       if (!rows.goToFirstRow()) { return result; }
       const entries = JSON.parse(rows.getString(0)) as ReadCheckpoint[];
@@ -438,7 +537,7 @@ export class EpisodeStore {
   async read(showId: string): Promise<LocalSeriesState | undefined> {
     const catalog = await this.catalog(showId);
     if (!catalog) { return undefined; }
-    const result = await this.db.querySql('SELECT episode_ids,watched FROM episode_event WHERE show_id = ? ORDER BY seq', [showId]);
+    const result = await this.queryRead('SELECT episode_ids,watched FROM episode_event WHERE show_id = ? ORDER BY seq', [showId]);
     const events: EpisodeEvent[] = [];
     try {
       while (result.goToNextRow()) {
@@ -472,7 +571,7 @@ export class EpisodeStore {
   }
 
   async boundAccount(): Promise<string> {
-    const rows = await this.db.querySql('SELECT account_uuid FROM sync_binding WHERE slot=1');
+    const rows = await this.queryRead('SELECT account_uuid FROM sync_binding WHERE slot=1');
     try {
       if (!rows.goToFirstRow()) { return ''; }
       const uuid = rows.getString(0);
@@ -490,7 +589,7 @@ export class EpisodeStore {
   }
 
   async autoConsent(): Promise<AutoConsent | undefined> {
-    const rows = await this.db.querySql('SELECT account_uuid,client_id FROM sync_auto_consent WHERE slot=1');
+    const rows = await this.queryRead('SELECT account_uuid,client_id FROM sync_auto_consent WHERE slot=1');
     try {
       if (!rows.goToFirstRow()) { return undefined; }
       const uuid = rows.getString(0);
@@ -511,7 +610,7 @@ export class EpisodeStore {
 
   async queueEntries(uuid: string): Promise<QueueEntry[]> {
     if (await this.boundAccount() !== uuid) { throw new Error('Account mismatch'); }
-    const done = await this.db.querySql('SELECT event_seq,episode_id FROM sync_queue_done WHERE account_uuid=?', [uuid]);
+    const done = await this.queryRead('SELECT event_seq,episode_id FROM sync_queue_done WHERE account_uuid=?', [uuid]);
     const completed: Set<string> = new Set<string>();
     try {
       while (done.goToNextRow()) { completed.add(done.getLong(0) + ':' + done.getLong(1)); }
@@ -536,7 +635,7 @@ export class EpisodeStore {
   }
 
   async hasUploadAttempt(uuid: string, episodeId: number): Promise<boolean> {
-    const rows = await this.db.querySql('SELECT episode_id FROM sync_upload_guard WHERE account_uuid=? AND episode_id=?', [uuid, episodeId]);
+    const rows = await this.queryRead('SELECT episode_id FROM sync_upload_guard WHERE account_uuid=? AND episode_id=?', [uuid, episodeId]);
     let exists = false;
     try { exists = rows.goToFirstRow(); } finally { rows.close(); }
     if (!exists) { return false; }
@@ -574,7 +673,7 @@ export class EpisodeStore {
   }
 
   async undoReceipt(uuid: string, episodeId: number): Promise<UndoReceipt | undefined> {
-    const rows = await this.db.querySql('SELECT history_id,watched_at,removal_state FROM sync_play_receipt WHERE account_uuid=? AND episode_id=?', [uuid, episodeId]);
+    const rows = await this.queryRead('SELECT history_id,watched_at,removal_state FROM sync_play_receipt WHERE account_uuid=? AND episode_id=?', [uuid, episodeId]);
     try {
       if (!rows.goToFirstRow()) { return undefined; }
       const id = rows.getLong(0);
@@ -611,7 +710,7 @@ export class EpisodeStore {
   }
 
   async cloudBaseline(uuid: string): Promise<number[]> {
-    const rows = await this.db.querySql('SELECT episode_ids FROM sync_cloud_baseline WHERE account_uuid=?', [uuid]);
+    const rows = await this.queryRead('SELECT episode_ids FROM sync_cloud_baseline WHERE account_uuid=?', [uuid]);
     try {
       if (!rows.goToFirstRow()) { return []; }
       const ids = JSON.parse(rows.getString(0)) as number[];
@@ -648,7 +747,7 @@ export class EpisodeStore {
   }
 
   async syncLogs(uuid: string): Promise<string[]> {
-    const rows = await this.db.querySql('SELECT mode,status,created_at,episode_ids FROM sync_run_log WHERE account_uuid=? ORDER BY seq DESC LIMIT 12', [uuid]);
+    const rows = await this.queryRead('SELECT mode,status,created_at,episode_ids FROM sync_run_log WHERE account_uuid=? ORDER BY seq DESC LIMIT 12', [uuid]);
     const result: string[] = [];
     try {
       while (rows.goToNextRow()) {
@@ -662,7 +761,7 @@ export class EpisodeStore {
   }
 
   async journalIntents(): Promise<JournalIntent[]> {
-    const rows = await this.db.querySql('SELECT e.show_id,e.episode_ids,e.watched,c.catalog,e.seq,e.auto_uuid,e.changed_at FROM episode_event e LEFT JOIN episode_catalog c ON c.show_id=e.show_id ORDER BY e.seq');
+    const rows = await this.queryRead('SELECT e.show_id,e.episode_ids,e.watched,c.catalog,e.seq,e.auto_uuid,e.changed_at FROM episode_event e LEFT JOIN episode_catalog c ON c.show_id=e.show_id ORDER BY e.seq');
     const latest: Map<number, JournalIntent> = new Map<number, JournalIntent>();
     const catalogs: Map<string, EpisodeCatalog> = new Map<string, EpisodeCatalog>();
     try {
@@ -698,7 +797,7 @@ export class EpisodeStore {
   }
 
   private async restoredIds(showId: string): Promise<number[]> {
-    const rows = await this.db.querySql('SELECT episode_ids FROM episode_restore_baseline WHERE show_id=?', [showId]);
+    const rows = await this.queryRead('SELECT episode_ids FROM episode_restore_baseline WHERE show_id=?', [showId]);
     try {
       if (!rows.goToFirstRow()) { return []; }
       const ids = JSON.parse(rows.getString(0)) as number[];
@@ -709,12 +808,12 @@ export class EpisodeStore {
   }
 
   async needsCatalogVerification(showId: string): Promise<boolean> {
-    const rows = await this.db.querySql('SELECT verified FROM episode_restore_baseline WHERE show_id=?', [showId]);
+    const rows = await this.queryRead('SELECT verified FROM episode_restore_baseline WHERE show_id=?', [showId]);
     try { return rows.goToFirstRow() && rows.getLong(0) !== 1; } finally { rows.close(); }
   }
 
   async backupStates(): Promise<EpisodeBackupState[]> {
-    const rows = await this.db.querySql('SELECT show_id FROM episode_catalog ORDER BY show_id');
+    const rows = await this.queryRead('SELECT show_id FROM episode_catalog ORDER BY show_id');
     const ids: string[] = [];
     try {
       while (rows.goToNextRow()) { ids.push(rows.getString(0)); }
@@ -735,7 +834,7 @@ export class EpisodeStore {
   }
 
   async missingBackupShows(states: EpisodeBackupState[]): Promise<EpisodeBackupState[]> {
-    const rows = await this.db.querySql('SELECT show_id FROM episode_catalog UNION SELECT show_id FROM episode_event UNION SELECT show_id FROM episode_restore_baseline');
+    const rows = await this.queryRead('SELECT show_id FROM episode_catalog UNION SELECT show_id FROM episode_event UNION SELECT show_id FROM episode_restore_baseline');
     const existing: Set<string> = new Set<string>();
     try {
       while (rows.goToNextRow()) { existing.add(rows.getString(0)); }
@@ -771,7 +870,7 @@ export class EpisodeStore {
   }
 
   async recent(): Promise<Media[]> {
-    const rows = await this.db.querySql('SELECT c.show_id,c.catalog FROM episode_catalog c LEFT JOIN (SELECT show_id,MAX(seq) AS last_seq FROM episode_event GROUP BY show_id) e ON e.show_id=c.show_id LEFT JOIN episode_restore_baseline r ON r.show_id=c.show_id WHERE e.last_seq IS NOT NULL OR r.show_id IS NOT NULL ORDER BY COALESCE(e.last_seq,0) DESC,c.updated_at DESC LIMIT 12');
+    const rows = await this.queryRead('SELECT c.show_id,c.catalog FROM episode_catalog c LEFT JOIN (SELECT show_id,MAX(seq) AS last_seq FROM episode_event GROUP BY show_id) e ON e.show_id=c.show_id LEFT JOIN episode_restore_baseline r ON r.show_id=c.show_id WHERE e.last_seq IS NOT NULL OR r.show_id IS NOT NULL ORDER BY COALESCE(e.last_seq,0) DESC,c.updated_at DESC LIMIT 12');
     const items: Media[] = [];
     try {
       while (rows.goToNextRow()) {

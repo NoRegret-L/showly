@@ -1,4 +1,5 @@
 import { taskpool } from '@kit.ArkTS';
+import { summarizeAired } from '../model/BatchEpisodeRead';
 import { Media } from '../model/Media';
 import { ProjectionInput, ProjectionOutput, computeProjection, ShowProjectionCache, showProjectionKey, ShowMemoEntry, persistentProjectionScope, decodePersistedProjection, encodePersistedProjection, diskProjectionAllowed, readPersistedShow, persistShow } from '../model/ProjectionCompute';
 import { computeProjectionTask } from './ProjectionTask';
@@ -31,12 +32,15 @@ export async function projectLibrary(store: EpisodeStore, records: MediaRecord[]
   cloud: RemoteLibraryObservation | undefined, uuid: string, clientId: string, fill: boolean,
   current: () => boolean, progress: (done: number, total: number) => void,
   cache: ShowProjectionCache): Promise<LibraryProjection> {
+  const readOnly = !fill;
+  const revision = store.readModelRevision();
   const bound = await store.boundAccount();
   const localAllowed = allowLocalScope(!!cloud, bound, uuid);
   const checkpoints = cloud && localAllowed ? await store.readCheckpoints(uuid) : new Map<number, ReadCheckpoint>();
   const common = cloud && localAllowed ? await store.commonStates(uuid, 'episode') : new Map<string, CommonEntry>();
-  const states: EpisodeBackupState[] = localAllowed ? await store.backupStates() : [];
-  const intents: JournalIntent[] = localAllowed ? await store.journalIntents() : [];
+  const inputs = localAllowed ? await store.projectionLocalInputs(bound) : undefined;
+  const states: EpisodeBackupState[] = inputs?.states ?? [];
+  const intents: JournalIntent[] = inputs?.intents ?? [];
   const local: LibraryShowEvidence[] = states.map((state: EpisodeBackupState): LibraryShowEvidence => {
     const media: Media = { id: state.catalog.showId, kind: 'show', title: state.catalog.title,
       year: state.catalog.year, watched: false };
@@ -48,6 +52,8 @@ export async function projectLibrary(store: EpisodeStore, records: MediaRecord[]
   });
   const members = buildPersonalLibrary(localAllowed ? records : [], cloud?.watchedMovies ?? [], cloud?.watchlist ?? [], remote, local);
   const targets = members.filter((row: PersonalLibraryRow) => row.media.kind === 'show' && (hasTrackingEvidence(row) || row.queued));
+  const schedules = await store.projectionCatalogs(new Set<string>(targets.map((row: PersonalLibraryRow) => row.media.id)));
+  if (!current() || store.readModelRevision() !== revision) { throw new Error('Projection inputs changed'); }
   const byId: Map<string, EpisodeBackupState> = new Map<string, EpisodeBackupState>();
   for (const state of states) { byId.set(state.catalog.showId, state); }
   const remoteById: Map<string, RemoteShowObservation> = new Map<string, RemoteShowObservation>();
@@ -79,6 +85,7 @@ export async function projectLibrary(store: EpisodeStore, records: MediaRecord[]
   const nextDisk = new Map<string, ShowMemoEntry>();
   const repairTargets: Media[] = [];
   let diskHits = 0;
+  let diskChanged = false;
   let cacheable = true;
   let computedShows = 0;
   let reusedShows = 0;
@@ -87,7 +94,7 @@ export async function projectLibrary(store: EpisodeStore, records: MediaRecord[]
     if (!current()) { throw new Error('Observation session changed'); }
     retained.add(row.media.id);
     const show = remoteById.get(row.media.id);
-    let full = await store.fullCatalog(row.media.id);
+    let full = schedules.get(row.media.id);
     const stale = !!show?.updatedAt && !!full && Date.parse(show.updatedAt) > full.fetchedAt;
     // Existing missing positions also force repair, even when activity is unchanged.
     const positions: Set<string> = new Set<string>();
@@ -134,9 +141,13 @@ export async function projectLibrary(store: EpisodeStore, records: MediaRecord[]
         decisions: decisions, timed: timed, checkpoints: cp, common: baseline, now: now };
       const key = showProjectionKey(input);
       calculated = cache.get(row.media.id, key, now);
-      if (!calculated) {
-        calculated = readPersistedShow(disk.get(row.media.id), input, key);
-        if (calculated) { diskHits++; cache.put(row.media.id, key, now, calculated); }
+      const prior = disk.get(row.media.id);
+      // At most one disk validation per show; reuse its outcome for persistence.
+      const validDisk = readPersistedShow(prior, input, key);
+      if (!calculated && validDisk) {
+        calculated = validDisk;
+        diskHits++;
+        cache.put(row.media.id, key, now, calculated);
       }
       if (calculated) { reusedShows++; }
       else {
@@ -153,9 +164,9 @@ export async function projectLibrary(store: EpisodeStore, records: MediaRecord[]
       if (!current()) { throw new Error('Observation session changed'); }
       validUntil = Math.min(validUntil, calculated.validUntil);
       if (calculated.effective.complete && diskProjectionAllowed(input)) {
-        const prior = disk.get(row.media.id);
-        // Preserve original validity start for an unchanged disk entry.
-        nextDisk.set(row.media.id, readPersistedShow(prior, input, key) && prior ? prior : persistShow(key, now, calculated));
+        // Reuse exact validated disk entry without rebuilding JSON.
+        if (validDisk && prior) { nextDisk.set(row.media.id,prior); }
+        else { nextDisk.set(row.media.id,persistShow(key,now,calculated)); diskChanged = true; }
       }
     }
     const effective = calculated?.effective;
@@ -167,9 +178,14 @@ export async function projectLibrary(store: EpisodeStore, records: MediaRecord[]
       }
     }
     const sections = calculated?.sections ?? [];
-    const progressState: EpisodeBackupState | undefined = full && effective?.complete ?
-      { catalog: eligibleCatalog(full, now), watchedIds: effective.ids } : !cloud ? state : undefined;
-    const progressRow = progressState ? projectShow(progressState, latest.get(row.media.id) ?? 0) : undefined;
+    let progressRow: NextShow | undefined;
+    const lastSeq = latest.get(row.media.id) ?? 0;
+    if (full && effective?.complete) {
+      const summary = summarizeAired(full,effective.ids,now);
+      progressRow = { media: { id: full.media.id, kind: 'show', title: full.media.title,
+        year: full.media.year, watched: false }, total: summary.total, completed: summary.completed,
+        nextSeason: summary.nextSeason, nextNumber: summary.nextNumber, nextTitle: summary.nextTitle, lastSeq: lastSeq };
+    } else if (!cloud && state) { progressRow = projectShow(state,lastSeq); }
     if (progressRow && hasTrackingEvidence(row)) {
       progressRow.sections = sections;
       if (full && effective?.complete) {
@@ -183,9 +199,11 @@ export async function projectLibrary(store: EpisodeStore, records: MediaRecord[]
   }
   cache.retain(retained);
   if (!current()) { throw new Error('Observation session changed'); }
-  const payload = encodePersistedProjection(diskScope, nextDisk);
-  if (payload !== diskRaw) { await store.saveProjectionCache(diskScope, payload); }
-  if (!current()) { throw new Error('Observation session changed'); }
+  if (diskChanged || nextDisk.size !== disk.size) {
+    const payload = encodePersistedProjection(diskScope,nextDisk);
+    await store.saveProjectionCache(diskScope,payload);
+  }
+  if (!current() || (readOnly && store.readModelRevision() !== revision)) { throw new Error('Observation inputs changed'); }
   return { evidence: result, missing: missing, failed: failed, localAllowed: localAllowed, matches: matches, next: next,
     computedAt: now, validUntil: validUntil, cacheable: cacheable && !missing && !failed, computedShows: computedShows, reusedShows: reusedShows, diskHits: diskHits, repairTargets: repairTargets };
 }

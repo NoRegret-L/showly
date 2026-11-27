@@ -2382,6 +2382,8 @@ struct Index {
       return cached;
     }
     this.projectionRuns++;
+    const started = Date.now();
+    const queryStart = store.readQueryCount();
     const result = await projectLibrary(store, records, snapshot, uuid, clientId, fill, current,
       (done: number, total: number): void => {
         if (fill) { this.cloudStatus = '计算个人库及补齐目录 ' + done + '/' + total; }
@@ -2396,7 +2398,7 @@ struct Index {
     }
     this.performanceStatus = '全库计算 ' + this.projectionRuns + ' 次 · 缓存命中 ' + this.projectionHits +
       ' 次 · 本轮重算 ' + result.computedShows + ' 部 / 复用 ' + result.reusedShows + ' 部（磁盘 ' + result.diskHits + ' 部） · 计算 ' +
-      (Date.now() - result.computedAt) + ' ms' + (this.projectionRuns === 1 ? ' · 启动至首轮计算完成 ' + (Date.now() - this.startupAt) + ' ms' : '');
+      (Date.now() - started) + ' ms · EpisodeStore SELECT ' + (store.readQueryCount() - queryStart) + ' 次' + (this.projectionRuns === 1 ? ' · 启动至首轮计算完成 ' + (Date.now() - this.startupAt) + ' ms' : '');
     return result;
   }
 
@@ -2424,12 +2426,17 @@ struct Index {
       this.cloudLocalAllowed = allowLocalScope(true, bound, account.uuid);
       const cached = this.activeCloud() && this.cloudUuid === account.uuid ? undefined : await store.readRemoteObservation(account.uuid);
       if (!current()) { throw new Error('Session changed'); }
+      let initialProjection: LibraryProjection | undefined;
+      let initialSnapshot: CloudLibrary | undefined;
+      let initialRevision = -1;
+      let initialRecords = '';
       if (cached) {
         const restored: CloudLibrary = { generation: session.generation, activity: cached.activity,
           observedAt: cached.observedAt, watchlist: cached.watchlist, watchedMovies: cached.watchedMovies,
           shows: cached.shows, moviePlays: cached.moviePlays, queueDates: cached.queueDates };
         this.cloud = restored;
         this.cloudUuid = account.uuid;
+        this.reloadProgressFlags();
         this.resetCollection();
         this.cloudStatus = '已读取本账户缓存，正在核对云端版本…';
         this.libraryNotice = '显示已验证账户的上次缓存；正在核对云端版本。';
@@ -2438,6 +2445,10 @@ struct Index {
         try {
           const initial = await this.readLibraryProjection(store, restored, account.uuid, clientId, false, false, current);
           if (!current()) { throw new Error('Session changed'); }
+          initialProjection = initial;
+          initialSnapshot = restored;
+          initialRevision = store.readModelRevision();
+          initialRecords = JSON.stringify(this.mediaRecords);
           this.nextShows = initial.next;
           this.libraryEvidence = initial.evidence;
           this.reloadProgressFlags();
@@ -2497,7 +2508,16 @@ struct Index {
           this.titleQuickStatus = '影视状态协调未完成，请刷新。';
         }
       }
-      const result = await this.readLibraryProjection(store, snapshot, account.uuid, clientId, false, force, current);
+      // The cached first pass already performed live resolution. When fresh
+      // verification and title reconciliation leave every input unchanged,
+      // reuse even an incomplete first pass; repair is scheduled separately.
+      const now = Date.now();
+      const reuseInitial = initialProjection && initialSnapshot === snapshot &&
+        initialRevision === store.readModelRevision() && initialRecords === JSON.stringify(this.mediaRecords) &&
+        now >= initialProjection.computedAt && now < initialProjection.validUntil;
+      const result = reuseInitial && initialProjection ? initialProjection :
+        await this.readLibraryProjection(store, snapshot, account.uuid, clientId, false, force, current);
+      if (reuseInitial) { this.performanceStatus += ' · 首轮投影复用'; }
       let checkpointChanged = false;
       if (!current()) { throw new Error('Session changed'); }
       if (this.cloudFresh && result.localAllowed && result.matches.length &&
