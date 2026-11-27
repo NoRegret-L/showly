@@ -34,7 +34,7 @@ export class LazyRows<T> implements IDataSource, ScrollRows {
     const structural = input.oldIds.length > 0 && ids.length > 0 && !sameListOrder(input.oldIds,ids);
     let edits: ListEdit[];
     try { edits = structural ? await differ(input) : planListDiff(input); }
-    catch (error) { if (revision !== this.revision || !current()) { return false; } throw error; }
+    catch (error) { if (revision !== this.revision || !current()) { return false; } throw new Error((error as Error).message); }
     if (revision !== this.revision || !current()) { return false; }
     this.apply(rows,ids,keys,edits);
     return true;

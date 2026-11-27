@@ -1623,7 +1623,9 @@ struct Index {
   }
   private cancelInvisiblePresentationReads(): void {
     if (this.selectedMedia) { return; }
-    for (const [lane,task] of this.presentationReaderTasks) {
+    for (const lane of this.presentationReaderTasks.keys()) {
+      const task=this.presentationReaderTasks.get(lane);
+      if (!task) { continue; }
       if (task.artwork && !this.viewport.has(task.media,task.season)) {
         this.presentationReaders.get(lane)?.cancel();
       } else if (!task.artwork && !this.businessTasks().has(ViewportTasks.key(task.media,task.season))) {
@@ -4279,7 +4281,7 @@ struct Index {
           Date.now() < now || Date.now() >= expiry) { return; }
       const memo = input.query ? this.progressMemo : this.progressAllMemo;
       memo.put(key,rows,now,expiry);
-    } catch (error) { if (!(error instanceof ReadCancelled)) { throw error; } }
+    } catch (error) { if (!(error instanceof ReadCancelled)) { throw new Error((error as Error).message); } }
     finally {
       if (this.sortJobs.finish(slot,token) && this.pageVisible) { this.sortedViewRevision++; this.requestPresentation(); }
     }
@@ -5048,7 +5050,7 @@ struct Index {
           Date.now() < now || Date.now() >= expiry) { return; }
       const memo = input.query ? this.movieMemo : this.movieAllMemo;
       memo.put(key,rows,now,expiry);
-    } catch (error) { if (!(error instanceof ReadCancelled)) { throw error; } }
+    } catch (error) { if (!(error instanceof ReadCancelled)) { throw new Error((error as Error).message); } }
     finally {
       if (this.sortJobs.finish(slot,token) && this.pageVisible) { this.sortedViewRevision++; this.requestPresentation(); }
     }
@@ -5552,7 +5554,7 @@ struct Index {
           epoch !== this.presentationEpoch || key !== this.collectionSortKey() ||
           (this.signedIn && !this.activeCloud()) || Date.now() < input.now || Date.now() >= expiry) { return; }
       this.collectionItemsMemo.put(key,rows,input.now,expiry);
-    } catch (error) { if (!(error instanceof ReadCancelled)) { throw error; } }
+    } catch (error) { if (!(error instanceof ReadCancelled)) { throw new Error((error as Error).message); } }
     finally {
       if (this.sortJobs.finish(slot,token) && this.pageVisible) { this.sortedViewRevision++; this.requestPresentation(); }
     }
