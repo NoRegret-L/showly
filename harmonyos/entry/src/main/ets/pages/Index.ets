@@ -1,3 +1,5 @@
+import { FrameCallback, LengthMetrics } from '@kit.ArkUI';
+import { ScrollRows, ScrollAnchor, ScrollAnchors, captureAnchor, resolveAnchor } from '../model/ScrollAnchor';
 import { ReadCancel } from '../model/ReadFlight';
 import { common } from '@kit.AbilityKit';
 import { LazyRows } from '../model/LazyRows';
@@ -73,9 +75,26 @@ interface CollectionIndexes {
   ratings: Map<string,number>;
   movies: Map<string,PersonalMovie>;
 }
+class RestoreScrollFrame extends FrameCallback {
+  private action: ()=>void;
+  constructor(action: ()=>void) { super(); this.action=action; }
+  onFrame(frameTimeInNano: number): void {}
+  onIdle(timeLeftInNano: number): void { this.action(); }
+}
 @Entry
 @Component
 struct Index {
+  private scrollAnchors: ScrollAnchors=new ScrollAnchors();
+  private scrollIndices: Map<string,number>=new Map<string,number>();
+  private scrollAccount: string='';
+  private scrollScheduled?: ScrollAnchor=undefined;
+  private discoverScroller: Scroller=new Scroller();
+  private searchScroller: Scroller=new Scroller();
+  private showScroller: Scroller=new Scroller();
+  private movieScroller: Scroller=new Scroller();
+  private calendarScroller: Scroller=new Scroller();
+  private movieCalendarScroller: Scroller=new Scroller();
+  private collectionScroller: Scroller=new Scroller();
   @State title: string = '';
   @State presentationLanguage: string = 'zh';
   @State presentationRevision: number = 0;
@@ -1207,6 +1226,84 @@ struct Index {
     return matchesText(query, item.title, this.displayTitle(item));
   }
 
+  private scrollSlot(): string {
+    if (!this.pageVisible || this.selectedMedia) { return ''; }
+    if (this.tab==='discover' || this.tab==='search' || this.tab==='library') { return this.tab; }
+    if (this.tab==='progress' && this.progressMode==='next') { return this.mediaMode==='movie'?'movie':'show'; }
+    if (this.tab==='progress' && this.progressMode==='calendar') { return this.mediaMode==='movie'?'movieCalendar':'calendar'; }
+    return '';
+  }
+  private scrollSource(slot: string): ScrollRows | undefined {
+    switch (slot) {
+      case 'discover': return this.discoverRows;
+      case 'search': return this.searchRows;
+      case 'show': return this.showRows;
+      case 'movie': return this.movieRowsSource;
+      case 'calendar': return this.calendarRows;
+      case 'movieCalendar': return this.movieCalendarRows;
+      case 'library': return this.collectionRowsSource;
+      default: return undefined;
+    }
+  }
+  private scrollController(slot: string): Scroller | undefined {
+    switch (slot) {
+      case 'discover': return this.discoverScroller;
+      case 'search': return this.searchScroller;
+      case 'show': return this.showScroller;
+      case 'movie': return this.movieScroller;
+      case 'calendar': return this.calendarScroller;
+      case 'movieCalendar': return this.movieCalendarScroller;
+      case 'library': return this.collectionScroller;
+      default: return undefined;
+    }
+  }
+  private scrollContext(slot: string): string {
+    const scope=this.currentSearchAccount();
+    if (slot==='discover') { return JSON.stringify([scope,slot,this.mediaMode,this.discoverOptions]); }
+    if (slot==='search') { return JSON.stringify([scope,slot,this.title,this.searchOptions,this.searchSubmitted]); }
+    if (slot==='show') { return JSON.stringify([scope,slot,this.nextQuery,this.nextFilter,this.progressPrefs]); }
+    if (slot==='movie') { return JSON.stringify([scope,slot,this.movieProgressQuery,this.movieProgressOptions]); }
+    if (slot==='calendar') { return JSON.stringify([scope,slot,this.calendarQuery,this.showCalendarMode,this.calendarPremieres,this.calendarProtect]); }
+    if (slot==='movieCalendar') { return JSON.stringify([scope,slot,this.movieCalendarQuery,this.movieCalendarMode]); }
+    return JSON.stringify([scope,slot,this.mediaMode,this.collectionFilter,this.collectionStatusFilter,this.collectionQuery,this.collectionOptions,this.collectionGrid]);
+  }
+  private rememberScroll(): void {
+    const slot=this.scrollSlot(), rows=this.scrollSource(slot), scroller=this.scrollController(slot);
+    if (!slot || !rows || !scroller) { return; }
+    const context=this.scrollContext(slot);
+    if (this.scrollAnchors.pending(slot,context)) { return; }
+    const index=this.scrollIndices.get(slot) ?? 0;
+    let offset=0;
+    try { offset=-scroller.getItemRect(index).y; } catch (error) {}
+    this.scrollAnchors.save(slot,captureAnchor(context,rows,index,offset));
+  }
+  private onListScroll(slot: string,index: number): void {
+    if (this.scrollSlot()!==slot) { return; }
+    this.scrollIndices.set(slot,index);
+    this.restoreScroll(slot);
+  }
+  private restoreScroll(slot: string): void {
+    if (!this.scrollAnchors.has(slot) || this.scrollSlot()!==slot) { return; }
+    const context=this.scrollContext(slot), anchor=this.scrollAnchors.pending(slot,context);
+    const rows=this.scrollSource(slot), scroller=this.scrollController(slot);
+    if (!anchor || !rows || !scroller || this.scrollScheduled===anchor || !resolveAnchor(anchor,context,rows)) { return; }
+    this.scrollScheduled=anchor;
+    // Run after the native data source notifications have been laid out.
+    // No guessed delay, retained page or repeated scroll timer.
+    this.getUIContext().postFrameCallback(new RestoreScrollFrame(()=>{
+      if (this.scrollScheduled===anchor) { this.scrollScheduled=undefined; }
+      if (this.scrollSlot()!==slot || this.scrollContext(slot)!==context || this.scrollAnchors.pending(slot,context)!==anchor) { return; }
+      const target=resolveAnchor(anchor,context,rows);
+      if (!target) { return; }
+      try {
+        scroller.scrollToIndex(target.index,false,ScrollAlign.START,{extraOffset:LengthMetrics.vp(target.offset)});
+        this.scrollIndices.set(slot,target.index);
+        this.scrollAnchors.consume(slot,anchor);
+      } catch (error) {
+        // A detached controller is retried only by the next native layout/data event.
+      }
+    }));
+  }
   private viewScope(): string { return this.tab + ':' + this.mediaMode + ':' + this.progressMode + ':' + (this.selectedMedia?.id ?? ''); }
   private viewportChanged(item: Media, season: number, urls: string[], visible: boolean, tab: string, mode: string, slot: string = ''): void {
     if (!this.pageVisible || this.selectedMedia || tab !== this.tab || (mode && mode !== this.progressMode) || !canReadDetails(item)) { return; }
@@ -1242,6 +1339,7 @@ struct Index {
   private updateCacheLifecycle(): void {
     const route=this.pageVisible ? this.viewScope() : '';
     const account=this.currentSearchAccount();
+    if (this.scrollAccount!==account) { this.scrollAccount=account; this.scrollAnchors.clear(); this.scrollIndices.clear(); this.scrollScheduled=undefined; }
     if (!this.cacheLifecycle.transition(route,account)) { return; }
     this.releaseInactiveCaches(false);
   }
@@ -1325,17 +1423,19 @@ struct Index {
       for (let i=0;i<items.length;i+=2) { rows.push(items.slice(i,i+2)); }
       const committed = await this.discoverRows.submit(rows,rows.map((row: DiscoverItem[]) => row.map((item: DiscoverItem) => item.media.id).join(',')),
         rows.map((row: DiscoverItem[]) => this.discoverRowKey(row)),diffDisplay,current);
-      if (committed && current()) { this.discoverTotal = result.total; this.discoverShownPage = result.page; this.discoverPages = result.pages; }
+      if (committed && current()) { this.discoverTotal = result.total; this.discoverShownPage = result.page; this.discoverPages = result.pages; this.restoreScroll('discover'); }
       return;
     }
     if (this.tab === 'search') {
-      await this.searchRows.submit(this.results,this.results.map((item: Media) => item.id),this.results.map((item: Media) => this.searchRowKey(item)),diffDisplay,current);
+      const committed=await this.searchRows.submit(this.results,this.results.map((item: Media) => item.id),this.results.map((item: Media) => this.searchRowKey(item)),diffDisplay,current);
+      if (committed && current()) { this.restoreScroll('search'); }
       return;
     }
     if (this.tab === 'progress' && this.progressMode === 'calendar') {
       if (this.mediaMode === 'movie') {
         const rows = this.movieCalendarCurrent() ? this.movieSlice() : [];
-        await this.movieCalendarRows.submit(rows,rows.map((row: MovieCalendarItem) => row.movie.media.id),rows.map((row: MovieCalendarItem) => this.movieCalendarKey(row)),diffDisplay,current);
+        const committed=await this.movieCalendarRows.submit(rows,rows.map((row: MovieCalendarItem) => row.movie.media.id),rows.map((row: MovieCalendarItem) => this.movieCalendarKey(row)),diffDisplay,current);
+        if (committed && current()) { this.restoreScroll('movieCalendar'); }
       } else {
         const prepared = this.prepareCalendar();
         if (!prepared) { return; }
@@ -1344,6 +1444,7 @@ struct Index {
         const rows = prepared;
         const committed = await this.calendarRows.submit(rows,rows.map((row: CalendarEntry) => row.key),rows.map((row: CalendarEntry) => this.calendarRowKey(row)),diffDisplay,current);
         if (committed && current()) { this.calendarSummary = summary; }
+      if (committed && current()) { this.restoreScroll('calendar'); }
       }
       return;
     }
@@ -1364,6 +1465,7 @@ struct Index {
       const committed = await this.collectionRowsSource.submit(rows, rows.map((group: CollectionGroup) => group.key),
         rows.map((group: CollectionGroup) => this.collectionGroupKey(group)),diffDisplay,current);
       if (committed && current()) { this.collectionSummary = summary; }
+      if (committed && current()) { this.restoreScroll('library'); }
       return;
     }
     if (this.tab !== 'progress' || this.progressMode !== 'next') { return; }
@@ -1377,6 +1479,7 @@ struct Index {
       const committed = await this.movieRowsSource.submit(rows, rows.map((row: PersonalLibraryRow) => row.media.id),
         rows.map((row: PersonalLibraryRow) => this.movieRowKey(row)),diffDisplay,current);
       if (committed && current()) { this.movieSummary = summary; }
+      if (committed && current()) { this.restoreScroll('movie'); }
     } else {
       if (this.progressPrefs.sort==='userRating') { this.loadCollectionRatings(); }
       this.progressData(this.nextQuery,false,true);
@@ -1388,6 +1491,7 @@ struct Index {
       const committed = await this.showRows.submit(rows, rows.map((entry: ProgressEntry) => entry.key),
         rows.map((entry: ProgressEntry) => this.showRowKey(entry)),diffDisplay,current);
       if (committed && current()) { this.showSummary = summary; }
+      if (committed && current()) { this.restoreScroll('show'); }
     }
   }
 
@@ -3758,7 +3862,7 @@ struct Index {
 
   @Builder
   discoverView() {
-    List({ space: 12 }) {
+    List({space:12,scroller:this.discoverScroller}) {
       ListItem() {
         Column({ space: 12 }) {
           if (this.presentationStatus) { Text(this.presentationStatus).fontSize(12).width('100%') }
@@ -3807,6 +3911,7 @@ struct Index {
         
       }
     }.width('100%').height('100%').padding(16)
+      .onScrollIndex((start: number,end: number,center: number)=>{ this.onListScroll('discover',start); })
   }
 
   @Builder
@@ -4579,7 +4684,7 @@ struct Index {
 
   @Builder
   nextShowsView() {
-    List({ space: 10 }) {
+    List({space:10,scroller:this.showScroller}) {
       ListItem() {
         Column({ space: 10 }) {
           this.progressHeader()
@@ -4630,6 +4735,7 @@ struct Index {
       }
       
     }.width('100%').height('100%').padding(16)
+      .onScrollIndex((start: number,end: number,center: number)=>{ this.onListScroll('show',start); })
   }
 
   private movieCalendarCurrent(): boolean {
@@ -4698,7 +4804,7 @@ struct Index {
 
   @Builder
   personalMovieCalendarView() {
-    List({ space: 10 }) {
+    List({space:10,scroller:this.movieCalendarScroller}) {
       ListItem() {
         Column({ space: 10 }) {
           this.progressHeader()
@@ -4761,11 +4867,12 @@ struct Index {
         
       }
     }.width('100%').height('100%').padding(16)
+      .onScrollIndex((start: number,end: number,center: number)=>{ this.onListScroll('movieCalendar',start); })
   }
 
   @Builder
   calendarView() {
-    List({space:10}) {
+    List({space:10,scroller:this.calendarScroller}) {
       ListItem() {
         Column({space:10}) {
           this.progressHeader()
@@ -4829,6 +4936,7 @@ struct Index {
         
       }
     }.width('100%').height('100%').padding(16)
+      .onScrollIndex((start: number,end: number,center: number)=>{ this.onListScroll('calendar',start); })
   }
 
   private movieSortKey(query: string, utc: string): string {
@@ -4924,7 +5032,7 @@ struct Index {
 
   @Builder
   movieProgressView() {
-    List({ space: 10 }) {
+    List({space:10,scroller:this.movieScroller}) {
       ListItem() {
         Column({ space: 10 }) {
           this.progressHeader()
@@ -4989,6 +5097,7 @@ struct Index {
         
       }
     }.width('100%').height('100%').padding(16)
+      .onScrollIndex((start: number,end: number,center: number)=>{ this.onListScroll('movie',start); })
   }
 
   @Builder
@@ -5455,7 +5564,7 @@ struct Index {
 
   @Builder
   collectionView() {
-    List({ space: 12 }) {
+    List({space:12,scroller:this.collectionScroller}) {
       ListItem() {
         Column({ space: 12 }) {
           if (this.presentationStatus) { Text(this.presentationStatus).fontSize(12).width('100%') }
@@ -5533,6 +5642,7 @@ struct Index {
         
       }
     }.width('100%').height('100%').padding(16)
+      .onScrollIndex((start: number,end: number,center: number)=>{ this.onListScroll('library',start); })
   }
 
   @Builder
@@ -5766,6 +5876,7 @@ struct Index {
     if (this.detailBusy || this.localBusy || this.setupBusy || !canReadDetails(item) || (!this.clientId && item.kind !== 'show')) {
       return;
     }
+    if (!this.selectedMedia) { this.rememberScroll(); }
     this.closeDetail();
     if (preferredSeason > 0 && item.kind === 'show') { this.localSeason = preferredSeason; }
     const revision = ++this.detailRevision;
@@ -5845,6 +5956,7 @@ struct Index {
   }
 
   private navigate(value: string): void {
+    if (value==='search' || value==='account' || value==='cloud') { this.rememberScroll(); }
     if (this.tab === 'progress' || this.tab === 'discover' || this.tab === 'library') { this.returnTab = this.tab; }
     this.closeDetail();
     if (this.tab === 'discover' && value !== 'discover') { this.discoverRevision++; this.discoverBusy = false; }
@@ -6023,7 +6135,7 @@ struct Index {
 
   @Builder
   searchView() {
-    List({ space: 10 }) {
+    List({space:10,scroller:this.searchScroller}) {
       ListItem() {
         Column({ space: 12 }) {
           if (this.presentationStatus) { Text(this.presentationStatus).fontSize(12).width('100%') }
@@ -6089,6 +6201,7 @@ struct Index {
           }
         }, (item: Media) => this.searchRows.keyFor(item.id))
     }.width('100%').height('100%').padding(16)
+      .onScrollIndex((start: number,end: number,center: number)=>{ this.onListScroll('search',start); })
   }
 
   build() {

@@ -1,5 +1,6 @@
+import { ScrollRows } from './ScrollAnchor';
 import { ListDiffInput, ListEdit, planListDiff, sameListOrder } from './ListDiff';
-export class LazyRows<T> implements IDataSource {
+export class LazyRows<T> implements IDataSource, ScrollRows {
   private rows: T[] = [];
   private ids: string[] = [];
   private keys: string[] = [];
@@ -7,6 +8,8 @@ export class LazyRows<T> implements IDataSource {
   private listeners: DataChangeListener[] = [];
   private revision: number = 0;
   totalCount(): number { return this.rows.length; }
+  idAt(index: number): string { return this.ids[index] ?? ''; }
+  indexOfId(id: string): number { return this.ids.indexOf(id); }
   getData(index: number): T { return this.rows[index]; }
   keyFor(id: string): string { return id + ':' + (this.keyById.get(id) ?? ''); }
   registerDataChangeListener(listener: DataChangeListener): void {
