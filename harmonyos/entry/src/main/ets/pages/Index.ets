@@ -38,7 +38,9 @@ import { allowLocalScope } from '../model/EffectiveState';
 import { hasTrackingEvidence } from '../model/PersonalLibrary';
 import { CollectionGroup, GroupEntry, normalizeMode, progressTabs, collectionRows, pageGroups } from '../model/NavigationModel';
 import { MediaDetail, canReadDetails, readDetails, cachePoster, clearDetailMemory } from '../data/TraktDetails';
-import { DiscoverItem, readDiscover } from '../data/TraktDiscover';
+import { DiscoverItem, DiscoverOptions, DiscoverFeed, DiscoverPage, defaultDiscover, validDiscoverOptions, discoverRequest, discoverKey, discoverFresh, filterDiscover, discoverPage, DISCOVER_GENRES, DISCOVER_NETWORKS } from '../model/DiscoverRules';
+import { DiscoverRead } from '../model/DiscoverRead';
+import { openDiscover } from '../data/DiscoverRepository';
 import { EpisodeProgress, SeasonProgress, SeriesProgress, ChineseText, readSeriesProgress, readChinese } from '../data/TraktProgress';
 import { AppearanceStore, applyAppearance } from '../data/AppearanceStore';
 import { EpisodeStore, LocalEpisode, LocalSeriesState, LocalSeasonState, LocalEpisodeState, AutoConsent, QueueEntry, fetchFullEpisodeCatalog, eligibleCatalog } from '../data/EpisodeStore';
@@ -54,6 +56,7 @@ import { safeSyncError } from '../data/SyncDiagnostics';
 import { APP_VERSION, RELEASES_URL } from '../config/BuildInfo';
 import { UpdateInfo, UpstreamInfo, checkRelease, checkUpstream } from '../data/ReleaseUpdates';
 
+interface DisplaySummary { key: string; total: number; page: number; pages: number; }
 interface CollectionIndexes {
   times: Map<string,number>;
   recent: Map<string,number>;
@@ -82,6 +85,9 @@ struct Index {
   private displayRevisions: DisplayRevisions = new DisplayRevisions();
   private sortJobs: LatestDisplayJobs = new LatestDisplayJobs();
   @State sortedViewRevision: number = 0;
+  @State showSummary: DisplaySummary = {key:'',total:0,page:1,pages:1};
+  @State movieSummary: DisplaySummary = {key:'',total:0,page:1,pages:1};
+  @State collectionSummary: DisplaySummary = {key:'',total:0,page:1,pages:1};
   private lazyRevision: number = 0;
   private showTitleRevision: number = 0;
   private movieTitleRevision: number = 0;
@@ -235,6 +241,15 @@ struct Index {
   @State translationBusy: boolean = false;
   @State translationStatus: string = '';
   @State discoverMode: string = 'trending';
+  @State discoverOptions: DiscoverOptions = defaultDiscover();
+  @State discoverGenreDraft: string = '';
+  @State discoverNetworkDraft: string = '';
+  @State discoverTotal: number = 0;
+  @State discoverShownPage: number = 1;
+  private discoverRepo?: Promise<DiscoverRead>;
+  private discoverFeed?: DiscoverFeed;
+  private discoverFeedKey: string = '';
+  private discoverMemo: RevisionMemo<DiscoverItem[]> = new RevisionMemo<DiscoverItem[]>();
   @State @Watch('onPresentationChanged') discoverItems: DiscoverItem[] = [];
   @State discoverPage: number = 1;
   @State discoverPages: number = 0;
@@ -334,6 +349,7 @@ struct Index {
       this.settings = new ClientSettings(context);
       this.clientId = this.settings.load();
       this.mediaMode = normalizeMode(this.settings.loadMode());
+      this.restoreDiscoverOptions();
       this.presentationLanguage = this.settings.loadLanguage();
       this.progressPrefs = this.settings.loadProgress();
       this.movieProgressOptions = this.settings.loadMovieProgress();
@@ -353,10 +369,12 @@ struct Index {
     this.initializeMedia(context);
     this.initializeEpisodes(context);
     this.initializePresentation(context);
+    this.discoverRepo = openDiscover(context);
   }
 
   onPageShow(): void {
     this.pageVisible = true;
+    if (this.tab === 'discover' && !this.selectedMedia) { this.loadDiscover(this.discoverPage); }
     this.presentationBlocked = false;
     this.requestPresentation();
     this.startNetworkListener();
@@ -374,6 +392,8 @@ struct Index {
 
   onPageHide(): void {
     this.pageVisible = false;
+    this.discoverRevision++;
+    this.discoverBusy = false;
     this.sortJobs.clear();
     this.lazyRevision++;
     this.viewport.clear();
@@ -389,6 +409,8 @@ struct Index {
 
   aboutToDisappear(): void {
     this.pageVisible = false;
+    this.discoverRevision++;
+    this.discoverBusy = false;
     this.sortJobs.clear();
     this.lazyRevision++;
     this.viewport.clear();
@@ -475,6 +497,14 @@ struct Index {
     this.cancelCatalogRepair();
     this.showRows.replace([], [], []);
     this.movieRowsSource.replace([], [], []);
+    this.showSummary = {key:'',total:0,page:1,pages:1};
+    this.movieSummary = {key:'',total:0,page:1,pages:1};
+    this.collectionSummary = {key:'',total:0,page:1,pages:1};
+    this.discoverRows.replace([],[],[]);
+    this.discoverTotal = 0;
+    this.discoverPages = 0;
+    this.discoverShownPage = 1;
+    this.discoverMemo.clear();
     this.projectionMemo.clear();
     this.showProjectionCache.clear();
     this.libraryRevision++;
@@ -1150,10 +1180,12 @@ struct Index {
     const current = (): boolean => this.pageVisible && revision === this.lazyRevision && scope === this.viewScope() && account === this.currentProgressScope() && !this.selectedMedia;
     if (this.tab === 'discover') {
       const items = this.visibleDiscover();
+      const result = this.discoverPageResult();
       const rows: DiscoverItem[][] = [];
       for (let i=0;i<items.length;i+=2) { rows.push(items.slice(i,i+2)); }
-      await this.discoverRows.submit(rows,rows.map((row: DiscoverItem[]) => row.map((item: DiscoverItem) => item.media.id).join(',')),
+      const committed = await this.discoverRows.submit(rows,rows.map((row: DiscoverItem[]) => row.map((item: DiscoverItem) => item.media.id).join(',')),
         rows.map((row: DiscoverItem[]) => this.discoverRowKey(row)),diffDisplay,current);
+      if (committed && current()) { this.discoverTotal = result.total; this.discoverShownPage = result.page; this.discoverPages = result.pages; }
       return;
     }
     if (this.tab === 'search') {
@@ -1172,8 +1204,9 @@ struct Index {
     }
     if (this.tab === 'library') {
       if (this.collectionOptions.sort === 'userRating') { this.loadCollectionRatings(); }
-      this.collectionItems(true);
+      const prepared = this.collectionItems(true);
       if (this.sortJobs.pending('collection')) { return; }
+      const summary: DisplaySummary = {key:this.collectionDisplayKey(),total:prepared.length,page:this.collectionPage,pages:Math.max(1,Math.ceil(prepared.length/this.collectionPageSize))};
       const rows: CollectionGroup[] = [];
       if (!this.signedIn || this.activeCloud()) {
         for (const group of this.collectionPageGroups()) {
@@ -1183,8 +1216,9 @@ struct Index {
           }
         }
       }
-      await this.collectionRowsSource.submit(rows, rows.map((group: CollectionGroup) => group.key),
+      const committed = await this.collectionRowsSource.submit(rows, rows.map((group: CollectionGroup) => group.key),
         rows.map((group: CollectionGroup) => this.collectionGroupKey(group)),diffDisplay,current);
+      if (committed && current()) { this.collectionSummary = summary; }
       return;
     }
     if (this.tab !== 'progress' || this.progressMode !== 'next') { return; }
@@ -1194,15 +1228,20 @@ struct Index {
       if (this.movieProgressQuery && this.presentationLanguage === 'zh') { this.movieProgressRows('',false,true); }
       if (this.sortJobs.pending(this.movieProgressQuery ? 'movie-query' : 'movie-all')) { return; }
       const rows = prepared.slice((this.movieProgressPage - 1) * this.collectionPageSize,this.movieProgressPage * this.collectionPageSize);
-      await this.movieRowsSource.submit(rows, rows.map((row: PersonalLibraryRow) => row.media.id),
+      const summary: DisplaySummary = {key:this.movieDisplayKey(),total:prepared.length,page:this.movieProgressPage,pages:Math.max(1,Math.ceil(prepared.length/this.collectionPageSize))};
+      const committed = await this.movieRowsSource.submit(rows, rows.map((row: PersonalLibraryRow) => row.media.id),
         rows.map((row: PersonalLibraryRow) => this.movieRowKey(row)),diffDisplay,current);
+      if (committed && current()) { this.movieSummary = summary; }
     } else {
       this.progressData(this.nextQuery,false,true);
       if (this.nextQuery && this.presentationLanguage === 'zh') { this.progressData('',false,true); }
       if (this.sortJobs.pending(this.nextQuery ? 'show-query' : 'show-all')) { return; }
       const rows = this.nextSlice();
-      await this.showRows.submit(rows, rows.map((entry: ProgressEntry) => entry.key),
+      const pages = this.nextPages();
+      const summary: DisplaySummary = {key:this.showDisplayKey(),total:this.nextFiltered().length,page:Math.min(this.nextPage,pages),pages:pages};
+      const committed = await this.showRows.submit(rows, rows.map((entry: ProgressEntry) => entry.key),
         rows.map((entry: ProgressEntry) => this.showRowKey(entry)),diffDisplay,current);
+      if (committed && current()) { this.showSummary = summary; }
     }
   }
 
@@ -2526,6 +2565,14 @@ struct Index {
     this.cancelCatalogRepair();
     this.showRows.replace([], [], []);
     this.movieRowsSource.replace([], [], []);
+    this.showSummary = {key:'',total:0,page:1,pages:1};
+    this.movieSummary = {key:'',total:0,page:1,pages:1};
+    this.collectionSummary = {key:'',total:0,page:1,pages:1};
+    this.discoverRows.replace([],[],[]);
+    this.discoverTotal = 0;
+    this.discoverPages = 0;
+    this.discoverShownPage = 1;
+    this.discoverMemo.clear();
     this.projectionMemo.clear();
     this.showProjectionCache.clear();
     this.libraryRevision++;
@@ -3281,54 +3328,124 @@ struct Index {
 
   private resetDiscover(): void {
     ++this.discoverRevision;
+    this.discoverFeed = undefined;
+    this.discoverFeedKey = '';
+    this.discoverMemo.clear();
+    this.discoverRows.replace([],[],[]);
     this.discoverItems = [];
     this.discoverPage = 1;
+    this.discoverShownPage = 1;
     this.discoverPages = 0;
+    this.discoverTotal = 0;
     this.discoverBusy = false;
     this.discoverStatus = '';
   }
-
-  private async loadDiscover(page: number = 1): Promise<void> {
-    if (this.discoverBusy || this.setupBusy || !this.clientId || page < 1) {
-      return;
+  private restoreDiscoverOptions(): void {
+    this.discoverOptions = this.settings?.loadDiscoverOptions(this.mediaMode) ?? defaultDiscover();
+    this.discoverMode = this.discoverOptions.mode;
+    this.discoverGenreDraft = this.discoverOptions.genres.join(',');
+    this.discoverNetworkDraft = this.discoverOptions.networks.join(',');
+  }
+  private discoverCollectionSize(): number {
+    let count = 0;
+    for (const row of this.personalLibrary()) {
+      if (row.media.kind !== this.mediaMode) { continue; }
+      if (row.queued) { count++; }
+      if (row.watched || hasTrackingEvidence(row)) { count++; }
     }
+    return count + this.currentCollectionState().hidden.filter((row: HiddenEntry) => row.media.kind === this.mediaMode).length;
+  }
+  private async loadDiscover(page: number = 1, force: boolean = false): Promise<void> {
+    if (this.setupBusy || !this.clientId || page < 1 || !this.pageVisible || this.tab !== 'discover') { return; }
     const revision = ++this.discoverRevision;
     const clientId = this.clientId;
-    this.discoverBusy = true;
-    this.discoverStatus = '正在读取影视榜单…';
-    try {
-      const result = await readDiscover(clientId, this.mediaMode, this.discoverMode, page);
-      if (revision !== this.discoverRevision || clientId !== this.clientId) {
+    const kind = this.mediaMode;
+    const options = this.discoverOptions;
+    const request = discoverRequest(kind,options,this.discoverCollectionSize());
+    const key = discoverKey(clientId,request);
+    const current = (): boolean => revision === this.discoverRevision && clientId === this.clientId &&
+      kind === this.mediaMode && this.pageVisible && this.tab === 'discover' && this.discoverOptions === options;
+    const publish = (feed: DiscoverFeed, fresh: boolean): void => {
+      if (!current()) { return; }
+      this.discoverFeed = feed;
+      this.discoverFeedKey = key;
+      this.discoverMemo.clear();
+      this.discoverItems = feed.items;
+      this.discoverPage = page;
+      this.discoverStatus = fresh ? '本地榜单已就绪' : '显示本地旧榜单，正在更新…';
+      this.requestPresentation();
+    };
+    if (this.discoverFeed && this.discoverFeedKey === key) {
+      if (!force && discoverFresh(this.discoverFeed,Date.now())) {
+        this.discoverPage = page;
+        this.discoverStatus = '本地榜单已就绪';
+        this.discoverBusy = false;
+        this.requestPresentation();
         return;
       }
-      this.discoverItems = result.items;
-      this.discoverPage = result.page;
-      this.discoverPages = result.pages;
-      this.discoverStatus = result.items.length === 0 ? '没有影视结果' : '榜单已更新';
-      this.requestPresentation();
+      publish(this.discoverFeed,false);
+    } else {
+      this.discoverFeed = undefined; this.discoverFeedKey = ''; this.discoverMemo.clear();
+      this.discoverRows.replace([],[],[]);
+      this.discoverItems = []; this.discoverTotal = 0; this.discoverPages = 0; this.discoverShownPage = 1;
+    }
+    this.discoverBusy = true;
+    if (!this.discoverFeed) { this.discoverStatus = '正在读取本地榜单…'; }
+    try {
+      if (!this.discoverRepo) { this.discoverRepo = openDiscover(this.context()); }
+      const repo = await this.discoverRepo;
+      if (!current()) { return; }
+      const feed = await repo.load(clientId,request,force,publish);
+      if (!current()) { return; }
+      publish(feed,true);
     } catch (error) {
-      if (revision === this.discoverRevision) {
-        this.discoverStatus = '榜单读取失败，请检查网络、API 权限或调用限额后重试。';
-      }
+      if (current()) { this.discoverStatus = this.discoverFeed ? '网络更新失败，保留本地榜单。' : '榜单不可用，请检查网络或 Trakt 权限后重试。'; }
     } finally {
-      if (revision === this.discoverRevision) {
-        this.discoverBusy = false;
-      }
+      if (current()) { this.discoverBusy = false; this.requestPresentation(); }
     }
   }
-
-  private changeDiscover(mode: string): void {
-    if (mode === this.discoverMode) {
-      return;
-    }
+  private async applyDiscover(options: DiscoverOptions): Promise<void> {
+    if (!validDiscoverOptions(options)) { this.discoverStatus = '筛选无效，请使用下方列出的类型或电视网代码。'; return; }
+    const kind = this.mediaMode;
     this.resetDiscover();
-    this.discoverMode = mode;
+    this.discoverOptions = options;
+    this.discoverMode = options.mode;
+    this.discoverGenreDraft = options.genres.join(',');
+    this.discoverNetworkDraft = options.networks.join(',');
     this.loadDiscover();
+    try { await this.settings?.saveDiscoverOptions(kind,options); }
+    catch (error) { if (kind === this.mediaMode && this.discoverOptions === options) { this.discoverStatus = '筛选已应用，但设置未保存。'; } }
   }
-
-  private visibleDiscover(): DiscoverItem[] {
-    return this.discoverItems.filter((item: DiscoverItem) => !this.isHidden(item.media));
+  private changeDiscover(mode: string): void {
+    if (mode === this.discoverMode) { return; }
+    this.applyDiscover({mode:mode,genres:this.discoverOptions.genres,networks:this.discoverOptions.networks,hideCollection:this.discoverOptions.hideCollection});
   }
+  private applyDiscoverDraft(): void {
+    const genres = this.discoverGenreDraft.split(',').map((x: string) => x.trim().toLowerCase()).filter((x: string) => !!x);
+    const networks = this.mediaMode === 'show' ? this.discoverNetworkDraft.split(',').map((x: string) => x.trim().toUpperCase()).filter((x: string) => !!x) : [];
+    this.applyDiscover({mode:this.discoverMode,genres:genres,networks:networks,hideCollection:this.discoverOptions.hideCollection});
+  }
+  private discoverPageResult(): DiscoverPage {
+    // Public feed storage contains no personal membership or watch state.
+    // Do not interpret an unverified account as an empty collection.
+    if (this.discoverOptions.hideCollection && (!this.ready || (this.signedIn && !this.activeCloud()))) { return discoverPage([],1); }
+    const now = Date.now();
+    const day = new Date(now).toISOString().substring(0,10);
+    const key = JSON.stringify([this.discoverFeedKey,this.discoverFeed?.fetchedAt ?? 0,this.discoverMode,this.discoverOptions.hideCollection,
+      this.libraryRevision,this.displayRevisions.collection,this.currentProgressScope(),day]);
+    let rows = this.discoverMemo.get(key,now);
+    if (!rows) {
+      const hidden = new Set<string>(this.currentCollectionState().hidden.map((x: HiddenEntry) => x.media.id));
+      const members = new Set<string>();
+      if (this.discoverOptions.hideCollection) {
+        for (const row of this.personalLibrary()) { if (isPersonalMember(row)) { members.add(row.media.id); } }
+      }
+      rows = filterDiscover(this.discoverItems,this.discoverOptions,hidden,members,now);
+      this.discoverMemo.put(key,rows,now,Date.parse(day+'T00:00:00Z')+86400000);
+    }
+    return discoverPage(rows,this.discoverPage);
+  }
+  private visibleDiscover(): DiscoverItem[] { return this.discoverPageResult().items; }
 
   @Builder
   discoverCard(item: DiscoverItem) {
@@ -3367,12 +3484,29 @@ struct Index {
         Row({ space: 6 }) {
           this.discoverModeButton('趋势', 'trending')
           this.discoverModeButton('热门', 'popular')
+          this.discoverModeButton('最近播出', 'recent')
           this.discoverModeButton(this.mediaMode === 'movie' ? '即将上映' : '即将播出', 'anticipated')
         }.width('100%')
+        TextInput({placeholder:'类型代码，逗号分隔',text:this.discoverGenreDraft})
+          .onChange((value: string) => { this.discoverGenreDraft = value; })
+        Text(DISCOVER_GENRES.join(', ')).fontSize(11).width('100%')
+        if (this.mediaMode === 'show') {
+          TextInput({placeholder:'电视网代码，逗号分隔',text:this.discoverNetworkDraft})
+            .onChange((value: string) => { this.discoverNetworkDraft = value; })
+          Text(DISCOVER_NETWORKS.join(', ')).fontSize(11).width('100%')
+        }
+        Row({space:8}) {
+          Button('应用筛选').layoutWeight(1).onClick(() => { this.applyDiscoverDraft(); })
+          Button(this.discoverOptions.hideCollection ? '显示已收藏' : '隐藏已收藏').layoutWeight(1)
+            .onClick(() => { this.applyDiscover({mode:this.discoverMode,genres:this.discoverOptions.genres,networks:this.discoverOptions.networks,hideCollection:!this.discoverOptions.hideCollection}); })
+        }.width('100%')
         Text(this.discoverStatus).fontSize(12).width('100%')
-        Button(this.discoverBusy ? '加载中…' : '刷新本页')
+        if (this.discoverOptions.hideCollection && (!this.ready || (this.signedIn && !this.activeCloud()))) {
+          Text('正在核对个人库，暂不显示未验证的收藏筛选结果。').fontSize(12).width('100%')
+        } else { Text('共 '+this.discoverTotal+' 部').fontSize(12).width('100%') }
+        Button(this.discoverBusy ? '加载中…' : '刷新榜单')
           .enabled(!this.discoverBusy && !this.setupBusy)
-          .onClick(() => { this.loadDiscover(this.discoverPage); })
+          .onClick(() => { this.loadDiscover(this.discoverPage,true); })
       }
         }.width('100%')
       }
@@ -3387,12 +3521,12 @@ struct Index {
         ListItem() {
         Row({ space: 8 }) {
           Button('上一页').layoutWeight(1)
-            .enabled(!this.discoverBusy && this.discoverPage > 1)
-            .onClick(() => { this.loadDiscover(this.discoverPage - 1); })
-          Text(this.discoverPage + ' / ' + (this.discoverPages || 1)).fontSize(13)
+             .enabled(!this.discoverBusy && this.discoverShownPage > 1)
+            .onClick(() => { this.loadDiscover(this.discoverShownPage - 1); })
+          Text(this.discoverShownPage + ' / ' + (this.discoverPages || 1)).fontSize(13)
           Button('下一页').layoutWeight(1)
-            .enabled(!this.discoverBusy && this.discoverPage < this.discoverPages)
-            .onClick(() => { this.loadDiscover(this.discoverPage + 1); })
+            .enabled(!this.discoverBusy && this.discoverShownPage < this.discoverPages)
+            .onClick(() => { this.loadDiscover(this.discoverShownPage + 1); })
         }.width('100%')
         }
       }
@@ -3561,6 +3695,9 @@ struct Index {
     finally { this.progressPrefsBusy = false; this.reloadProgressFlags(); }
   }
 
+  private showDisplayKey(): string { return JSON.stringify([this.progressSortKey(this.nextQuery),this.nextPage,this.progressPrefs.upcomingCollapsed,this.progressPrefs.holdCollapsed]); }
+  private movieDisplayKey(): string { return JSON.stringify([this.movieSortKey(this.movieProgressQuery,new Date().toISOString().substring(0,10)),this.movieProgressPage]); }
+  private collectionDisplayKey(): string { return JSON.stringify([this.collectionSortKey(),this.collectionPage,this.collectionGrid]); }
   private progressBusinessKey(): string {
     const prefs = this.progressPrefs;
     return JSON.stringify([this.displayRevisions.show,this.currentProgressScope(),this.activeCloud()?.generation ?? -1,
@@ -4033,10 +4170,10 @@ struct Index {
       if (this.nextShows.some((row: NextShow) => !row.source)) {
         Text('部分剧集缺少完整播出目录，暂不推荐。').fontSize(12).width('100%')
       }
-      Text('符合条件 ' + this.nextFiltered().length + ' 部').fontSize(13).width('100%')
-      if (!this.nextFiltered().length && !this.cloudBusy && !this.localBusy && !this.sortJobs.pending(this.nextQuery ? 'show-query' : 'show-all')) {
-        Text('暂无符合条件的下一集。').fontSize(14).width('100%')
-      }
+      if (this.showSummary.key === this.showDisplayKey()) {
+        Text('符合条件 ' + this.showSummary.total + ' 部').fontSize(13).width('100%')
+        if (!this.showSummary.total && !this.cloudBusy && !this.localBusy) { Text('暂无符合条件的下一集。').fontSize(14).width('100%') }
+      } else { Text('正在更新列表…').fontSize(13).width('100%') }
         }.width('100%')
       }
       if (!this.signedIn || this.activeCloud()) {
@@ -4056,9 +4193,9 @@ struct Index {
       }
       ListItem() {
       Row({ space: 8 }) {
-        Button('上一页').layoutWeight(1).enabled(this.nextPage > 1).onClick(() => { this.nextPage--; })
-        Text(this.nextPage + ' / ' + this.nextPages()).fontSize(13)
-        Button('下一页').layoutWeight(1).enabled(this.nextPage < this.nextPages()).onClick(() => { this.nextPage++; })
+        Button('上一页').layoutWeight(1).enabled(this.showSummary.key === this.showDisplayKey() && this.showSummary.page > 1).onClick(() => { this.nextPage = this.showSummary.page - 1; })
+        Text(this.showSummary.page + ' / ' + this.showSummary.pages).fontSize(13)
+        Button('下一页').layoutWeight(1).enabled(this.showSummary.key === this.showDisplayKey() && this.showSummary.page < this.showSummary.pages).onClick(() => { this.nextPage = this.showSummary.page + 1; })
       }.width('100%')
       }
     }.width('100%').height('100%').padding(16)
@@ -4395,9 +4532,8 @@ struct Index {
           if (this.movieProgressOptions.sort === 'userRating' && this.movieCalendarData?.ratingsComplete !== true) {
             Text('个人评分按需读取中或暂不可用；保留其他排序及观看功能。').fontSize(12).width('100%')
           }
-          if (!this.movieProgressRows().length) {
-            Text('暂无符合上映日期或年份条件的待看电影。').fontSize(13).width('100%')
-          }
+          if (this.movieSummary.key !== this.movieDisplayKey()) { Text('正在更新列表…').fontSize(13).width('100%') }
+          else if (!this.movieSummary.total) { Text('暂无符合上映日期或年份条件的待看电影。').fontSize(13).width('100%') }
         }
       }
         }.width('100%')
@@ -4421,9 +4557,9 @@ struct Index {
         }, (row: PersonalLibraryRow) => this.movieRowsSource.keyFor(row.media.id))
         ListItem() {
           Row({ space: 8 }) {
-            Button('上一页').layoutWeight(1).enabled(this.movieProgressPage > 1).onClick(() => { this.movieProgressPage--; })
-            Text(this.movieProgressPage + ' / ' + Math.max(1, Math.ceil(this.movieProgressRows().length / this.collectionPageSize))).fontSize(13)
-            Button('下一页').layoutWeight(1).enabled(this.movieProgressPage * this.collectionPageSize < this.movieProgressRows().length)
+            Button('上一页').layoutWeight(1).enabled(this.movieSummary.key === this.movieDisplayKey() && this.movieSummary.page > 1).onClick(() => { this.movieProgressPage--; })
+            Text(this.movieSummary.page + ' / ' + this.movieSummary.pages).fontSize(13)
+            Button('下一页').layoutWeight(1).enabled(this.movieSummary.key === this.movieDisplayKey() && this.movieSummary.page < this.movieSummary.pages)
               .onClick(() => { this.movieProgressPage++; })
           }.width('100%')
         }
@@ -4530,7 +4666,7 @@ struct Index {
       if (this.selectedMedia) {
         await this.openDetail(this.selectedMedia, true);
       } else if (this.tab === 'discover') {
-        await this.loadDiscover(this.discoverPage);
+        await this.loadDiscover(this.discoverPage,true);
       } else if (this.tab === 'library') {
         if (this.signedIn) { await this.loadCloud(); } else { await this.loadNextShows(); }
         if (this.collectionGrid) { await this.loadCollectionPosters(); }
@@ -4944,10 +5080,10 @@ struct Index {
             .onVisibleAreaChange([0], (visible: boolean, ratio: number) => { this.viewportChanged(row.media,0,[],visible && ratio > 0,'library','','recent:' + row.media.id); })
         }, (row: PersonalLibraryRow) => 'recent:' + row.media.id + ':' + this.displayTitle(row.media))
       }
-      if (!this.collectionItems().length && !this.cloudBusy && !this.localBusy && !this.sortJobs.pending('collection')) {
-        Text('此分类暂无影视。').fontSize(13).width('100%')
-      }
-      Text('共 ' + this.collectionItems().length + ' 部').fontSize(14)
+      if (this.collectionSummary.key === this.collectionDisplayKey()) {
+        if (!this.collectionSummary.total && !this.cloudBusy && !this.localBusy) { Text('此分类暂无影视。').fontSize(13).width('100%') }
+        Text('共 ' + this.collectionSummary.total + ' 部').fontSize(14)
+      } else { Text('正在更新列表…').fontSize(13).width('100%') }
       Row({ space: 8 }) {
         Button(this.collectionGrid ? '切换文字列表' : '切换海报网格').layoutWeight(1)
           .onClick(() => {
@@ -4971,10 +5107,10 @@ struct Index {
         }, (group: CollectionGroup) => this.collectionRowsSource.keyFor(group.key))
         ListItem() {
       Row({ space: 8 }) {
-        Button('上一页').layoutWeight(1).enabled(!this.collectionBusy && this.collectionPage > 1)
+        Button('上一页').layoutWeight(1).enabled(!this.collectionBusy && this.collectionSummary.key === this.collectionDisplayKey() && this.collectionSummary.page > 1)
           .onClick(() => { this.goCollectionPage(this.collectionPage - 1); })
-        Text(this.collectionPage + ' / ' + this.collectionPages()).fontSize(13)
-        Button('下一页').layoutWeight(1).enabled(!this.collectionBusy && this.collectionPage < this.collectionPages())
+        Text(this.collectionSummary.page + ' / ' + this.collectionSummary.pages).fontSize(13)
+        Button('下一页').layoutWeight(1).enabled(!this.collectionBusy && this.collectionSummary.key === this.collectionDisplayKey() && this.collectionSummary.page < this.collectionSummary.pages)
           .onClick(() => { this.goCollectionPage(this.collectionPage + 1); })
       }.width('100%')
         }
@@ -5247,6 +5383,7 @@ struct Index {
     this.modeBusy = true;
     try {
       this.mediaMode = normalizeMode(mode);
+      this.restoreDiscoverOptions();
       this.progressMode = 'next';
       this.collectionFilter = 'mine';
       this.collectionQuery = '';
@@ -5290,14 +5427,12 @@ struct Index {
   private navigate(value: string): void {
     if (this.tab === 'progress' || this.tab === 'discover' || this.tab === 'library') { this.returnTab = this.tab; }
     this.closeDetail();
-    if (this.tab === 'discover' && value !== 'discover' && this.discoverBusy) { this.resetDiscover(); }
+    if (this.tab === 'discover' && value !== 'discover') { this.discoverRevision++; this.discoverBusy = false; }
     if (this.tab === 'library' && value !== 'library' && this.collectionBusy) { this.resetCollection(); }
     this.tab = value === 'cloud' ? 'account' : value;
     if (value === 'cloud') { this.advancedSync = true; }
     if (value === 'progress') { this.chooseProgressMode(this.progressMode); }
-    if (value === 'discover' && this.discoverItems.length === 0 && !this.discoverBusy) {
-      this.loadDiscover();
-    }
+    if (value === 'discover' && !this.discoverBusy) { this.loadDiscover(this.discoverPage); }
     if (value === 'library' && this.episodeReady && this.ready) {
       if (this.signedIn) { this.requestObservation(); }
       else if (!this.libraryEvidence.length) { this.loadNextShows(); }

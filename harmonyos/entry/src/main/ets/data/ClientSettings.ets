@@ -1,4 +1,5 @@
 import { preferences } from '@kit.ArkData';
+import { DiscoverOptions, defaultDiscover, validDiscoverOptions } from '../model/DiscoverRules';
 import { common } from '@kit.AbilityKit';
 import { http } from '@kit.NetworkKit';
 import { ProgressPreferences, ProgressFlag, defaultProgress, validProgress, validFlags } from '../model/ProgressRules';
@@ -28,6 +29,18 @@ export class ClientSettings {
   async saveMode(mode: string): Promise<void> {
     if (mode !== 'movie' && mode !== 'show') { throw new Error('Invalid media mode'); }
     await this.storage.put('media_mode', mode);
+    await this.storage.flush();
+  }
+  loadDiscoverOptions(kind: string): DiscoverOptions {
+    const raw = this.storage.getSync('discover_options:' + kind,'');
+    try {
+      const value = JSON.parse(typeof raw === 'string' ? raw : '') as DiscoverOptions;
+      return validDiscoverOptions(value) ? value : defaultDiscover();
+    } catch (error) { return defaultDiscover(); }
+  }
+  async saveDiscoverOptions(kind: string, value: DiscoverOptions): Promise<void> {
+    if (!['show','movie'].includes(kind) || !validDiscoverOptions(value)) { throw new Error('Invalid discovery settings'); }
+    await this.storage.put('discover_options:'+kind,JSON.stringify(value));
     await this.storage.flush();
   }
   loadCollectionOptions(kind: string, section: string): CollectionOptions {

@@ -1,0 +1,75 @@
+import { ReadFlight } from './ReadFlight';
+import { DiscoverRequest, DiscoverFeed, DiscoverItem, ANTICIPATED_LIMIT, discoverKey, discoverFresh, mixDiscover, validDiscoverFeed } from './DiscoverRules';
+export interface DiscoverStorage {
+  read(key: string): Promise<string>;
+  write(key: string, raw: string): Promise<void>;
+}
+export interface ChartPage { items: DiscoverItem[]; page: number; pages: number; limit: number; count: number; }
+export interface DiscoverTransport {
+  read(client: string, request: DiscoverRequest, mode: string, page: number, limit: number): Promise<ChartPage>;
+}
+export class DiscoverRead {
+  private storage: DiscoverStorage;
+  private transport: DiscoverTransport;
+  private flights: ReadFlight<DiscoverFeed> = new ReadFlight<DiscoverFeed>();
+  constructor(storage: DiscoverStorage, transport: DiscoverTransport) { this.storage=storage; this.transport=transport; }
+  async cached(client: string, request: DiscoverRequest): Promise<DiscoverFeed | undefined> {
+    try {
+      const raw = await this.storage.read(discoverKey(client,request));
+      const value = JSON.parse(raw) as DiscoverFeed;
+      return validDiscoverFeed(value,request.kind) ? value : undefined;
+    } catch (error) { return undefined; }
+  }
+  async load(client: string, request: DiscoverRequest, force: boolean, publish: (feed: DiscoverFeed, fresh: boolean) => void): Promise<DiscoverFeed> {
+    const key = discoverKey(client,request);
+    const prior = await this.cached(client,request);
+    if (prior) {
+      const fresh = discoverFresh(prior,Date.now());
+      publish(prior,fresh);
+      if (!force && fresh) { return prior; }
+    }
+    return this.flights.run(key,async (): Promise<DiscoverFeed> => {
+      // Recheck after joining async disk reads, avoiding a request after a
+      // concurrent refresh already committed.
+      if (!force) {
+        const latest = await this.cached(client,request);
+        if (latest && discoverFresh(latest,Date.now())) { return latest; }
+      }
+      let items: DiscoverItem[];
+      if (request.mode === 'trending') {
+        const lists = await Promise.all([this.chart(client,request,'trending',request.limit),this.chart(client,request,'anticipated',ANTICIPATED_LIMIT)]);
+        items = mixDiscover(lists[0],lists[1]);
+      } else { items = await this.chart(client,request,request.mode,request.limit); }
+      const feed: DiscoverFeed = {fetchedAt:Date.now(),items:items};
+      if (!validDiscoverFeed(feed,request.kind)) { throw new Error('Invalid discovery feed'); }
+      try { await this.storage.write(key,JSON.stringify(feed)); } catch (error) { /* optional public cache */ }
+      return feed;
+    });
+  }
+  private async chart(client: string, request: DiscoverRequest, mode: string, target: number): Promise<DiscoverItem[]> {
+    const rows: DiscoverItem[] = [];
+    const ids = new Set<string>();
+    let page = 1;
+    let consumed = 0;
+    let effective = 0;
+    while (consumed < target) {
+      const part = await this.transport.read(client,request,mode,page,target);
+      if (part.page !== page || !Number.isSafeInteger(part.pages) || part.pages < 0 ||
+          !Number.isSafeInteger(part.limit) || part.limit < 1 || !Number.isSafeInteger(part.count) ||
+          part.count < 0 || part.count > part.limit || (page > 1 && effective !== part.limit) ||
+          (part.pages < page && !(page === 1 && part.pages === 0 && part.count === 0))) {
+        throw new Error('Invalid discovery pagination');
+      }
+      effective = part.limit;
+      // Preserve server rank for the requested prefix, even if duplicate IDs
+      // appear across pages. No arbitrary page cap; server limit controls it.
+      for (const item of part.items.slice(0,Math.max(0,target-consumed))) {
+        if (!ids.has(item.media.id)) { ids.add(item.media.id); rows.push(item); }
+      }
+      consumed += part.count;
+      if (page >= part.pages || part.count === 0) { break; }
+      page++;
+    }
+    return rows;
+  }
+}

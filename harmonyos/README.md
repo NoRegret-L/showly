@@ -1,4 +1,4 @@
-# Showly HarmonyOS Preview v0.9.3e.2d.5
+# Showly HarmonyOS Preview v0.9.3e.2d.6
 
 Unofficial native ArkTS prototype, not a complete Showly port. Your app uses Trakt but is not endorsed or certified by Trakt.
 
@@ -210,3 +210,6 @@ See [Indexed projection](docs/INDEXED_PROJECTION.md). Derived-only, no authorita
 
 ## v0.9.3e.2d.5 — display isolation and async list deltas (0.9.3.22, build 46)
 See [Display isolation](docs/DISPLAY_ISOLATION.md).
+
+## v0.9.3e.2d.6 — local-first discovery (0.9.3.23, build 47)
+See [Discovery read model](docs/DISCOVER_LOCAL_FIRST.md).
