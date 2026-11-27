@@ -92,11 +92,13 @@ assert "LazyForEach(this.collectionRowsSource" in page
 assert "this.collectionRowsSource.replace([], [], [])" in page
 assert "this.collectionScope === this.currentProgressScope()" in page
 assert "collectionMembers(this.personalLibrary()" in page
-progress = page.split("  private progressData(", 1)[1].split("  private nextFiltered(", 1)[0]
+progress = page.split("  private async prepareProgressCandidates(", 1)[1].split("  private progressData(", 1)[0]
 assert "for (const row of this.nextShows)" in progress
-assert "const source = row.source;" in progress
-assert "if (source && !this.isHidden(source.media)) { sources.push(source); }" in progress
-assert progress.count("sources.push(") == 1
+assert "if (row.source && !this.isHidden(row.source.media)) {" in progress
+assert "inputs.push({source:row.source,stateKey:row.sourceStateKey,catalogKey:row.sourceCatalogKey,flag:this.progressFlag(row.source.media)})" in progress
+assert progress.count("inputs.push(") == 1
+assert "this.candidateIndex.plan(inputs,this.progressPrefs,now)" in progress
+assert "inputs:plan.pending" in progress
 assert "const items = this.visibleDiscover()" in page and "LazyForEach(this.discoverRows" in page
 assert "this.isHidden(row.media) || !movie" in page
 assert "await this.recordTitleDates(dateScope, beforeDates, changes)" in page
