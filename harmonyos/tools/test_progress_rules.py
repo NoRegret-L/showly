@@ -68,5 +68,5 @@ mark=source.split("  private async markNext(",1)[1].split("  private invalidateM
 assert "await store.mark(" in mark and "await store.boundAccount()" in mark
 assert "row.upcoming" in mark and "eligibleCatalog(" in mark and "projectDetail(" in mark
 assert "syncSelectedMedia(" not in mark and "uploadBatch(" not in mark
-assert "progressRows(sources" in source
+assert "selectProgress(source,this.progressPrefs,flags,now)" in source and "sortProgressCandidates(localized" in source
 print("Progress wiring assertions passed")

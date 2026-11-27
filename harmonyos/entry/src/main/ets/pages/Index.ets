@@ -1,5 +1,6 @@
 import { common } from '@kit.AbilityKit';
 import { LazyRows } from '../model/LazyRows';
+import { ViewportTasks, addPresentationTask } from '../model/ViewportTasks';
 import { CollectionCandidate, CollectionOptions, CollectionState, HiddenEntry, defaultCollection, emptyCollectionState, collectionMembers, projectCollection, recentCollection, recordCollectionDate, transitionCollectionDates, hideMedia } from '../model/CollectionRules';
 import { PresentationRepository } from '../data/PresentationRepository';
 import { TitlePresentation, PresentationTask, matchesText } from '../model/MediaPresentation';
@@ -19,7 +20,7 @@ import { NextShow } from '../data/NextShows';
 import { RevisionMemo, projectionKey, progressExpiry } from '../model/ReadModelCache';
 import { ShowProjectionCache } from '../model/ProjectionCompute';
 import { MovieProgressOptions, MovieProgressSource, defaultMovieProgress, validMovieProgress, movieProgressRows as projectMovieProgress, clearMoviePin } from '../model/MovieProgressRules';
-import { ProgressSource, ProgressPreferences, ProgressFlag, ProgressRow, defaultProgress, validProgress, toggleProgressFlag, progressRows, ProgressEntry, progressSections, progressEntries, progressPage, effectiveProgressFilter } from '../model/ProgressRules';
+import { ProgressSource, ProgressPreferences, ProgressFlag, ProgressRow, defaultProgress, validProgress, toggleProgressFlag, selectProgress, sortProgressCandidates, ProgressEntry, progressSections, progressEntries, progressPage, effectiveProgressFilter } from '../model/ProgressRules';
 import { CalendarSnapshot, CalendarEntry, readCalendar, calendarWindow, localDay } from '../data/TraktCalendar';
 import { PersonalMovie, PersonalMovieSnapshot, readPersonalMovieDate, CollectionRating, readCollectionRatings } from '../data/TraktLibrary';
 import { MovieCalendarItem, filterMovies, moviePage } from '../data/MovieCalendar';
@@ -70,6 +71,18 @@ struct Index {
   private episodeNameIndex: Map<string, string> = new Map<string, string>();
   private libraryRevision: number = 0;
   private listRevision: number = 0;
+  private titleSortRevision: number = 0;
+  private episodeSearchRevision: number = 0;
+  private collectionMetaRevision: number = 0;
+  private candidateMemo: RevisionMemo<ProgressRow[]> = new RevisionMemo<ProgressRow[]>();
+  private candidateExpiry: number = 0;
+  private candidateRuns: number = 0;
+  private viewport: ViewportTasks = new ViewportTasks();
+  private viewportRouteKey: string = '';
+  private discoverRows: LazyRows<DiscoverItem[]> = new LazyRows<DiscoverItem[]>();
+  private searchRows: LazyRows<Media> = new LazyRows<Media>();
+  private calendarRows: LazyRows<CalendarEntry> = new LazyRows<CalendarEntry>();
+  private movieCalendarRows: LazyRows<MovieCalendarItem> = new LazyRows<MovieCalendarItem>();
   private libraryMemo: RevisionMemo<PersonalLibraryRow[]> = new RevisionMemo<PersonalLibraryRow[]>();
   private progressMemo: RevisionMemo<ProgressRow[]> = new RevisionMemo<ProgressRow[]>();
   private progressAllMemo: RevisionMemo<ProgressRow[]> = new RevisionMemo<ProgressRow[]>();
@@ -336,6 +349,7 @@ struct Index {
 
   onPageHide(): void {
     this.pageVisible = false;
+    this.viewport.clear();
     this.cancelCatalogRepair();
     this.presentationPending = false;
     this.presentationEpoch++;
@@ -348,6 +362,7 @@ struct Index {
 
   aboutToDisappear(): void {
     this.pageVisible = false;
+    this.viewport.clear();
     this.cancelCatalogRepair();
     this.presentationPending = false;
     this.presentationEpoch++;
@@ -420,6 +435,9 @@ struct Index {
   // A busy auth/DB/sync operation no longer drops the network-resume event.
   // Coalesce to a single pending event, not a periodic retry loop.
   private onObservationAuthChanged(): void {
+    this.viewport.clear();
+    this.calendarRows.replace([],[],[]);
+    this.movieCalendarRows.replace([],[],[]);
     this.collectionScope = '';
     this.collectionRatingKey = '';
     this.collectionRatings = [];
@@ -962,19 +980,27 @@ struct Index {
     if (revision === this.presentationPublished) { return; }
     this.presentationPublished = revision;
     const changes = this.presentation.takeChanges();
-    for (const row of changes.titles) { this.titleIndex.set(row.id,row); }
+    for (const row of changes.titles) {
+      const prior = this.titleIndex.get(row.id);
+      if ((prior?.text.title ?? '') !== row.text.title) { this.titleSortRevision++; }
+      if (JSON.stringify(prior?.collection ?? null) !== JSON.stringify(row.collection ?? null)) { this.collectionMetaRevision++; }
+      this.titleIndex.set(row.id,row);
+    }
     for (const row of changes.seasons) {
       const seasonKey = row.showId + ':' + row.season;
-      for (const key of this.seasonKeys.get(seasonKey) ?? []) { this.episodeNameIndex.delete(key); }
+      const previous = this.seasonKeys.get(seasonKey) ?? [];
       const keys: string[] = [];
       for (const ep of row.episodes) {
         const key = seasonKey + ':' + ep.id;
         keys.push(key);
+        if ((this.episodeNameIndex.get(key) ?? '') !== ep.text.title) { this.episodeSearchRevision++; }
         this.episodeNameIndex.set(key,ep.text.title);
+      }
+      for (const key of previous) {
+        if (!keys.includes(key)) { this.episodeNameIndex.delete(key); this.episodeSearchRevision++; }
       }
       this.seasonKeys.set(seasonKey,keys);
     }
-    this.listRevision++;
     this.presentationRevision = revision;
     // A localized sort or query can reveal a different page. One more pass
     // only after real cache changes converges to the newly visible artwork.
@@ -1012,7 +1038,14 @@ struct Index {
     return matchesText(query, item.title, this.displayTitle(item));
   }
 
+  private viewScope(): string { return this.tab + ':' + this.mediaMode + ':' + this.progressMode + ':' + (this.selectedMedia?.id ?? ''); }
+  private viewportChanged(item: Media, season: number, urls: string[], visible: boolean, tab: string, mode: string, slot: string = ''): void {
+    if (!this.pageVisible || this.selectedMedia || tab !== this.tab || (mode && mode !== this.progressMode) || !canReadDetails(item)) { return; }
+    if (this.viewport.update(item,season,urls,visible,slot)) { this.requestPresentation(); }
+  }
   private onPresentationChanged(): void {
+    const scope = this.viewScope();
+    if (scope !== this.viewportRouteKey) { this.viewport.clear(); this.viewportRouteKey = scope; }
     this.reloadCollectionOptions();
     const route = JSON.stringify([this.clientId, this.tab, this.mediaMode, this.progressMode, this.selectedMedia?.id ?? '',
       this.nextPage, this.nextQuery, this.movieProgressPage, this.movieProgressQuery, this.collectionPage,
@@ -1037,6 +1070,28 @@ struct Index {
     await Promise.resolve();
     this.lazyPending = false;
     if (!this.pageVisible || this.selectedMedia) { return; }
+    if (this.tab === 'discover') {
+      const items = this.visibleDiscover();
+      const rows: DiscoverItem[][] = [];
+      for (let i=0;i<items.length;i+=2) { rows.push(items.slice(i,i+2)); }
+      this.discoverRows.replace(rows,rows.map((row: DiscoverItem[]) => row.map((item: DiscoverItem) => item.media.id).join(',')),
+        rows.map((row: DiscoverItem[]) => this.discoverRowKey(row)));
+      return;
+    }
+    if (this.tab === 'search') {
+      this.searchRows.replace(this.results,this.results.map((item: Media) => item.id),this.results.map((item: Media) => this.searchRowKey(item)));
+      return;
+    }
+    if (this.tab === 'progress' && this.progressMode === 'calendar') {
+      if (this.mediaMode === 'movie') {
+        const rows = this.movieCalendarCurrent() ? this.movieSlice() : [];
+        this.movieCalendarRows.replace(rows,rows.map((row: MovieCalendarItem) => row.movie.media.id),rows.map((row: MovieCalendarItem) => this.movieCalendarKey(row)));
+      } else {
+        const rows = this.calendarSlice();
+        this.calendarRows.replace(rows,rows.map((row: CalendarEntry) => row.key),rows.map((row: CalendarEntry) => this.calendarRowKey(row)));
+      }
+      return;
+    }
     if (this.tab === 'library') {
       if (this.collectionOptions.sort === 'userRating') { this.loadCollectionRatings(); }
       const rows: CollectionGroup[] = [];
@@ -1067,9 +1122,12 @@ struct Index {
   }
 
   private showRowKey(entry: ProgressEntry): string {
-    return JSON.stringify(entry) + ':' + (entry.row ? this.artwork(entry.row.media) + ':' +
-      this.displayTitle(entry.row.media) + ':' + this.displayEpisode(entry.row.media, entry.row.episode.season,
-        entry.row.episode.id, entry.row.episode.title) : '');
+    const row = entry.row;
+    return JSON.stringify([entry.key,entry.group,entry.label,entry.collapsed,entry.count,row?.episode.id ?? 0,
+      row?.episode.season ?? 0,row?.episode.number ?? 0,row?.episode.firstAired ?? '',row?.total ?? 0,
+      row?.completed ?? 0,row?.upcoming ?? false,row?.fresh ?? false,row?.pinned ?? false,row?.held ?? false,
+      row?.dateUnknown ?? false,row ? this.artwork(row.media) : '',row ? this.displayTitle(row.media) : '',
+      row ? this.displayEpisode(row.media,row.episode.season,row.episode.id,row.episode.title) : '']);
   }
 
   private collectionGroupKey(group: CollectionGroup): string {
@@ -1077,9 +1135,25 @@ struct Index {
   }
 
   private movieRowKey(row: PersonalLibraryRow): string {
-    return JSON.stringify(row) + ':' + this.artwork(row.media) + ':' + this.displayTitle(row.media);
+    return JSON.stringify([row.media.id,this.displayLabel(row.media),businessLibraryLabel(row),row.watched,row.queued,
+      this.artwork(row.media),this.progressFlag(row.media)?.pinned ?? false,this.progressFlag(row.media)?.held ?? false]);
   }
 
+  private discoverRowKey(row: DiscoverItem[]): string {
+    return JSON.stringify(row.map((item: DiscoverItem) => [item.media.id,this.displayLabel(item.media),item.rating,
+      this.artwork(item.media),this.progressFlag(item.media)?.pinned ?? false,this.progressFlag(item.media)?.held ?? false]));
+  }
+  private searchRowKey(item: Media): string {
+    return JSON.stringify([item.id,this.displayLabel(item),this.artwork(item),this.isInLibrary(item),this.isHidden(item)]);
+  }
+  private movieCalendarKey(row: MovieCalendarItem): string {
+    return JSON.stringify([row.movie.media.id,row.movie.released,row.group,row.heading,row.movie.cloudWatched,row.movie.cloudWatchlist,
+      this.artwork(row.movie.media),this.displayTitle(row.movie.media)]);
+  }
+  private calendarRowKey(row: CalendarEntry): string {
+    return JSON.stringify([row.key,row.day,row.time,row.season,row.number,this.artwork(row.media),this.displayTitle(row.media),
+      this.displayEpisode(row.media,row.season,Number(row.key.substring(8)),row.episodeTitle)]);
+  }
   private requestPresentation(): void {
     this.scheduleLazyRows();
     if (!this.pageVisible || !this.presentation || this.presentationBlocked) { return; }
@@ -1087,20 +1161,15 @@ struct Index {
     if (!this.presentationRunning) { this.loadPresentation(); }
   }
 
-  private addPresentationTask(tasks: PresentationTask[], item: Media, artwork: boolean, season: number = 0,
+  private addPresentationTask(tasks: Map<string,PresentationTask>, item: Media, artwork: boolean, season: number = 0,
     urls: string[] = []): void {
     if (!canReadDetails(item)) { return; }
-    const found = tasks.find((task: PresentationTask) => task.media.id === item.id && task.season === season);
-    if (found) {
-      found.artwork = found.artwork || artwork;
-      if (!found.posterUrls.length && urls.length) { found.posterUrls = urls; }
-      return;
-    }
-    tasks.push({ media: item, artwork: artwork, season: season, posterUrls: urls });
+    if (artwork && !this.selectedMedia && !this.viewport.has(item,season)) { return; }
+    addPresentationTask(tasks,item,artwork,season,urls);
   }
 
   private presentationTasks(): PresentationTask[] {
-    const tasks: PresentationTask[] = [];
+    const tasks = new Map<string,PresentationTask>();
     const detail = this.selectedMedia;
     if (detail) {
       this.addPresentationTask(tasks, detail, true, this.localSeason > 0 ? this.localSeason : 0, this.detail?.posterUrls ?? []);
@@ -1149,7 +1218,7 @@ struct Index {
         }
       }
     }
-    return tasks;
+    return Array.from(tasks.values());
   }
 
   private async presentationLane(repo: PresentationRepository, tasks: PresentationTask[], client: string, language: string,
@@ -1160,6 +1229,7 @@ struct Index {
       try {
         for (const task of tasks) {
           if (!current()) { break; }
+          if (task.artwork && !this.selectedMedia && !this.viewport.has(task.media,task.season)) { continue; }
           if (task.artwork && task.season > 0) { await repo.hydrateSeason(task.media,task.season); }
         }
         this.publishPresentation();
@@ -1167,6 +1237,7 @@ struct Index {
     }
     for (const task of tasks) {
       if (!current()) { break; }
+      if (task.artwork && !this.selectedMedia && !this.viewport.has(task.media,task.season)) { continue; }
       if (!pagePublished && !task.artwork) { this.publishPresentation(); pagePublished = true; }
       try {
         if (text) {
@@ -2359,6 +2430,9 @@ struct Index {
   }
 
   private clearCloud(): void {
+    this.viewport.clear();
+    this.calendarRows.replace([],[],[]);
+    this.movieCalendarRows.replace([],[],[]);
     this.collectionScope = '';
     this.collectionRatingKey = '';
     this.collectionRatings = [];
@@ -3184,12 +3258,16 @@ struct Index {
         .fontSize(12).fontColor($r('app.color.showly_secondary')).width('100%')
       this.showProgressActions(item.media)
     }.width('48%').padding({ bottom: 12 })
+      .onVisibleAreaChange([0], (visible: boolean, ratio: number) => { this.viewportChanged(item.media,0,item.posterUrls,visible && ratio > 0,'discover',''); })
       .onClick(() => { this.openDetail(item.media); })
   }
 
   @Builder
   discoverView() {
-    Column({ space: 12 }) {
+    List({ space: 12 }) {
+      ListItem() {
+        Column({ space: 12 }) {
+          if (this.presentationStatus) { Text(this.presentationStatus).fontSize(12).width('100%') }
       Text(this.mediaMode === 'show' ? '发现剧集' : '发现电影').fontSize(25).fontWeight(FontWeight.Bold).width('100%')
       if (!this.clientId) {
         Text('请先在账户页配置自己的 Trakt Client ID。').fontSize(14)
@@ -3204,11 +3282,18 @@ struct Index {
         Button(this.discoverBusy ? '加载中…' : '刷新本页')
           .enabled(!this.discoverBusy && !this.setupBusy)
           .onClick(() => { this.loadDiscover(this.discoverPage); })
-        Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.SpaceBetween }) {
-          ForEach(this.visibleDiscover(), (item: DiscoverItem) => {
-            this.discoverCard(item)
-          }, (item: DiscoverItem) => item.media.id + ':' + this.artwork(item.media) + ':' + this.displayTitle(item.media))
+      }
         }.width('100%')
+      }
+      if (this.clientId) {
+        LazyForEach(this.discoverRows, (row: DiscoverItem[]) => {
+          ListItem() {
+            Row({ space: 8 }) {
+              ForEach(row,(item: DiscoverItem) => { this.discoverCard(item) },(item: DiscoverItem) => item.media.id + ':' + this.artwork(item.media) + ':' + this.displayTitle(item.media))
+            }.width('100%').justifyContent(FlexAlign.SpaceBetween)
+          }
+        }, (row: DiscoverItem[]) => this.discoverRowKey(row))
+        ListItem() {
         Row({ space: 8 }) {
           Button('上一页').layoutWeight(1)
             .enabled(!this.discoverBusy && this.discoverPage > 1)
@@ -3218,8 +3303,9 @@ struct Index {
             .enabled(!this.discoverBusy && this.discoverPage < this.discoverPages)
             .onClick(() => { this.loadDiscover(this.discoverPage + 1); })
         }.width('100%')
+        }
       }
-    }.width('100%')
+    }.width('100%').height('100%').padding(16)
   }
 
   @Builder
@@ -3387,29 +3473,37 @@ struct Index {
   private progressData(query: string): ProgressRow[] {
     if (this.signedIn && !this.activeCloud()) { return []; }
     const now = Date.now();
-    const key = JSON.stringify([this.listRevision, this.presentationLanguage, this.currentProgressScope(),
-      this.activeCloud()?.generation ?? -1, this.progressFlagScope, this.nextFilter, query]);
+    const businessKey = JSON.stringify([this.listRevision,this.currentProgressScope(),this.activeCloud()?.generation ?? -1,this.progressFlagScope]);
+    const key = JSON.stringify([businessKey,this.presentationLanguage,this.titleSortRevision,this.episodeSearchRevision,this.nextFilter,query]);
     const memo = query ? this.progressMemo : this.progressAllMemo;
-    const cached = memo.get(key, now);
+    const cached = memo.get(key,now);
     if (cached) { return cached; }
-    const sources: ProgressSource[] = [];
-    for (const row of this.nextShows) {
-      const source = row.source;
-      if (!source || this.isHidden(source.media)) { continue; }
-      const names: Map<number, string> = new Map<number, string>();
-      if (this.presentationLanguage === 'zh') {
-        for (const item of source.episodes) {
-          names.set(item.episode.id, this.displayEpisode(source.media, item.episode.season, item.episode.id, item.episode.title));
-        }
+    let candidates = this.candidateMemo.get(businessKey,now);
+    if (!candidates) {
+      this.candidateRuns++;
+      const sources: ProgressSource[] = [];
+      for (const row of this.nextShows) {
+        const source = row.source;
+        if (source && !this.isHidden(source.media)) { sources.push(source); }
       }
-      sources.push({ media: source.media, episodes: source.episodes, recentAt: source.recentAt,
-        rating: source.rating, randomOrder: source.randomOrder,
-        localizedTitle: this.presentationLanguage === 'zh' ? this.displayTitle(source.media) : undefined,
-        episodeNames: names });
+      this.candidateExpiry = progressExpiry(sources,this.progressPrefs,now);
+      candidates = [];
+      const flags = this.progressFlagScope === this.currentProgressScope() ? this.progressFlags : [];
+      for (const source of sources) {
+        const row = selectProgress(source,this.progressPrefs,flags,now);
+        if (row) { candidates.push(row); }
+      }
+      this.candidateMemo.put(businessKey,candidates,now,this.candidateExpiry);
     }
-    const flags = this.progressFlagScope === this.currentProgressScope() ? this.progressFlags : [];
-    const rows = progressRows(sources, this.progressPrefs, flags, now, this.nextFilter, query);
-    memo.put(key, rows, now, progressExpiry(sources, this.progressPrefs, now));
+    const localized = candidates.map((row: ProgressRow): ProgressRow => ({
+      media: row.media, episode: row.episode, total: row.total, completed: row.completed, upcoming: row.upcoming,
+      fresh: row.fresh, pinned: row.pinned, held: row.held, group: row.group, recentAt: row.recentAt,
+      rating: row.rating, randomOrder: row.randomOrder, dateUnknown: row.dateUnknown,
+      localizedTitle: this.presentationLanguage === 'zh' ? this.displayTitle(row.media) : undefined,
+      localizedEpisode: this.presentationLanguage === 'zh' ? this.displayEpisode(row.media,row.episode.season,row.episode.id,row.episode.title) : undefined
+    }));
+    const rows = sortProgressCandidates(localized,this.progressPrefs,this.nextFilter,query);
+    memo.put(key,rows,now,this.candidateExpiry);
     return rows;
   }
   private nextFiltered(): ProgressRow[] { return this.progressData(this.nextQuery); }
@@ -3781,6 +3875,7 @@ struct Index {
       }.width('100%')
       this.showProgressActions(row.media)
     }.padding(12).borderRadius(10).width('100%').backgroundColor($r('app.color.showly_surface'))
+      .onVisibleAreaChange([0], (visible: boolean, ratio: number) => { this.viewportChanged(row.media,row.episode.season,[],visible && ratio > 0,'progress','next'); })
   }
 
   @Builder
@@ -3910,7 +4005,13 @@ struct Index {
 
   @Builder
   personalMovieCalendarView() {
-    Column({ space: 10 }) {
+    List({ space: 10 }) {
+      ListItem() {
+        Column({ space: 10 }) {
+          this.progressHeader()
+          if (this.presentationStatus) { Text(this.presentationStatus).fontSize(12).width('100%') }
+          Text('电影上映日历').fontSize(21).fontWeight(FontWeight.Medium).width('100%')
+
       Text('个人已看及待看电影的上映日期，不代表当地影院排期。')
         .fontSize(12).width('100%')
       if (!this.signedIn) {
@@ -3932,7 +4033,13 @@ struct Index {
           if (!this.movieRows().length) {
             Text('此分类暂无电影，可切换已上映或日期待确认。').fontSize(13).width('100%')
           }
-          ForEach(this.movieSlice(), (row: MovieCalendarItem) => {
+        }
+      }
+        }.width('100%')
+      }
+      if (this.signedIn && this.movieCalendarCurrent()) {
+          LazyForEach(this.movieCalendarRows, (row: MovieCalendarItem) => {
+            ListItem() {
             Column({ space: 6 }) {
               if (row.heading) { Text(row.group).fontSize(18).fontWeight(FontWeight.Bold).width('100%') }
               Column({ space: 6 }) {
@@ -3955,7 +4062,10 @@ struct Index {
                 }.width('100%')
               }.padding(12).width('100%').borderRadius(10).backgroundColor($r('app.color.showly_surface'))
             }.width('100%')
-          }, (row: MovieCalendarItem) => row.movie.media.id + ':' + row.movie.released + ':' + row.group + ':' + row.heading + ':' + this.artwork(row.movie.media) + ':' + this.displayTitle(row.movie.media))
+              .onVisibleAreaChange([0], (visible: boolean, ratio: number) => { this.viewportChanged(row.movie.media,0,[],visible && ratio > 0,'progress','calendar'); })
+            }
+          }, (row: MovieCalendarItem) => this.movieCalendarKey(row))
+        ListItem() {
           Row({ space: 8 }) {
             Button('上一页').layoutWeight(1).enabled(this.calendarPage > 1).onClick(() => { this.calendarPage--; })
             Text(this.calendarPage + ' / ' + this.moviePages()).fontSize(13)
@@ -3963,18 +4073,18 @@ struct Index {
           }.width('100%')
         }
       }
-    }.width('100%')
+    }.width('100%').height('100%').padding(16)
   }
 
   @Builder
   calendarView() {
-    Column({ space: 10 }) {
-      Text(this.mediaMode === 'movie' ? '电影上映日历' : '剧集播出日历').fontSize(21).fontWeight(FontWeight.Medium).width('100%')
-      Text(this.mediaMode === 'movie' ? '个人收藏中的电影上映安排。' : '个人收藏中的剧集播出安排。')
-        .fontSize(12).width('100%')
-      if (this.mediaMode === 'movie') {
-        this.personalMovieCalendarView()
-      } else {
+    List({ space: 10 }) {
+      ListItem() {
+        Column({ space: 10 }) {
+          this.progressHeader()
+          if (this.presentationStatus) { Text(this.presentationStatus).fontSize(12).width('100%') }
+          Text('剧集播出日历').fontSize(21).fontWeight(FontWeight.Medium).width('100%')
+          Text('个人收藏中的剧集播出安排。').fontSize(12).width('100%')
         Text(this.calendarRangeLabel()).fontSize(15).width('100%')
         Row({ space: 4 }) {
           Button('前七天').layoutWeight(1).fontSize(12).enabled(!this.calendarBusy && this.calendarWeek > -1)
@@ -3991,8 +4101,15 @@ struct Index {
           Button(this.calendarBusy ? '读取中…' : '刷新日历').enabled(!this.calendarBusy && !this.authBusy && !this.syncBusy && !this.setupBusy)
             .onClick(() => { this.loadCalendar(); })
           if (this.calendarStatus) { Text(this.calendarStatus).fontSize(13).width('100%') }
-          if (this.calendarCurrent()) {
-            ForEach(this.calendarSlice(), (row: CalendarEntry) => {
+          if (!this.calendarCurrent() && this.calendarData) {
+            Text('会话或当地日期已变化，请刷新日历。').fontSize(12).width('100%')
+          }
+        }
+        }.width('100%')
+      }
+      if (this.signedIn && this.calendarCurrent()) {
+            LazyForEach(this.calendarRows, (row: CalendarEntry) => {
+              ListItem() {
               Column({ space: 6 }) {
                 Text(row.day + (row.time ? ' · ' + row.time : ' · 上映日期')).fontSize(13)
                   .fontColor($r('app.color.showly_secondary')).width('100%')
@@ -4007,18 +4124,18 @@ struct Index {
                 Button('查看详情').fontSize(12).enabled(!this.detailBusy && !this.localBusy && !this.syncBusy)
                   .onClick(() => { this.openDetail(row.media, false, row.season); })
               }.padding(12).width('100%').borderRadius(10).backgroundColor($r('app.color.showly_surface'))
-            }, (row: CalendarEntry) => row.key + ':' + this.artwork(row.media) + ':' + this.displayTitle(row.media) + ':' + this.displayEpisode(row.media, row.season, Number(row.key.substring(8)), row.episodeTitle))
+                .onVisibleAreaChange([0], (visible: boolean, ratio: number) => { this.viewportChanged(row.media,row.season,[],visible && ratio > 0,'progress','calendar',row.key); })
+              }
+            }, (row: CalendarEntry) => this.calendarRowKey(row))
+        ListItem() {
             Row({ space: 8 }) {
               Button('上一页').layoutWeight(1).enabled(this.calendarPage > 1).onClick(() => { this.calendarPage--; })
               Text(this.calendarPage + ' / ' + this.calendarPages()).fontSize(13)
               Button('下一页').layoutWeight(1).enabled(this.calendarPage < this.calendarPages()).onClick(() => { this.calendarPage++; })
             }.width('100%')
-          } else if (this.calendarData) {
-            Text('会话或当地日期已变化，请刷新日历。').fontSize(12).width('100%')
-          }
         }
       }
-    }.width('100%')
+    }.width('100%').height('100%').padding(16)
   }
 
   private movieProgressRows(query: string = this.movieProgressQuery): PersonalLibraryRow[] {
@@ -4027,7 +4144,7 @@ struct Index {
     const now = Date.now();
     const utc = new Date(now).toISOString().substring(0, 10);
     const key = JSON.stringify([this.listRevision, this.libraryRevision, this.currentProgressScope(), this.activeCloud()?.generation ?? -1,
-      this.presentationLanguage, this.progressFlagScope, this.movieRandomSeed, utc, query]);
+      this.presentationLanguage, this.titleSortRevision, this.progressFlagScope, this.movieRandomSeed, utc, query]);
     const memo = query ? this.movieMemo : this.movieAllMemo;
     const cached = memo.get(key, now);
     if (cached) { return cached; }
@@ -4147,6 +4264,7 @@ struct Index {
                 .onClick(() => { this.markMovieProgress(row.media); })
             }.width('100%').padding(10).borderRadius(10).backgroundColor($r('app.color.showly_surface'))
           }
+          .onVisibleAreaChange([0], (visible: boolean, ratio: number) => { this.viewportChanged(row.media,0,[],visible && ratio > 0,'progress','next'); })
         }, (row: PersonalLibraryRow) => this.movieRowKey(row))
         ListItem() {
           Row({ space: 8 }) {
@@ -4179,8 +4297,7 @@ struct Index {
   progressView() {
     Column({ space: 12 }) {
       this.progressHeader()
-      if (this.progressMode === 'calendar') { this.calendarView() }
-      else if (this.progressMode === 'history' && this.mediaMode === 'show') {
+      if (this.progressMode === 'history' && this.mediaMode === 'show') {
         Text('逐集观看历史尚未实现。现有观看记录不受影响。').fontSize(14).width('100%')
       }
     }.width('100%')
@@ -4493,7 +4610,7 @@ struct Index {
     const now = Date.now();
     const options = this.collectionFilter === 'other' ? defaultCollection() : this.collectionOptions;
     const key = JSON.stringify([this.listRevision,this.libraryRevision,this.collectionScope,this.currentProgressScope(),
-      this.mediaMode,this.collectionFilter,this.collectionStatusFilter,this.collectionQuery,options,this.presentationLanguage]);
+      this.mediaMode,this.collectionFilter,this.collectionStatusFilter,this.collectionQuery,options,this.presentationLanguage,this.titleSortRevision,this.collectionMetaRevision]);
     const cached = this.collectionItemsMemo.get(key,now);
     if (cached) { return cached; }
     const candidates = this.collectionCandidates(this.collectionSource(),this.collectionFilter);
@@ -4623,6 +4740,7 @@ struct Index {
         Text('最近添加（已记录时间）').fontSize(17).fontWeight(FontWeight.Medium).width('100%')
         ForEach(this.recentCollectionRows(), (row: PersonalLibraryRow) => {
           Text(this.displayTitle(row.media)).fontSize(13).width('100%').onClick(() => { this.openDetail(row.media); })
+            .onVisibleAreaChange([0], (visible: boolean, ratio: number) => { this.viewportChanged(row.media,0,[],visible && ratio > 0,'library','','recent:' + row.media.id); })
         }, (row: PersonalLibraryRow) => 'recent:' + row.media.id + ':' + this.displayTitle(row.media))
       }
       if (!this.collectionItems().length && !this.cloudBusy && !this.localBusy) {
@@ -4751,6 +4869,7 @@ struct Index {
                   .onClick(() => { this.toggleCollectionLocal(row.media.id); })
               }
             }.width('48%').padding({ bottom: 12 })
+              .onVisibleAreaChange([0], (visible: boolean, ratio: number) => { this.viewportChanged(row.media,0,[],visible && ratio > 0,'library',''); })
               .onClick(() => { this.openDetail(row.media); })
           }, (row: PersonalLibraryRow) => row.media.id + ':' + businessLibraryLabel(row) + ':' +
             this.artwork(row.media) + ':' + this.displayTitle(row.media))
@@ -4771,6 +4890,7 @@ struct Index {
                 .onClick(() => { this.toggleCollectionLocal(row.media.id); })
             }
           }.width('100%')
+            .onVisibleAreaChange([0], (visible: boolean, ratio: number) => { this.viewportChanged(row.media,0,[],visible && ratio > 0,'library',''); })
         }, (row: PersonalLibraryRow) => row.media.id + ':' + businessLibraryLabel(row) + ':' +
           (row.watched ? 'yes' : 'no') + ':' + this.artwork(row.media) + ':' + this.displayTitle(row.media))
       }
@@ -5145,6 +5265,50 @@ struct Index {
     }.width('100%').padding(10).borderRadius(10).backgroundColor($r('app.color.showly_surface'))
   }
 
+  @Builder
+  searchView() {
+    List({ space: 10 }) {
+      ListItem() {
+        Column({ space: 12 }) {
+          if (this.presentationStatus) { Text(this.presentationStatus).fontSize(12).width('100%') }
+        Text('影视搜索').fontSize(20).fontWeight(FontWeight.Medium)
+        TextInput({ placeholder: '电影或剧集名称', text: this.title })
+          .onChange((value: string) => { this.title = value; })
+        Row({ space: 8 }) {
+          Button('搜索').layoutWeight(1)
+            .enabled(!this.searching && !this.setupBusy && this.title.trim().length > 0 && this.clientId.length > 0)
+            .onClick(() => { this.search(); })
+          Button('手动添加').layoutWeight(1)
+            .enabled(this.ready && !this.saving && !this.cloudBusy && this.title.trim().length > 0)
+            .onClick(() => {
+              const title: string = this.title.trim();
+              const item: Media = { id: 'local:' + title.toLowerCase(), title: title,
+                kind: 'manual', year: 0, watched: false };
+              this.add(item);
+            })
+        }.width('100%')
+        Text(this.searchStatus).fontSize(13)
+        }.width('100%')
+      }
+        LazyForEach(this.searchRows, (item: Media) => {
+          ListItem() {
+          Row({ space: 8 }) {
+            this.posterImage(item, 54, 81)
+            Text(this.displayLabel(item)).layoutWeight(1)
+              .onClick(() => { this.openDetail(item); })
+            if (this.isHidden(item)) { Text('已隐藏').fontSize(12) }
+            Button('详情').fontSize(12).enabled(!this.detailBusy && !this.setupBusy)
+              .onClick(() => { this.openDetail(item); })
+            Button(this.isInLibrary(item) ? '已收藏' : '添加')
+              .enabled(this.ready && !this.saving && !this.cloudBusy && this.canEditLibrary() && !this.isInLibrary(item))
+              .onClick(() => { this.changeMediaIntent(item, 'watchlist', 'yes'); })
+          }.width('100%')
+            .onVisibleAreaChange([0], (visible: boolean, ratio: number) => { this.viewportChanged(item,0,[],visible && ratio > 0,'search',''); })
+          }
+        }, (item: Media) => this.searchRowKey(item))
+    }.width('100%').height('100%').padding(16)
+  }
+
   build() {
     Column({ space: 0 }) {
       Row() {
@@ -5163,6 +5327,12 @@ struct Index {
           else { this.nextShowsView() }
         } else if (!this.selectedMedia && this.tab === 'library') {
           this.collectionView()
+        } else if (!this.selectedMedia && this.tab === 'discover') {
+          this.discoverView()
+        } else if (!this.selectedMedia && this.tab === 'search') {
+          this.searchView()
+        } else if (!this.selectedMedia && this.tab === 'progress' && this.progressMode === 'calendar') {
+          if (this.mediaMode === 'movie') { this.personalMovieCalendarView() } else { this.calendarView() }
         } else {
         Scroll() {
         Column({ space: 14 }) {
@@ -5171,41 +5341,6 @@ struct Index {
             this.detailPage(this.selectedMedia)
           } else if (this.tab === 'progress') {
             this.progressView()
-          } else if (this.tab === 'discover') {
-            this.discoverView()
-          } else if (this.tab === 'search') {
-        Text('影视搜索').fontSize(20).fontWeight(FontWeight.Medium)
-        TextInput({ placeholder: '电影或剧集名称', text: this.title })
-          .onChange((value: string) => { this.title = value; })
-        Row({ space: 8 }) {
-          Button('搜索').layoutWeight(1)
-            .enabled(!this.searching && !this.setupBusy && this.title.trim().length > 0 && this.clientId.length > 0)
-            .onClick(() => { this.search(); })
-          Button('手动添加').layoutWeight(1)
-            .enabled(this.ready && !this.saving && !this.cloudBusy && this.title.trim().length > 0)
-            .onClick(() => {
-              const title: string = this.title.trim();
-              const item: Media = { id: 'local:' + title.toLowerCase(), title: title,
-                kind: 'manual', year: 0, watched: false };
-              this.add(item);
-            })
-        }.width('100%')
-        Text(this.searchStatus).fontSize(13)
-        ForEach(this.results, (item: Media) => {
-          Row({ space: 8 }) {
-            this.posterImage(item, 54, 81)
-            Text(this.displayLabel(item)).layoutWeight(1)
-              .onClick(() => { this.openDetail(item); })
-            if (this.isHidden(item)) { Text('已隐藏').fontSize(12) }
-            Button('详情').fontSize(12).enabled(!this.detailBusy && !this.setupBusy)
-              .onClick(() => { this.openDetail(item); })
-            Button(this.isInLibrary(item) ? '已收藏' : '添加')
-              .enabled(this.ready && !this.saving && !this.cloudBusy && this.canEditLibrary() && !this.isInLibrary(item))
-              .onClick(() => { this.changeMediaIntent(item, 'watchlist', 'yes'); })
-          }.width('100%')
-        }, (item: Media) => item.id + ':' + this.artwork(item) + ':' + this.displayTitle(item))
-        Divider()
-
           } else {
             Text('账户与设置').fontSize(23).fontWeight(FontWeight.Bold)
             Text('影视资料语言').fontSize(19).fontWeight(FontWeight.Medium).width('100%')

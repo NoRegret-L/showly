@@ -93,7 +93,7 @@ assert "this.collectionRowsSource.replace([], [], [])" in page
 assert "this.collectionScope === this.currentProgressScope()" in page
 assert "collectionMembers(this.personalLibrary()" in page
 assert "if (!source || this.isHidden(source.media))" in page
-assert "ForEach(this.visibleDiscover()" in page
+assert "const items = this.visibleDiscover()" in page and "LazyForEach(this.discoverRows" in page
 assert "this.isHidden(row.media) || !movie" in page
 assert "await this.recordTitleDates(dateScope, beforeDates, changes)" in page
 assert "transitionCollectionDates(this.collectionState" in page

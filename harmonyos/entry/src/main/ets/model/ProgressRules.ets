@@ -131,31 +131,44 @@ function position(a: ProgressEpisode, b: ProgressEpisode): number {
 }
 export function selectProgress(source: ProgressSource, prefs: ProgressPreferences, flags: ProgressFlag[],
   now: number): ProgressRow | undefined {
-  const ordered = source.episodes.filter((item: ProgressEpisode) => item.episode.season > 0).sort(position);
-  const watched = ordered.filter((item: ProgressEpisode) => item.watched);
-  const dated = watched.filter((item: ProgressEpisode) => item.watchedAt > 0)
-    .sort((a: ProgressEpisode, b: ProgressEpisode) => b.watchedAt - a.watchedAt || position(a,b));
-  const last = prefs.strategy === 'last' ? dated[0] : undefined;
+  // Two linear passes, stable position tie-break matching the previous sort.
+  let last: ProgressEpisode | undefined;
+  let unknown = false;
+  let total = 0;
+  let completed = 0;
+  for (const item of source.episodes) {
+    if (item.episode.season <= 0) { continue; }
+    if (item.watched) {
+      if (!(item.watchedAt > 0)) { unknown = true; }
+      else if (prefs.strategy === 'last' && (!last || item.watchedAt > last.watchedAt ||
+          (item.watchedAt === last.watchedAt && position(item,last) < 0))) { last = item; }
+    }
+    if (prefs.count === 'all' || (!!item.episode.firstAired && Date.parse(item.episode.firstAired) < now)) {
+      total++;
+      if (item.watched) { completed++; }
+    }
+  }
   const limit = now + prefs.days * DAY;
-  const next = ordered.find((item: ProgressEpisode) => !item.watched && !!item.episode.firstAired &&
-    Number.isFinite(Date.parse(item.episode.firstAired)) && Date.parse(item.episode.firstAired) <= limit &&
-    (!last || position(item, last) > 0));
+  let next: ProgressEpisode | undefined;
+  let aired = 0;
+  for (const item of source.episodes) {
+    if (item.episode.season <= 0 || item.watched || !item.episode.firstAired || (last && position(item,last) <= 0)) { continue; }
+    const air = Date.parse(item.episode.firstAired);
+    if (!Number.isFinite(air) || air > limit) { continue; }
+    if (!next || position(item,next) < 0) { next = item; aired = air; }
+  }
   if (!next) { return undefined; }
-  const aired = Date.parse(next.episode.firstAired);
   const upcoming = aired > now;
   if (upcoming && !prefs.days) { return undefined; }
-  // Upstream SQL counts first_aired < now, while the candidate limit is <=.
-  const counted = prefs.count === 'all' ? ordered : ordered.filter((item: ProgressEpisode) =>
-    !!item.episode.firstAired && Date.parse(item.episode.firstAired) < now);
   const flag = flags.find((item: ProgressFlag) => item.id === source.media.id);
   const pinned = flag?.pinned ?? false;
   const held = flag?.held ?? false;
   const fresh = aired < now && now - aired < NEW_DURATION;
   const group = pinned ? 'pinned' : held ? 'hold' : prefs.newAtTop && fresh ? 'new' : upcoming ? 'upcoming' : 'aired';
-  return { media: source.media, episode: next.episode, total: counted.length,
-    completed: counted.filter((item: ProgressEpisode) => item.watched).length, upcoming: upcoming,
+  return { media: source.media, episode: next.episode, total: total,
+    completed: completed, upcoming: upcoming,
     fresh: fresh, pinned: pinned, held: held, group: group, recentAt: source.recentAt, rating: source.rating,
-    randomOrder: source.randomOrder, dateUnknown: prefs.strategy === 'last' && watched.length > dated.length,
+    randomOrder: source.randomOrder, dateUnknown: prefs.strategy === 'last' && unknown,
     localizedTitle: source.localizedTitle, localizedEpisode: source.episodeNames?.get(next.episode.id) };
 }
 function title(row: ProgressRow): string {
@@ -177,12 +190,18 @@ function order(a: ProgressRow, b: ProgressRow, prefs: ProgressPreferences): numb
 }
 export function progressRows(sources: ProgressSource[], prefs: ProgressPreferences, flags: ProgressFlag[],
   now: number, filter: string, query: string): ProgressRow[] {
-  const q = query.trim();
-  const result: ProgressRow[] = [];
+  const candidates: ProgressRow[] = [];
   for (const source of sources) {
-    const row = selectProgress(source, prefs, flags, now);
-    if (row && (!q || matchesText(q, row.media.title, row.localizedTitle ?? '') || matchesText(q, row.episode.title, row.localizedEpisode ?? ''))) { result.push(row); }
+    const row = selectProgress(source,prefs,flags,now);
+    if (row) { candidates.push(row); }
   }
+  return sortProgressCandidates(candidates,prefs,filter,query);
+}
+export function sortProgressCandidates(candidates: ProgressRow[], prefs: ProgressPreferences,
+  filter: string, query: string): ProgressRow[] {
+  const q = query.trim();
+  const result = candidates.filter((row: ProgressRow) => !q || matchesText(q,row.media.title,row.localizedTitle ?? '') ||
+    matchesText(q,row.episode.title,row.localizedEpisode ?? ''));
   const grouped: ProgressRow[] = [];
   for (const group of ['pinned','new','aired','upcoming','hold']) {
     if (filter !== 'all' && filter !== group && !(filter === 'both' && (group === 'upcoming' || group === 'hold'))) { continue; }

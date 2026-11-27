@@ -1,4 +1,4 @@
-# Showly HarmonyOS Preview v0.9.3e.2d.2
+# Showly HarmonyOS Preview v0.9.3e.2d.3
 
 Unofficial native ArkTS prototype, not a complete Showly port. Your app uses Trakt but is not endorsed or certified by Trakt.
 
@@ -201,3 +201,6 @@ See [batch projection performance](docs/BATCH_PROJECTION_PERFORMANCE.md) for que
 
 ## v0.9.3e.2d.2 — shared movie reads and independent presentation (0.9.3.19, build 43)
 See [shared read performance](docs/SHARED_READ_PERFORMANCE.md) for scope, safety and tests.
+
+## v0.9.3e.2d.3 — viewport and candidate rendering (0.9.3.20, build 44)
+See [rendering performance](docs/RENDERING_PERFORMANCE.md).
