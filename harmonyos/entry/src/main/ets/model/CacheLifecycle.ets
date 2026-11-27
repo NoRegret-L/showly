@@ -12,10 +12,12 @@ export class CacheLifecycle {
   generation(): number { return this.serial; }
   current(token: number): boolean { return token===this.serial; }
 }
-export interface CacheResidency { search: boolean; progress: boolean; calendar: boolean; collection: boolean; discover: boolean; }
+export interface CacheResidency { search: boolean; progress: boolean; calendar: boolean; movieProgress: boolean; movieCalendar: boolean; collection: boolean; discover: boolean; }
 export function cacheResidency(visible: boolean,tab: string,mode: string,progress: string,detail: boolean): CacheResidency {
   return {search:visible && tab==='search' && !detail,progress:visible && tab==='progress' && progress==='next' && mode==='show' && !detail,
     calendar:visible && tab==='progress' && progress==='calendar' && mode==='show' && !detail,
+    movieProgress:visible && tab==='progress' && progress==='next' && mode==='movie' && !detail,
+    movieCalendar:visible && tab==='progress' && progress==='calendar' && mode==='movie' && !detail,
     collection:visible && tab==='library' && !detail,discover:visible && tab==='discover' && !detail};
 }
 export class MemoryEvents {

@@ -4,7 +4,7 @@ import { checkPresentationService, presentationHttpError, traktPresentationServi
 import { fileIo, fileUri } from '@kit.CoreFileKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { Media } from '../model/Media';
-import { ReadFlight } from '../model/ReadFlight';
+import { ReadFlight, ReadCancel, ConsumerReadFlight } from '../model/ReadFlight';
 import { CollectionMeta, imageFormat } from '../model/MediaPresentation';
 
 interface TraktIds {
@@ -42,7 +42,7 @@ export interface MediaDetail {
 }
 let posterWriteSequence: number = 0;
 const summaries: Map<string, MediaDetail> = new Map<string, MediaDetail>();
-const summaryFlights = new ReadFlight<MediaDetail>();
+const summaryFlights = new ConsumerReadFlight<MediaDetail>();
 const posterFlights = new ReadFlight<PosterResult>();
 let summaryEpoch = 0;
 
@@ -51,30 +51,37 @@ export function canReadDetails(item: Media): boolean {
     new RegExp('^' + item.kind + ':[1-9][0-9]*$').test(item.id);
 }
 
-export async function readDetails(item: Media, clientId: string, reload: boolean = false): Promise<MediaDetail> {
+export async function readDetails(item: Media, clientId: string, reload: boolean = false, consumer?: ReadCancel): Promise<MediaDetail> {
   if (!canReadDetails(item) || !clientId) {
     throw new Error('Missing Trakt media identity');
   }
+  consumer?.check();
   const key = clientId + ':' + item.id;
   const cached = summaries.get(key);
   if (cached && !reload) {
     return cached;
   }
   const epoch = summaryEpoch;
-  return summaryFlights.run(JSON.stringify([epoch,clientId,item.id]), () => fetchDetails(item,clientId,key,epoch));
+  return summaryFlights.run(JSON.stringify([epoch,clientId,item.id]), (scope: ReadCancel) => fetchDetails(item,clientId,key,epoch,scope),consumer);
 }
-async function fetchDetails(item: Media, clientId: string, key: string, epoch: number): Promise<MediaDetail> {
+async function fetchDetails(item: Media, clientId: string, key: string, epoch: number, scope: ReadCancel): Promise<MediaDetail> {
   const id = item.id.substring(item.kind.length + 1);
   const service=traktPresentationService(clientId);
   checkPresentationService(service);
+  scope.check();
   const request = http.createHttp();
+  let destroyed=false;
+  const close=(): void=>{ if (!destroyed) { destroyed=true; request.destroy(); } };
+  scope.subscribe(close);
   try {
+    scope.check();
     const response = await request.request('https://api.trakt.tv/' +
       (item.kind === 'show' ? 'shows/' : 'movies/') + id + '?extended=full', {
       method: http.RequestMethod.GET,
       header: { 'Content-Type': 'application/json', 'trakt-api-version': '2', 'trakt-api-key': clientId, 'User-Agent': 'Showly-HarmonyOS-Personal/0.7.0' },
       expectDataType: http.HttpDataType.STRING
     });
+    scope.check();
     if (response.responseCode !== 200 || typeof response.result !== 'string') {
       throw presentationHttpError(service,response.responseCode,JSON.stringify(response.header),true);
     }
@@ -102,7 +109,7 @@ async function fetchDetails(item: Media, clientId: string, key: string, epoch: n
     if (epoch === summaryEpoch) { summaries.set(key, result); }
     return result;
   } finally {
-    request.destroy();
+    scope.unsubscribe(close); close();
   }
 }
 

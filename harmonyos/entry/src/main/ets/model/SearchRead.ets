@@ -1,5 +1,5 @@
 import { SearchRecord, validSearchRecord, publicSearchRecord, SEARCH_RECENTS } from './SearchRules';
-import { ReadFlight } from './ReadFlight';
+import { ReadFlight, ReadCancel, ConsumerReadFlight } from './ReadFlight';
 export interface SearchStorage {
   read(scope: string): Promise<SearchRecord[]>;
   write(scope: string,rows: SearchRecord[]): Promise<void>;
@@ -7,12 +7,12 @@ export interface SearchStorage {
   remember(scope: string,query: string): Promise<void>;
   clear(scope: string): Promise<void>;
 }
-export interface SearchTransport { read(client: string,query: string): Promise<SearchRecord[]>; }
+export interface SearchTransport { read(client: string,query: string,scope?: ReadCancel): Promise<SearchRecord[]>; }
 export class SearchRead {
   private store: SearchStorage;
   private transport: SearchTransport;
   private loads: ReadFlight<SearchRecord[]>=new ReadFlight<SearchRecord[]>();
-  private flights: ReadFlight<SearchRecord[]>=new ReadFlight<SearchRecord[]>();
+  private flights: ConsumerReadFlight<SearchRecord[]>=new ConsumerReadFlight<SearchRecord[]>();
   private catalogs: Map<string,Map<string,SearchRecord>>=new Map<string,Map<string,SearchRecord>>();
   private snapshots: Map<string,SearchRecord[]>=new Map<string,SearchRecord[]>();
   private writes: Map<string,Promise<void>>=new Map<string,Promise<void>>();
@@ -77,8 +77,8 @@ export class SearchRead {
     try { await work; }
     finally { if (this.writes.get(scope)===work) { this.writes.delete(scope); } }
   }
-  async remote(client: string,query: string): Promise<SearchRecord[]> {
-    return this.flights.run(JSON.stringify([client,query.trim()]),()=>this.transport.read(client,query.trim()));
+  async remote(client: string,query: string,consumer?: ReadCancel): Promise<SearchRecord[]> {
+    return this.flights.run(JSON.stringify([client,query.trim()]),(scope: ReadCancel)=>this.transport.read(client,query.trim(),scope),consumer);
   }
   private async history(scope: string,work: ()=>Promise<void>): Promise<void> {
     if (!scope) { return; }

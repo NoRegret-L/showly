@@ -1,3 +1,4 @@
+import { ReadCancel } from '../model/ReadFlight';
 import { relationalStore, ValuesBucket } from '@kit.ArkData';
 import { common } from '@kit.AbilityKit';
 import { SearchRead, SearchStorage, SearchTransport } from '../model/SearchRead';
@@ -48,7 +49,7 @@ class MemorySearch implements SearchStorage {
   async clear(scope: string): Promise<void> { this.history.delete(scope); }
 }
 class TraktSearchTransport implements SearchTransport {
-  async read(client: string,query: string): Promise<SearchRecord[]> { return searchTrakt(query,client); }
+  async read(client: string,query: string,scope?: ReadCancel): Promise<SearchRecord[]> { return searchTrakt(query,client,scope); }
 }
 export async function openSearch(context: common.UIAbilityContext): Promise<SearchRead> {
   try {

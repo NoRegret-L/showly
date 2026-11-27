@@ -2,8 +2,8 @@
   "app": {
     "bundleName": "com.noregret.showly.harmony",
     "vendor": "NoRegret-L",
-    "versionCode": 53,
-    "versionName": "0.9.3.29",
+    "versionCode": 54,
+    "versionName": "0.9.3.30",
     "icon": "$media:app_icon",
     "label": "$string:app_name"
   }

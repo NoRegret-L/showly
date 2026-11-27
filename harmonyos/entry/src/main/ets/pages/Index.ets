@@ -1,3 +1,4 @@
+import { ReadCancel } from '../model/ReadFlight';
 import { common } from '@kit.AbilityKit';
 import { LazyRows } from '../model/LazyRows';
 import { DisplayRevisions, LatestDisplayJobs } from '../model/DisplayJobs';
@@ -118,6 +119,8 @@ struct Index {
   private candidateExpiry: number = 0;
   private candidateRuns: number = 0;
   private cacheLifecycle: CacheLifecycle=new CacheLifecycle();
+  private searchConsumer: ReadCancel=new ReadCancel();
+  private detailConsumer: ReadCancel=new ReadCancel();
   private memoryListener: ()=>void=()=>{ this.handleMemoryPressure(); };
   private memorySubscribed: boolean=false;
   private memoryPending: boolean=false;
@@ -148,11 +151,11 @@ struct Index {
   @State modeBusy: boolean = false;
   @State modeStatus: string = '';
   private returnTab: string = 'progress';
-  @State @Watch('onPresentationChanged') movieProgressQuery: string = '';
-  @State @Watch('onPresentationChanged') movieProgressOptions: MovieProgressOptions = defaultMovieProgress();
+  @State @Watch('onMovieViewChanged') movieProgressQuery: string = '';
+  @State @Watch('onMovieViewChanged') movieProgressOptions: MovieProgressOptions = defaultMovieProgress();
   @State movieRandomSeed: number = Date.now();
-  @State @Watch('onPresentationChanged') movieProgressPage: number = 1;
-  @State @Watch('onPresentationChanged') collectionQuery: string = '';
+  @State @Watch('onMovieViewChanged') movieProgressPage: number = 1;
+  @State @Watch('onCollectionViewChanged') collectionQuery: string = '';
   private episodeStore?: EpisodeStore;
   @State @Watch('onRecoveryGateChanged') syncBusy: boolean = false;
   @State syncStatus: string = '';
@@ -192,32 +195,32 @@ struct Index {
   @State uploadStatus: string = '';
   @State episodeReady: boolean = false;
   @State episodeInitStatus: string = '';
-  @State @Watch('onPresentationChanged') localSeries?: LocalSeriesState = undefined;
-  @State @Watch('onPresentationChanged') fullSchedule?: FullEpisodeCatalog = undefined;
-  @State @Watch('onPresentationChanged') schedulePage: number = 1;
-  @State @Watch('onPresentationChanged') localSeason: number = -1;
+  @State @Watch('onDetailViewChanged') localSeries?: LocalSeriesState = undefined;
+  @State @Watch('onDetailViewChanged') fullSchedule?: FullEpisodeCatalog = undefined;
+  @State @Watch('onDetailViewChanged') schedulePage: number = 1;
+  @State @Watch('onDetailViewChanged') localSeason: number = -1;
   @State @Watch('onRecoveryGateChanged') localBusy: boolean = false;
   @State localStatus: string = '';
   @State localRecent: Media[] = [];
   @State @Watch('onPresentationChanged') progressMode: string = 'next';
   @State @Watch('onShowsChanged') nextShows: NextShow[] = [];
   @State nextStatus: string = '';
-  @State @Watch('onPresentationChanged') progressPrefs: ProgressPreferences = defaultProgress();
+  @State @Watch('onShowViewChanged') progressPrefs: ProgressPreferences = defaultProgress();
   @State @Watch('onFlagsChanged') progressFlags: ProgressFlag[] = [];
   @State progressFlagScope: string = '';
   @State progressPrefsBusy: boolean = false;
   @State progressOptions: boolean = false;
   @State progressDaysInput: string = '30';
   @State progressOptionStatus: string = '';
-  @State @Watch('onPresentationChanged') nextFilter: string = 'all';
+  @State @Watch('onShowViewChanged') nextFilter: string = 'all';
   @State progressMenuId: string = '';
-  @State @Watch('onPresentationChanged') collectionStatusFilter: string = 'all';
-  @State @Watch('onPresentationChanged') nextQuery: string = '';
-  @State @Watch('onPresentationChanged') nextPage: number = 1;
-  @State @Watch('onPresentationChanged') showCalendarMode: string = 'future';
-  @State @Watch('onPresentationChanged') calendarPremieres: boolean = false;
-  @State @Watch('onPresentationChanged') calendarQuery: string = '';
-  @State @Watch('onPresentationChanged') calendarProtect: boolean = true;
+  @State @Watch('onCollectionViewChanged') collectionStatusFilter: string = 'all';
+  @State @Watch('onShowViewChanged') nextQuery: string = '';
+  @State @Watch('onShowViewChanged') nextPage: number = 1;
+  @State @Watch('onCalendarViewChanged') showCalendarMode: string = 'future';
+  @State @Watch('onCalendarViewChanged') calendarPremieres: boolean = false;
+  @State @Watch('onCalendarViewChanged') calendarQuery: string = '';
+  @State @Watch('onCalendarViewChanged') calendarProtect: boolean = true;
   @State @Watch('onPresentationChanged') calendarPage: number = 1;
   @State calendarBusy: boolean = false;
   @State calendarStatus: string = '';
@@ -234,8 +237,8 @@ struct Index {
   private movieRatingKey: string = '';
   private movieRatingRows: CollectionRating[] = [];
   private movieRatingBusy: boolean = false;
-  @State @Watch('onPresentationChanged') movieCalendarMode: string = 'future';
-  @State @Watch('onPresentationChanged') movieCalendarQuery: string = '';
+  @State @Watch('onMovieCalendarViewChanged') movieCalendarMode: string = 'future';
+  @State @Watch('onMovieCalendarViewChanged') movieCalendarQuery: string = '';
   private calendarRevision: number = 0;
   @State confirmSeason: number = -1;
   @State confirmWatched: boolean = true;
@@ -254,8 +257,8 @@ struct Index {
   @State trackingPage: number = 1;
   @State trackingQuery: string = '';
   private translationCache: Map<string, ChineseText> = new Map<string, ChineseText>();
-  @State @Watch('onPresentationChanged') collectionFilter: string = 'mine';
-  @State @Watch('onPresentationChanged') collectionPage: number = 1;
+  @State @Watch('onCollectionViewChanged') collectionFilter: string = 'mine';
+  @State @Watch('onCollectionViewChanged') collectionPage: number = 1;
   @State collectionGrid: boolean = true;
   @State collectionCards: DiscoverItem[] = [];
   @State collectionBusy: boolean = false;
@@ -280,7 +283,7 @@ struct Index {
   private discoverFeed?: DiscoverFeed;
   private discoverFeedKey: string = '';
   private discoverMemo: RevisionMemo<DiscoverItem[]> = new RevisionMemo<DiscoverItem[]>();
-  @State @Watch('onPresentationChanged') discoverItems: DiscoverItem[] = [];
+  @State @Watch('onDiscoverViewChanged') discoverItems: DiscoverItem[] = [];
   @State discoverPage: number = 1;
   @State discoverPages: number = 0;
   @State discoverBusy: boolean = false;
@@ -323,7 +326,7 @@ struct Index {
   private collectionRowsSource: LazyRows<CollectionGroup> = new LazyRows<CollectionGroup>();
   @State @Watch('onCollectionStateChanged') collectionState: CollectionState = emptyCollectionState();
   @State collectionScope: string = '';
-  @State @Watch('onPresentationChanged') collectionOptions: CollectionOptions = defaultCollection();
+  @State @Watch('onCollectionViewChanged') collectionOptions: CollectionOptions = defaultCollection();
   @State collectionOptionsOpen: boolean = false;
   @State collectionGenreDraft: string = '';
   @State collectionNetworkDraft: string = '';
@@ -346,7 +349,7 @@ struct Index {
   @StorageLink('traktAuthBusy') @Watch('onRecoveryGateChanged') authBusy: boolean = false;
   @StorageLink('traktSignedIn') @Watch('onObservationAuthChanged') signedIn: boolean = false;
   @State items: Media[] = [];
-  @State @Watch('onPresentationChanged') results: Media[] = [];
+  @State @Watch('onSearchViewChanged') results: Media[] = [];
   @State ready: boolean = false;
   @State @Watch('onRecoveryGateChanged') saving: boolean = false;
   @State searching: boolean = false;
@@ -1207,8 +1210,16 @@ struct Index {
   private viewScope(): string { return this.tab + ':' + this.mediaMode + ':' + this.progressMode + ':' + (this.selectedMedia?.id ?? ''); }
   private viewportChanged(item: Media, season: number, urls: string[], visible: boolean, tab: string, mode: string, slot: string = ''): void {
     if (!this.pageVisible || this.selectedMedia || tab !== this.tab || (mode && mode !== this.progressMode) || !canReadDetails(item)) { return; }
-    if (this.viewport.update(item,season,urls,visible,slot)) { this.requestPresentation(); }
+    if (this.viewport.update(item,season,urls,visible,slot)) { this.requestViewportPresentation(); }
   }
+  private onShowViewChanged(): void { if (this.pageVisible && !this.selectedMedia && this.tab==='progress' && this.mediaMode==='show' && this.progressMode==='next') { this.onPresentationChanged(); } }
+  private onMovieViewChanged(): void { if (this.pageVisible && !this.selectedMedia && this.tab==='progress' && this.mediaMode==='movie' && this.progressMode==='next') { this.onPresentationChanged(); } }
+  private onCalendarViewChanged(): void { if (this.pageVisible && !this.selectedMedia && this.tab==='progress' && this.mediaMode==='show' && this.progressMode==='calendar') { this.onPresentationChanged(); } }
+  private onMovieCalendarViewChanged(): void { if (this.pageVisible && !this.selectedMedia && this.tab==='progress' && this.mediaMode==='movie' && this.progressMode==='calendar') { this.onPresentationChanged(); } }
+  private onCollectionViewChanged(): void { if (this.pageVisible && !this.selectedMedia && this.tab==='library') { this.onPresentationChanged(); } }
+  private onDetailViewChanged(): void { if (this.pageVisible && this.selectedMedia) { this.onPresentationChanged(); } }
+  private onDiscoverViewChanged(): void { if (this.pageVisible && !this.selectedMedia && this.tab==='discover') { this.onPresentationChanged(); } }
+  private onSearchViewChanged(): void { if (this.searchActive()) { this.onPresentationChanged(); } }
   private onPresentationChanged(): void {
     this.updateCacheLifecycle();
     this.updateSearchContext();
@@ -1271,6 +1282,9 @@ struct Index {
       this.showRows.replace([],[],[]);
     }
     if (!residency.calendar) { this.calendarIndex.clear(); this.calendarMemo.clear(); this.calendarRows.replace([],[],[]); }
+    if (!residency.movieProgress) { this.movieMemo.clear(); this.movieAllMemo.clear(); this.movieRowsSource.replace([],[],[]); }
+    if (!residency.movieCalendar) { this.movieCalendarRows.replace([],[],[]); }
+    if (!residency.movieProgress && !residency.movieCalendar && !residency.collection) { this.movieMetadataMemo.clear(); }
     if (!residency.collection) { this.collectionIndexMemos.clear(); this.collectionItemsMemo.clear(); this.recentCollectionMemo.clear(); this.collectionRowsSource.replace([],[],[]); }
     if (!residency.discover) { this.discoverMemo.clear(); this.discoverRows.replace([],[],[]); }
     // Keep active detail/season data during foreground pressure; route changes
@@ -1327,7 +1341,7 @@ struct Index {
         if (!prepared) { return; }
         const pages = Math.max(1,Math.ceil(prepared.length/this.collectionPageSize));
         const summary: DisplaySummary = {key:this.calendarDisplayKey(),total:prepared.length,page:Math.min(this.calendarPage,pages),pages:pages};
-        const rows = calendarPageRows(prepared,summary.page,this.collectionPageSize);
+        const rows = prepared;
         const committed = await this.calendarRows.submit(rows,rows.map((row: CalendarEntry) => row.key),rows.map((row: CalendarEntry) => this.calendarRowKey(row)),diffDisplay,current);
         if (committed && current()) { this.calendarSummary = summary; }
       }
@@ -1358,7 +1372,7 @@ struct Index {
       const prepared = this.movieProgressRows(this.movieProgressQuery,false,true);
       if (this.movieProgressQuery && this.presentationLanguage === 'zh') { this.movieProgressRows('',false,true); }
       if (this.sortJobs.pending(this.movieProgressQuery ? 'movie-query' : 'movie-all')) { return; }
-      const rows = prepared.slice((this.movieProgressPage - 1) * this.collectionPageSize,this.movieProgressPage * this.collectionPageSize);
+      const rows = prepared;
       const summary: DisplaySummary = {key:this.movieDisplayKey(),total:prepared.length,page:this.movieProgressPage,pages:Math.max(1,Math.ceil(prepared.length/this.collectionPageSize))};
       const committed = await this.movieRowsSource.submit(rows, rows.map((row: PersonalLibraryRow) => row.media.id),
         rows.map((row: PersonalLibraryRow) => this.movieRowKey(row)),diffDisplay,current);
@@ -1410,7 +1424,11 @@ struct Index {
     return JSON.stringify([row.key,row.day,row.time,row.season,row.number,row.group,row.header,row.state,row.queued,row.synthetic,this.calendarProtect,this.artwork(row.media),this.displayTitle(row.media),this.calendarEpisodeTitle(row)]);
   }
   private requestPresentation(): void {
+    if (!this.pageVisible) { return; }
     this.scheduleLazyRows();
+    this.requestViewportPresentation();
+  }
+  private requestViewportPresentation(): void {
     if (!this.pageVisible || !this.presentation) { return; }
     this.presentationWorkVersion++;
     this.loadPresentation();
@@ -1458,8 +1476,7 @@ struct Index {
         }
       }
     } else if (this.tab === 'progress' && this.progressMode === 'next' && this.mediaMode === 'movie') {
-      for (const row of this.movieProgressRows().slice((this.movieProgressPage - 1) * this.collectionPageSize,
-        this.movieProgressPage * this.collectionPageSize)) { this.addPresentationTask(tasks, row.media, true); }
+      for (const row of this.movieProgressRows()) { this.addPresentationTask(tasks, row.media, true); }
       if (this.presentationLanguage === 'zh' && (this.movieProgressQuery.trim() || this.movieProgressOptions.sort === 'title' || this.movieProgressOptions.sort === 'userRating')) {
         for (const row of this.movieProgressRows('')) { this.addPresentationTask(tasks, row.media, false); }
       }
@@ -3429,8 +3446,11 @@ struct Index {
 
   private currentSearchAccount(): string { return searchScope(this.clientId,this.currentProgressScope()); }
   private searchActive(): boolean { return this.pageVisible && this.tab==='search' && !this.selectedMedia; }
+  private cancelSearchRead(): void {
+    this.searchGeneration.cancel(); this.searchConsumer.cancel(); this.searchConsumer=new ReadCancel();
+  }
   private resetSearchAccount(): void {
-    this.searchGeneration.cancel(); this.searchHistoryGeneration.cancel(); this.searchLocalVersion++;
+    this.cancelSearchRead(); this.searchHistoryGeneration.cancel(); this.searchLocalVersion++;
     this.searchAccount=''; this.searchRemote=[]; this.searchSubmitted=false; this.searching=false;
     this.searchCandidateSource=undefined; this.searchCandidateKey=''; this.searchCandidates=[];
     this.searchRecents=[]; this.searchStatus=''; this.title=''; this.results=[];
@@ -3448,14 +3468,14 @@ struct Index {
     if (changed) {
       const previous=this.searchAccount;
       this.searchAccount=scope;
-      this.searchGeneration.cancel(); this.searchHistoryGeneration.cancel(); this.searchLocalVersion++;
+      this.cancelSearchRead(); this.searchHistoryGeneration.cancel(); this.searchLocalVersion++;
       this.searchRemote=[]; this.searchSubmitted=false; this.searching=false; this.searchRecents=[];
       this.searchCandidateSource=undefined; this.searchCandidateKey=''; this.searchCandidates=[];
       if (previous) { this.title=''; }
       this.searchStatus=''; this.results=[]; this.searchRows.replace([],[],[]);
     }
     if (!active) {
-      if (this.searching) { this.searchGeneration.cancel(); this.searching=false; this.searchStatus='搜索已停止，可重新提交。'; }
+      if (this.searching) { this.cancelSearchRead(); this.searching=false; this.searchStatus='搜索已停止，可重新提交。'; }
       this.searchLocalVersion++;
       return;
     }
@@ -3491,7 +3511,7 @@ struct Index {
   }
   private changeSearchText(value: string): void {
     if (value===this.title) { return; }
-    this.searchGeneration.cancel(); this.searchLocalVersion++;
+    this.cancelSearchRead(); this.searchLocalVersion++;
     this.title=value; this.searching=false; this.searchSubmitted=false;
     this.searchRemote=[]; this.searchOptions=defaultSearch(); this.searchStatus='';
     this.searchRows.replace([],[],[]); this.results=[];
@@ -3553,6 +3573,8 @@ struct Index {
   private async search(): Promise<void> {
     if (!this.searchActive() || this.setupBusy || !this.title.trim()) { return; }
     const query=this.title.trim(), client=this.clientId, scope=this.currentSearchAccount();
+    this.cancelSearchRead();
+    const consumer=this.searchConsumer;
     const token=this.searchGeneration.begin();
     const current=(): boolean=>this.searchGeneration.current(token) && this.searchActive() &&
       client===this.clientId && scope===this.currentSearchAccount() && query===this.title.trim();
@@ -3563,7 +3585,7 @@ struct Index {
       const repo=await this.searchRepository();
       if (!current()) { return; }
       if (!client) { return; }
-      const rows=await repo.remote(client,query);
+      const rows=await repo.remote(client,query,consumer);
       if (!current()) { return; }
       this.searchRemote=rows;
       this.searching=false;
@@ -3707,7 +3729,7 @@ struct Index {
       rows = filterDiscover(this.discoverItems,this.discoverOptions,hidden,members,now);
       this.discoverMemo.put(key,rows,now,Date.parse(day+'T00:00:00Z')+86400000);
     }
-    return discoverPage(rows,this.discoverPage);
+    return {items:rows,page:1,pages:1,total:rows.length};
   }
   private visibleDiscover(): DiscoverItem[] { return this.discoverPageResult().items; }
 
@@ -3782,17 +3804,7 @@ struct Index {
             }.width('100%').justifyContent(FlexAlign.SpaceBetween)
           }
         }, (row: DiscoverItem[]) => this.discoverRows.keyFor(row.map((item: DiscoverItem) => item.media.id).join(',')))
-        ListItem() {
-        Row({ space: 8 }) {
-          Button('上一页').layoutWeight(1)
-             .enabled(!this.discoverBusy && this.discoverShownPage > 1)
-            .onClick(() => { this.loadDiscover(this.discoverShownPage - 1); })
-          Text(this.discoverShownPage + ' / ' + (this.discoverPages || 1)).fontSize(13)
-          Button('下一页').layoutWeight(1)
-            .enabled(!this.discoverBusy && this.discoverShownPage < this.discoverPages)
-            .onClick(() => { this.loadDiscover(this.discoverShownPage + 1); })
-        }.width('100%')
-        }
+        
       }
     }.width('100%').height('100%').padding(16)
   }
@@ -4120,7 +4132,7 @@ struct Index {
   private nextPages(): number { return Math.max(1, Math.ceil(this.nextEntries().length / this.collectionPageSize)); }
   private nextSlice(): ProgressEntry[] {
     const entries = this.nextEntries();
-    return progressPage(entries, Math.min(this.nextPage, Math.max(1, Math.ceil(entries.length / this.collectionPageSize))), this.collectionPageSize);
+    return entries;
   }
 
   private async markNext(row: ProgressRow): Promise<void> {
@@ -4300,7 +4312,7 @@ struct Index {
     if (!this.calendarCurrent()) { return []; }
     return this.calendarViewRevision>=0 ? this.calendarMemo.get(this.calendarKey(),Date.now()) : undefined;
   }
-  private calendarSlice(): CalendarEntry[] { return calendarPageRows(this.calendarEntries() ?? [],this.calendarPage,this.collectionPageSize); }
+  private calendarSlice(): CalendarEntry[] { return this.calendarEntries() ?? []; }
   private calendarEpisodeTitle(row: CalendarEntry): string {
     if (row.synthetic) { return '首播日期（待确认分集）'; }
     return calendarTitleHidden(row,this.calendarProtect) ? '' : this.displayEpisode(row.media,row.season,row.episodeId,row.episodeTitle);
@@ -4616,13 +4628,7 @@ struct Index {
           }
         }, (entry: ProgressEntry) => this.showRows.keyFor(entry.key))
       }
-      ListItem() {
-      Row({ space: 8 }) {
-        Button('上一页').layoutWeight(1).enabled(this.showSummary.key === this.showDisplayKey() && this.showSummary.page > 1).onClick(() => { this.nextPage = this.showSummary.page - 1; })
-        Text(this.showSummary.page + ' / ' + this.showSummary.pages).fontSize(13)
-        Button('下一页').layoutWeight(1).enabled(this.showSummary.key === this.showDisplayKey() && this.showSummary.page < this.showSummary.pages).onClick(() => { this.nextPage = this.showSummary.page + 1; })
-      }.width('100%')
-      }
+      
     }.width('100%').height('100%').padding(16)
   }
 
@@ -4652,7 +4658,7 @@ struct Index {
   }
 
   private movieSlice(): MovieCalendarItem[] {
-    return moviePage(this.movieRows(), (this.calendarPage - 1) * this.collectionPageSize, this.collectionPageSize, new Date());
+    const rows=this.movieRows(); return moviePage(rows,0,rows.length,new Date());
   }
 
   private async lookupMovieDate(row: PersonalMovie): Promise<void> {
@@ -4752,13 +4758,7 @@ struct Index {
               .onVisibleAreaChange([0], (visible: boolean, ratio: number) => { this.viewportChanged(row.movie.media,0,[],visible && ratio > 0,'progress','calendar'); })
             }
           }, (row: MovieCalendarItem) => this.movieCalendarRows.keyFor(row.movie.media.id))
-        ListItem() {
-          Row({ space: 8 }) {
-            Button('上一页').layoutWeight(1).enabled(this.calendarPage > 1).onClick(() => { this.calendarPage--; })
-            Text(this.calendarPage + ' / ' + this.moviePages()).fontSize(13)
-            Button('下一页').layoutWeight(1).enabled(this.calendarPage < this.moviePages()).onClick(() => { this.calendarPage++; })
-          }.width('100%')
-        }
+        
       }
     }.width('100%').height('100%').padding(16)
   }
@@ -4826,15 +4826,7 @@ struct Index {
               .onVisibleAreaChange([0],(visible: boolean,ratio: number)=>{ this.viewportChanged(row.media,row.synthetic ? 0 : row.season,[],visible && ratio>0,'progress','calendar',row.key); })
           }
         },(row: CalendarEntry)=>this.calendarRows.keyFor(row.key))
-        ListItem() {
-          Row({space:8}) {
-            Button('上一页').layoutWeight(1).enabled(this.calendarSummary.key===this.calendarDisplayKey() && this.calendarSummary.page>1)
-              .onClick(()=>{ this.calendarPage=this.calendarSummary.page-1; })
-            Text(this.calendarSummary.page+' / '+this.calendarSummary.pages).fontSize(13)
-            Button('下一页').layoutWeight(1).enabled(this.calendarSummary.key===this.calendarDisplayKey() && this.calendarSummary.page<this.calendarSummary.pages)
-              .onClick(()=>{ this.calendarPage=this.calendarSummary.page+1; })
-          }.width('100%')
-        }
+        
       }
     }.width('100%').height('100%').padding(16)
   }
@@ -4994,14 +4986,7 @@ struct Index {
           }
           .onVisibleAreaChange([0], (visible: boolean, ratio: number) => { this.viewportChanged(row.media,0,[],visible && ratio > 0,'progress','next'); })
         }, (row: PersonalLibraryRow) => this.movieRowsSource.keyFor(row.media.id))
-        ListItem() {
-          Row({ space: 8 }) {
-            Button('上一页').layoutWeight(1).enabled(this.movieSummary.key === this.movieDisplayKey() && this.movieSummary.page > 1).onClick(() => { this.movieProgressPage--; })
-            Text(this.movieSummary.page + ' / ' + this.movieSummary.pages).fontSize(13)
-            Button('下一页').layoutWeight(1).enabled(this.movieSummary.key === this.movieDisplayKey() && this.movieSummary.page < this.movieSummary.pages)
-              .onClick(() => { this.movieProgressPage++; })
-          }.width('100%')
-        }
+        
       }
     }.width('100%').height('100%').padding(16)
   }
@@ -5410,7 +5395,7 @@ struct Index {
   }
 
   private collectionPageGroups(): CollectionGroup[] {
-    return pageGroups(this.collectionEntries(), this.collectionPage, this.collectionPageSize);
+    const entries=this.collectionEntries(); return pageGroups(entries,1,entries.length);
   }
 
   private collectionSlice(): PersonalLibraryRow[] {
@@ -5545,15 +5530,7 @@ struct Index {
         LazyForEach(this.collectionRowsSource, (group: CollectionGroup) => {
           ListItem() { this.collectionGroupView(group) }
         }, (group: CollectionGroup) => this.collectionRowsSource.keyFor(group.key))
-        ListItem() {
-      Row({ space: 8 }) {
-        Button('上一页').layoutWeight(1).enabled(!this.collectionBusy && this.collectionSummary.key === this.collectionDisplayKey() && this.collectionSummary.page > 1)
-          .onClick(() => { this.goCollectionPage(this.collectionPage - 1); })
-        Text(this.collectionSummary.page + ' / ' + this.collectionSummary.pages).fontSize(13)
-        Button('下一页').layoutWeight(1).enabled(!this.collectionBusy && this.collectionSummary.key === this.collectionDisplayKey() && this.collectionSummary.page < this.collectionSummary.pages)
-          .onClick(() => { this.goCollectionPage(this.collectionPage + 1); })
-      }.width('100%')
-        }
+        
       }
     }.width('100%').height('100%').padding(16)
   }
@@ -5749,6 +5726,8 @@ struct Index {
   }
 
   private closeDetail(): void {
+    this.detailConsumer.cancel(); this.detailConsumer=new ReadCancel();
+    this.detailBusy=false;
     this.detailRevision++;
     this.localSeries = undefined;
     this.effectiveEditable = false;
@@ -5803,7 +5782,7 @@ struct Index {
       return;
     }
     try {
-      const data = await readDetails(item, clientId, reload);
+      const data = await readDetails(item, clientId, reload,this.detailConsumer);
       if (revision !== this.detailRevision || this.clientId !== clientId) {
         return;
       }
@@ -5815,7 +5794,7 @@ struct Index {
         this.detailStatus = '详情读取失败，请检查网络或 Trakt API 权限后重试。';
       }
     } finally {
-      this.detailBusy = false;
+      if (revision === this.detailRevision) { this.detailBusy = false; }
     }
   }
 

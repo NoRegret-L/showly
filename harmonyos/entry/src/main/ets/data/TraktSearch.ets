@@ -1,3 +1,4 @@
+import { ReadCancel } from '../model/ReadFlight';
 import { http } from '@kit.NetworkKit';
 import { SearchRecord, publicSearchRecord, SEARCH_LIMIT } from '../model/SearchRules';
 import { checkPresentationService, presentationHttpError, traktPresentationService } from './PresentationHttp';
@@ -19,11 +20,16 @@ interface SearchResult {
   movie?: TraktTitle;
 }
 
-export async function searchTrakt(query: string, clientId: string): Promise<SearchRecord[]> {
+export async function searchTrakt(query: string, clientId: string, scope?: ReadCancel): Promise<SearchRecord[]> {
   const service=traktPresentationService(clientId);
   checkPresentationService(service);
+  scope?.check();
   const request = http.createHttp();
+  let destroyed=false;
+  const close=(): void=>{ if (!destroyed) { destroyed=true; request.destroy(); } };
+  scope?.subscribe(close);
   try {
+    scope?.check();
     const response = await request.request(
       'https://api.trakt.tv/search/show,movie?query=' + encodeURIComponent(query) + '&extended=full&limit=' + SEARCH_LIMIT,
       {
@@ -31,6 +37,7 @@ export async function searchTrakt(query: string, clientId: string): Promise<Sear
         header: { 'Content-Type': 'application/json', 'trakt-api-version': '2', 'trakt-api-key': clientId },
         expectDataType: http.HttpDataType.STRING
       });
+    scope?.check();
     if (response.responseCode !== 200) {
       throw presentationHttpError(service,response.responseCode,JSON.stringify(response.header),true);
     }
@@ -60,6 +67,6 @@ export async function searchTrakt(query: string, clientId: string): Promise<Sear
     }
     return items;
   } finally {
-    request.destroy();
+    scope?.unsubscribe(close); close();
   }
 }
