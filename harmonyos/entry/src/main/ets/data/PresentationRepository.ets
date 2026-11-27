@@ -91,7 +91,8 @@ export class PresentationRepository {
         if (!urls.length) { urls=detail.posterUrls; }
         await this.saveTitlePatch(item.id,{collection:meta,posterUrls:urls});
       } catch (error) {
-        if (presentationFailure(error as Error).category!=='missing') { throw error; }
+        const failure: PresentationFailure = presentationFailure(error as Error);
+        if (failure.category!=='missing') { throw failure; }
         missingSummary=true;
         this.summaryMissing.add(summaryKey);
       }
@@ -100,7 +101,8 @@ export class PresentationRepository {
     if (!urls.length && !missingSummary) {
       try { urls=(await readDetails(item,clientId)).posterUrls; }
       catch (error) {
-        if (presentationFailure(error as Error).category!=='missing') { throw error; }
+        const failure: PresentationFailure = presentationFailure(error as Error);
+        if (failure.category!=='missing') { throw failure; }
         this.summaryMissing.add(summaryKey);
       }
     }
