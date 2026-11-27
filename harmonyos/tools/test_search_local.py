@@ -36,7 +36,14 @@ const repo=new SearchRead(storage,transport);
  if(process.argv[2]==='write'){
   await Promise.all(Array.from({length:393},()=>repo.catalog(A)));assert.equal(reads,1);
   await Promise.all(Array.from({length:393},()=>repo.remote('client','test')));assert.equal(calls,1);
-  await repo.rememberCatalog(A,[row(1)]);await repo.rememberCatalog(A,[row(1)]);assert.equal(writes,1);
+  const empty=await repo.catalog(A);assert.equal(await repo.catalog(A),empty);
+  await repo.rememberCatalog(A,[row(9),row(1),row(2)]);const warm=await repo.catalog(A);
+  assert.deepEqual(warm.map(x=>x.media.id),['show:1','show:2','show:9']);
+  await repo.rememberCatalog(A,[row(1)]);assert.equal(writes,1);assert.equal(await repo.catalog(A),warm);
+  let finishOld,finishNew;const pending=new SearchRead(storage,{read:async(c,q)=>new Promise(resolve=>{if(q==='old')finishOld=resolve;else finishNew=resolve})});
+  const generations=new m.SearchGeneration(),published=[];
+  const send=async q=>{const token=generations.begin();const result=await pending.remote('client',q);if(generations.current(token))published.push(result[0].media.id)};
+  const first=send('old'),second=send('new');await Promise.resolve();await Promise.resolve();finishNew([row(2)]);await second;finishOld([row(1)]);await first;assert.deepEqual(published,['show:2']);
   for(let i=0;i<7;i++)await repo.remember(A,'q'+i);
   assert.deepEqual(await repo.recents(A),['q6','q5','q4','q3','q2']);
   assert.deepEqual(await repo.catalog(B),[]);assert.deepEqual(await repo.recents(B),[]);
@@ -44,8 +51,9 @@ const repo=new SearchRead(storage,transport);
  }else{
   const data=JSON.parse(fs.readFileSync('saved.json'));data.catalog.forEach(([s,r])=>catalog.set(s,r));data.history.forEach(([s,r])=>history.set(s,r));
   assert.equal((await repo.catalog(A))[0].media.watched,false);assert.equal((await repo.recents(A)).length,5);
-  await assert.rejects(repo.remote('client','offline'));assert.equal((await repo.catalog(A)).length,1);
-  await repo.clear(A);assert.deepEqual(await repo.recents(A),[]);assert.equal((await repo.catalog(A)).length,1);
+  assert.deepEqual((await repo.catalog(A)).map(x=>x.media.id),['show:1','show:2','show:9']);
+  await assert.rejects(repo.remote('client','offline'));assert.equal((await repo.catalog(A)).length,3);
+  await repo.clear(A);assert.deepEqual(await repo.recents(A),[]);assert.equal((await repo.catalog(A)).length,3);
   console.log('Search local: original suggestion limits, 18 filter/sort comparisons, 393-to-1 flights, one disk load, unchanged write suppression, offline retention, scoped history and cold restore passed');
  }
 })().catch(e=>{console.error(e);process.exitCode=1});
@@ -74,6 +82,7 @@ task=(root/"data"/"SearchTask.ets").read_text()
 assert "this.searchGeneration.current(token)" in page and "scope===this.currentSearchAccount()" in page
 assert "this.searchRows.replace([],[],[])" in page and "this.searchRows.submit(" in page
 assert "await searchDisplay(input)" in page and "await taskpool.execute(searchTask" in task
+assert "this.searchCandidateSource!==stored || this.searchCandidateKey!==key" in page
 assert "repo.rememberCatalog(scope,rows)" in page and "repo.remember(scope,query)" in page
 assert "search_catalog WHERE scope=?" in repo and "search_recent WHERE scope=?" in repo
 assert "await store.saveReadCheckpoints(account.uuid, result.matches)" in page

@@ -14,22 +14,30 @@ export class SearchRead {
   private loads: ReadFlight<SearchRecord[]>=new ReadFlight<SearchRecord[]>();
   private flights: ReadFlight<SearchRecord[]>=new ReadFlight<SearchRecord[]>();
   private catalogs: Map<string,Map<string,SearchRecord>>=new Map<string,Map<string,SearchRecord>>();
+  private snapshots: Map<string,SearchRecord[]>=new Map<string,SearchRecord[]>();
   private writes: Map<string,Promise<void>>=new Map<string,Promise<void>>();
   private historyWrites: Map<string,Promise<void>>=new Map<string,Promise<void>>();
   constructor(store: SearchStorage,transport: SearchTransport) { this.store=store; this.transport=transport; }
   async catalog(scope: string): Promise<SearchRecord[]> {
     if (!scope) { return []; }
-    const cached=this.catalogs.get(scope);
-    if (cached) { return Array.from(cached.values()); }
+    const cached=this.snapshots.get(scope);
+    if (cached) { return cached; }
     return this.loads.run(scope,async (): Promise<SearchRecord[]>=>{
-      const current=this.catalogs.get(scope);
-      if (current) { return Array.from(current.values()); }
+      const current=this.snapshots.get(scope);
+      if (current) { return current; }
       const rows=await this.store.read(scope);
       const index=new Map<string,SearchRecord>();
       for (const row of rows) { if (validSearchRecord(row)) { index.set(row.media.id,publicSearchRecord(row.media,row.votes)); } }
       this.catalogs.set(scope,index);
-      return Array.from(index.values());
+      return this.publishCatalog(scope,index);
     });
+  }
+  private publishCatalog(scope: string,index: Map<string,SearchRecord>): SearchRecord[] {
+    // Stable warm/cold order; the source DAO has no explicit ordering.
+    const rows=Array.from(index.values());
+    rows.sort((a: SearchRecord,b: SearchRecord)=>a.media.id<b.media.id ? -1 : a.media.id>b.media.id ? 1 : 0);
+    this.snapshots.set(scope,rows);
+    return rows;
   }
   async rememberCatalog(scope: string,rows: SearchRecord[]): Promise<void> {
     if (!scope || !rows.length) { return; }
@@ -49,6 +57,7 @@ export class SearchRead {
       if (!changed.length) { return; }
       await this.store.write(scope,changed);
       for (const row of changed) { index.set(row.media.id,row); }
+      this.publishCatalog(scope,index);
     });
     this.writes.set(scope,work);
     try { await work; }

@@ -348,6 +348,9 @@ struct Index {
   private searchRemote: SearchRecord[] = [];
   private searchLocalVersion: number = 0;
   private searchLocalRunning: boolean = false;
+  private searchCandidateSource?: SearchRecord[];
+  private searchCandidateKey: string = '';
+  private searchCandidates: SearchCandidate[] = [];
   private searchHistoryGeneration: SearchGeneration = new SearchGeneration();
   @State libraryStatus: string = '';
   @State searchStatus: string = '';
@@ -3339,6 +3342,7 @@ struct Index {
   private resetSearchAccount(): void {
     this.searchGeneration.cancel(); this.searchHistoryGeneration.cancel(); this.searchLocalVersion++;
     this.searchAccount=''; this.searchRemote=[]; this.searchSubmitted=false; this.searching=false;
+    this.searchCandidateSource=undefined; this.searchCandidateKey=''; this.searchCandidates=[];
     this.searchRecents=[]; this.searchStatus=''; this.title=''; this.results=[];
     this.searchRows.replace([],[],[]);
   }
@@ -3356,6 +3360,7 @@ struct Index {
       this.searchAccount=scope;
       this.searchGeneration.cancel(); this.searchHistoryGeneration.cancel(); this.searchLocalVersion++;
       this.searchRemote=[]; this.searchSubmitted=false; this.searching=false; this.searchRecents=[];
+      this.searchCandidateSource=undefined; this.searchCandidateKey=''; this.searchCandidates=[];
       if (previous) { this.title=''; }
       this.searchStatus=''; this.results=[]; this.searchRows.replace([],[],[]);
     }
@@ -3420,16 +3425,24 @@ struct Index {
         let stored: SearchRecord[]=[];
         try { const repo=await this.searchRepository(); stored=await repo.catalog(scope); } catch (error) {}
         if (!current()) { continue; }
-        const merged=new Map<string,SearchRecord>();
-        for (const row of stored) { if (validSearchRecord(row)) { merged.set(row.media.id,row); } }
-        // Current private library is an ephemeral input, never persisted here.
-        if (scope && scope===this.currentSearchAccount()) {
-          for (const row of this.personalLibrary()) {
-            if (isTraktMedia(row.media) && !merged.has(row.media.id)) { merged.set(row.media.id,publicSearchRecord(row.media)); }
-          }
-        }
         const candidate=(row: SearchRecord): SearchCandidate=>({media:row.media,votes:row.votes,localized:language==='zh' ? this.titleIndex.get(row.media.id)?.text.title ?? '' : ''});
-        const input: SearchInput={catalog:Array.from(merged.values()).map(candidate),remote:this.searchRemote.map(candidate),
+        const key=JSON.stringify([scope,this.libraryRevision,this.cloudLocalAllowed,this.activeCloud()?.generation ?? -1,
+          this.activeCloud()?.activity ?? '',language,language==='zh' ? this.titleSortRevision : 0]);
+        if (this.searchCandidateSource!==stored || this.searchCandidateKey!==key) {
+          const merged=new Map<string,SearchRecord>();
+          for (const row of stored) { if (validSearchRecord(row)) { merged.set(row.media.id,row); } }
+          // Current private library is an ephemeral input, never persisted here.
+          if (scope && scope===this.currentSearchAccount()) {
+            for (const row of this.personalLibrary()) {
+              if (isTraktMedia(row.media) && !merged.has(row.media.id)) { merged.set(row.media.id,publicSearchRecord(row.media)); }
+            }
+          }
+          const ordered=Array.from(merged.values());
+          ordered.sort((a: SearchRecord,b: SearchRecord)=>a.media.id<b.media.id ? -1 : a.media.id>b.media.id ? 1 : 0);
+          this.searchCandidates=ordered.map(candidate);
+          this.searchCandidateSource=stored; this.searchCandidateKey=key;
+        }
+        const input: SearchInput={catalog:this.searchCandidates,remote:this.searchRemote.map(candidate),
           query:query,suggestions:!submitted,options:options};
         try {
           const rows=await searchDisplay(input);
@@ -3457,6 +3470,7 @@ struct Index {
       const rows=await repo.remote(client,query);
       if (!current()) { return; }
       this.searchRemote=rows;
+      this.searching=false;
       this.searchStatus='搜索完成 · 本地与网络结果';
       this.refreshSearchLocal();
       // Persist only public metadata under the captured verified scope.
@@ -3466,7 +3480,7 @@ struct Index {
         if (current()) { this.loadSearchHistory(); }
       }
     } catch (error) {
-      if (current()) { this.searchStatus='网络搜索失败，保留本地结果。'; }
+      if (current()) { this.searching=false; this.searchStatus='网络搜索失败，保留本地结果。'; }
     } finally {
       if (current()) { this.searching=false; this.refreshSearchLocal(); }
     }
