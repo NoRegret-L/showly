@@ -1,4 +1,4 @@
-# Showly HarmonyOS Preview v0.9.3e.2a.2
+# Showly HarmonyOS Preview v0.9.3e.2b
 
 Unofficial native ArkTS prototype, not a complete Showly port. Your app uses Trakt but is not endorsed or certified by Trakt.
 
@@ -183,3 +183,6 @@ Progress renders actual ordered entries and nonempty Upcoming/On Hold headers at
 ## v0.9.3e.2a.2 — shared presentation metadata (0.9.3.13, build 37)
 
 Public SQLite metadata cache and shared persistent artwork retrieval; simplified Chinese/original language setting, title/season translations, image and localized title rendering in existing progress, calendar, collection, discovery, search and detail. Search/filter uses original and cached localized text, localized name ordering for progress. No Trakt write or personal-store migration. Trakt artwork retained; TMDB fallback and episode stills not yet implemented. See docs/PRESENTATION.md.
+
+## v0.9.3e.2b — movie progress rules (0.9.3.14, build 38)
+See [movie progress parity](docs/MOVIE_PROGRESS_PARITY.md) for source-derived rules, verification and remaining gaps.

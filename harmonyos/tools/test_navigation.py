@@ -46,5 +46,6 @@ assert "readDiscover(clientId, this.mediaMode" in source
 assert "const kind = this.mediaMode;" in source
 assert "this.collectionPageGroups()" in source
 assert "this.movieProgressView()" in source
-assert "this.changeMediaIntent(row.media, 'movie', 'yes')" in source
+assert "this.markMovieProgress(row.media)" in source
+assert "await this.changeMediaIntent(row.media, 'movie', 'yes')" in source
 print("Navigation wiring assertions passed")

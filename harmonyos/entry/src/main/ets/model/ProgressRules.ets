@@ -76,13 +76,14 @@ export function validFlags(flags: ProgressFlag[]): boolean {
   if (!Array.isArray(flags)) { return false; }
   const seen: Set<string> = new Set<string>();
   for (const flag of flags) {
-    if (!flag || !/^show:[1-9][0-9]*$/.test(flag.id) || seen.has(flag.id) ||
-        typeof flag.pinned !== 'boolean' || typeof flag.held !== 'boolean') { return false; }
+    if (!flag || !/^(show|movie):[1-9][0-9]*$/.test(flag.id) || seen.has(flag.id) ||
+        typeof flag.pinned !== 'boolean' || typeof flag.held !== 'boolean' || (flag.id.startsWith('movie:') && flag.held)) { return false; }
     seen.add(flag.id);
   }
   return true;
 }
 export function toggleProgressFlag(flags: ProgressFlag[], id: string, kind: string): ProgressFlag[] {
+  if (id.startsWith('movie:') && kind !== 'pin') { return flags; }
   const before = flags.find((flag: ProgressFlag) => flag.id === id);
   // Upstream ShowContextMenuPinnedCase and ShowContextMenuOnHoldCase
   // clear the opposite flag when adding a new flag.

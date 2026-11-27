@@ -3,6 +3,8 @@ import { common } from '@kit.AbilityKit';
 import { http } from '@kit.NetworkKit';
 import { ProgressPreferences, ProgressFlag, defaultProgress, validProgress, validFlags } from '../model/ProgressRules';
 
+import { MovieProgressOptions, defaultMovieProgress, validMovieProgress } from '../model/MovieProgressRules';
+
 export class ClientSettings {
   private storage: preferences.Preferences;
   constructor(context: common.UIAbilityContext) {
@@ -24,6 +26,19 @@ export class ClientSettings {
   async saveMode(mode: string): Promise<void> {
     if (mode !== 'movie' && mode !== 'show') { throw new Error('Invalid media mode'); }
     await this.storage.put('media_mode', mode);
+    await this.storage.flush();
+  }
+  loadMovieProgress(): MovieProgressOptions {
+    const raw = this.storage.getSync('movie_progress_options', '');
+    if (typeof raw !== 'string' || !raw) { return defaultMovieProgress(); }
+    try {
+      const value = JSON.parse(raw) as MovieProgressOptions;
+      return validMovieProgress(value) ? value : defaultMovieProgress();
+    } catch (error) { return defaultMovieProgress(); }
+  }
+  async saveMovieProgress(value: MovieProgressOptions): Promise<void> {
+    if (!validMovieProgress(value)) { throw new Error('Invalid movie progress options'); }
+    await this.storage.put('movie_progress_options', JSON.stringify(value));
     await this.storage.flush();
   }
   loadProgress(): ProgressPreferences {

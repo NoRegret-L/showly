@@ -1,6 +1,6 @@
 import { common } from '@kit.AbilityKit';
 import { PresentationRepository } from '../data/PresentationRepository';
-import { TitlePresentation, SeasonPresentation, PresentationTask, localizedTitle, localizedEpisode, matchesText, compareTitles } from '../model/MediaPresentation';
+import { TitlePresentation, SeasonPresentation, PresentationTask, localizedTitle, localizedEpisode, matchesText } from '../model/MediaPresentation';
 import { Media, mediaLabel, setWatched } from '../model/Media';
 import { LibraryStore } from '../data/LibraryStore';
 import { MediaStore } from '../data/MediaStore';
@@ -14,6 +14,7 @@ import { syncSelectedMedia, reconcilePendingMedia } from '../data/TraktMediaSync
 import { checkpointEpisodes, checkpointMedia, adoptEpisodeCloud, adoptMediaCloud } from '../data/ThreeWaySync';
 import { threeWayLabel } from '../model/ThreeWay';
 import { NextShow } from '../data/NextShows';
+import { MovieProgressOptions, MovieProgressSource, defaultMovieProgress, validMovieProgress, movieProgressRows as projectMovieProgress, clearMoviePin } from '../model/MovieProgressRules';
 import { ProgressSource, ProgressPreferences, ProgressFlag, ProgressRow, defaultProgress, validProgress, toggleProgressFlag, progressRows, ProgressEntry, progressSections, progressEntries, progressPage, effectiveProgressFilter } from '../model/ProgressRules';
 import { CalendarSnapshot, CalendarEntry, readCalendar, calendarWindow, localDay } from '../data/TraktCalendar';
 import { PersonalMovie, PersonalMovieSnapshot, readPersonalMovies, readPersonalMovieDate } from '../data/TraktLibrary';
@@ -27,7 +28,7 @@ import { CloudLibrary, ShowProgress, readCloudLibrary, mergeNewTitles, readActiv
 import { projectLibrary, projectDetail } from '../data/LibraryProjection';
 import { allowLocalScope } from '../model/EffectiveState';
 import { hasTrackingEvidence } from '../model/PersonalLibrary';
-import { CollectionGroup, GroupEntry, MovieDate, normalizeMode, progressTabs, collectionRows, collectionGroups, groupEntries, pageGroups, releasedWatchlist } from '../model/NavigationModel';
+import { CollectionGroup, GroupEntry, normalizeMode, progressTabs, collectionRows, collectionGroups, groupEntries, pageGroups } from '../model/NavigationModel';
 import { MediaDetail, canReadDetails, readDetails, cachePoster, clearDetailMemory } from '../data/TraktDetails';
 import { DiscoverItem, readDiscover } from '../data/TraktDiscover';
 import { EpisodeProgress, SeasonProgress, SeriesProgress, ChineseText, readSeriesProgress, readChinese } from '../data/TraktProgress';
@@ -72,6 +73,8 @@ struct Index {
   @State modeStatus: string = '';
   private returnTab: string = 'progress';
   @State @Watch('onPresentationChanged') movieProgressQuery: string = '';
+  @State @Watch('onPresentationChanged') movieProgressOptions: MovieProgressOptions = defaultMovieProgress();
+  @State movieRandomSeed: number = Date.now();
   @State @Watch('onPresentationChanged') movieProgressPage: number = 1;
   @State @Watch('onPresentationChanged') collectionQuery: string = '';
   private episodeStore?: EpisodeStore;
@@ -248,6 +251,7 @@ struct Index {
       this.mediaMode = normalizeMode(this.settings.loadMode());
       this.presentationLanguage = this.settings.loadLanguage();
       this.progressPrefs = this.settings.loadProgress();
+      this.movieProgressOptions = this.settings.loadMovieProgress();
       this.progressDaysInput = this.progressPrefs.days.toString();
       this.nextFilter = effectiveProgressFilter(this.progressPrefs);
       this.reloadProgressFlags();
@@ -2356,18 +2360,37 @@ struct Index {
   }
 
   private async changeMediaIntent(item: Media, domain: string, value: string): Promise<void> {
-    if (!this.ready || this.saving || this.cloudBusy || this.syncBusy || !this.canEditLibrary()) { return; }
+    if (!this.ready || this.saving || this.cloudBusy || this.syncBusy || !this.canEditLibrary() ||
+        (domain === 'movie' && this.progressPrefsBusy)) { return; }
+    const pinScope = this.currentProgressScope();
+    const movieEdit = domain === 'movie' && item.kind === 'movie';
+    if (movieEdit) { this.progressPrefsBusy = true; }
     try {
       const edit = titleEdit(this.mediaRecords, item, domain, value);
       const saved = await this.persistMedia(edit.records, edit.changes);
       if (saved && domain === 'movie') {
+        await this.clearWatchedMoviePin(item, pinScope);
+        this.movieProgressPage = 1;
         this.movieUndo = value === 'no' && this.signedIn ? item : undefined;
         this.movieUndoStatus = '';
         if (this.movieUndo) { this.libraryNotice = '观看标记已撤销；同步历史移除需单独核对。'; }
       }
     } catch (error) {
       this.libraryStatus = '本机状态校验失败，未保存。';
+    } finally {
+      if (movieEdit) { this.progressPrefsBusy = false; this.reloadProgressFlags(); }
     }
+  }
+
+  private async clearWatchedMoviePin(item: Media, scope: string): Promise<void> {
+    const settings = this.settings;
+    if (!settings || !scope || scope !== this.currentProgressScope() || scope !== this.progressFlagScope ||
+        !this.progressFlag(item)?.pinned) { return; }
+    try {
+      const flags = clearMoviePin(this.progressFlags, item.id);
+      await settings.saveProgressFlags(scope, flags);
+      if (scope === this.currentProgressScope()) { this.progressFlags = flags; }
+    } catch (error) { this.progressOptionStatus = '观看状态已保存，但取消置顶失败，请重试。'; }
   }
 
   private async joinFollowed(item: Media): Promise<void> {
@@ -2454,6 +2477,7 @@ struct Index {
           .onClick(() => { this.changeMediaIntent(item, 'movie',
             this.personalLibrary().find((row: PersonalLibraryRow) => row.media.id === item.id)?.watched ? 'no' : 'yes'); })
       }
+      if (item.kind === 'movie') { this.showProgressActions(item) }
       if (item.kind === 'show') {
         Text(this.isFollowed(item) ? '追剧中' : '未加入追剧').fontSize(14).width('100%')
         this.showProgressActions(item)
@@ -2985,7 +3009,7 @@ struct Index {
     if (!settings || !scope || scope !== this.progressFlagScope || this.progressPrefsBusy ||
         !this.canEditLibrary() || this.localBusy || this.cloudBusy || this.syncBusy || this.saving ||
         this.authBusy || this.setupBusy || this.backupBusy || !this.pageVisible ||
-        item.kind !== 'show' || !isTraktMedia(item) || (kind !== 'pin' && kind !== 'hold')) { return; }
+        !isTraktMedia(item) || (kind !== 'pin' && kind !== 'hold') || (item.kind === 'movie' && kind !== 'pin')) { return; }
     this.progressPrefsBusy = true;
     try {
       const flags = toggleProgressFlag(this.progressFlags, id, kind);
@@ -2993,6 +3017,7 @@ struct Index {
       if (this.currentProgressScope() !== scope) { return; }
       this.progressFlags = flags;
       this.nextPage = 1;
+      this.movieProgressPage = 1;
       this.progressOptionStatus = '';
     } catch (error) { this.progressOptionStatus = '设置保存失败，请重试。'; }
     finally { this.progressPrefsBusy = false; this.reloadProgressFlags(); }
@@ -3316,7 +3341,7 @@ struct Index {
 
   @Builder
   showProgressActions(item: Media) {
-    if (item.kind === 'show' && isTraktMedia(item)) {
+    if (isTraktMedia(item)) {
       Column({ space: 4 }) {
         Button(this.progressMenuId === item.id ? '收起操作' :
           this.progressFlag(item)?.held ? '更多 · 暂缓中' : this.progressFlag(item)?.pinned ? '更多 · 置顶' : '更多')
@@ -3326,9 +3351,11 @@ struct Index {
             Button(this.progressFlag(item)?.pinned ? '取消置顶' : '置顶').layoutWeight(1).fontSize(12)
               .enabled(this.canEditLibrary() && !this.progressPrefsBusy && !!this.progressFlagScope && !this.localBusy && !this.cloudBusy && !this.syncBusy)
               .onClick(() => { this.editProgressFlag(item, 'pin'); })
-            Button(this.progressFlag(item)?.held ? '取消「暂缓」' : '设为「暂缓中」').layoutWeight(1).fontSize(12)
-              .enabled(this.canEditLibrary() && !this.progressPrefsBusy && !!this.progressFlagScope && !this.localBusy && !this.cloudBusy && !this.syncBusy)
-              .onClick(() => { this.editProgressFlag(item, 'hold'); })
+            if (item.kind === 'show') {
+              Button(this.progressFlag(item)?.held ? '取消「暂缓」' : '设为「暂缓中」').layoutWeight(1).fontSize(12)
+                .enabled(this.canEditLibrary() && !this.progressPrefsBusy && !!this.progressFlagScope && !this.localBusy && !this.cloudBusy && !this.syncBusy)
+                .onClick(() => { this.editProgressFlag(item, 'hold'); })
+            }
           }.width('100%')
         }
       }.width('100%')
@@ -3454,9 +3481,12 @@ struct Index {
       const date = await readPersonalMovieDate(session, row.media);
       if (revision !== this.calendarRevision || !this.movieCalendarCurrent() || this.movieCalendarData !== snapshot) { return; }
       const movies = snapshot.movies.filter((item: PersonalMovie) => item.media.id !== row.media.id);
+      const prior = snapshot.movies.find((item: PersonalMovie) => item.media.id === row.media.id);
       movies.push({ media: row.media, released: date, cloudWatched: row.cloudWatched,
-        cloudWatchlist: row.cloudWatchlist, localOnly: row.localOnly });
-      this.movieCalendarData = { generation: snapshot.generation, activity: snapshot.activity, movies: movies };
+        cloudWatchlist: row.cloudWatchlist, localOnly: !date && (prior?.localOnly ?? true), runtime: prior?.runtime,
+        rating: prior?.rating, addedAt: prior?.addedAt, userRating: prior?.userRating, dateUncertain: !date && prior?.dateUncertain === true });
+      this.movieCalendarData = { generation: snapshot.generation, activity: snapshot.activity, movies: movies,
+        ratingsComplete: snapshot.ratingsComplete };
       this.calendarPage = 1;
       this.calendarStatus = date ? '已补查到 ' + row.media.title + ' 的上映日期：' + date + '。' :
         'Trakt 仍未提供该电影的有效上映日期。';
@@ -3587,18 +3617,65 @@ struct Index {
   }
 
   private movieProgressRows(query: string = this.movieProgressQuery): PersonalLibraryRow[] {
-    const dates: MovieDate[] = this.movieCalendarCurrent() ? (this.movieCalendarData?.movies ?? [])
-      .map((row: PersonalMovie): MovieDate => ({ id: row.media.id, released: row.released })) : [];
-    return releasedWatchlist(this.personalLibrary(), dates, localDay(new Date()))
-      .filter((row: PersonalLibraryRow) => this.matchesMedia(row.media, query))
-      .sort((a: PersonalLibraryRow, b: PersonalLibraryRow) => compareTitles(this.displayTitle(a.media), this.displayTitle(b.media), this.presentationLanguage));
+    // Missing snapshot is not evidence of a missing release date.
+    if (!this.movieCalendarCurrent()) { return []; }
+    const metadata = new Map<string, PersonalMovie>();
+    for (const movie of this.movieCalendarData?.movies ?? []) { metadata.set(movie.media.id, movie); }
+    const sources: MovieProgressSource[] = [];
+    for (const row of this.personalLibrary()) {
+      const movie = metadata.get(row.media.id);
+      if (!movie || movie.localOnly || movie.dateUncertain || row.media.kind !== 'movie') { continue; }
+      const translation = this.presentationLanguage === 'zh' ?
+        this.presentationTitles.find((item: TitlePresentation) => item.id === row.media.id)?.text.title ?? '' : '';
+      sources.push({ row: row, translation: translation,
+        metadata: { id: row.media.id, released: movie.released, year: movie.media.year,
+          runtime: movie.runtime, rating: movie.rating, addedAt: movie.addedAt, userRating: movie.userRating } });
+    }
+    const flags = this.progressFlagScope === this.currentProgressScope() ? this.progressFlags : [];
+    return projectMovieProgress(sources, flags, this.movieProgressOptions, new Date().toISOString().substring(0, 10),
+      query, this.movieRandomSeed);
+  }
+
+  private async setMovieProgressSort(sort: string, descending: boolean): Promise<void> {
+    const settings = this.settings;
+    const options: MovieProgressOptions = { sort: sort, descending: descending };
+    if (!settings || this.progressPrefsBusy || !validMovieProgress(options)) { return; }
+    this.progressPrefsBusy = true;
+    try {
+      await settings.saveMovieProgress(options);
+      this.movieProgressOptions = options;
+      this.movieRandomSeed = Date.now();
+      this.movieProgressPage = 1;
+      this.progressOptionStatus = '';
+      this.requestPresentation();
+    } catch (error) { this.progressOptionStatus = '电影排序保存失败。'; }
+    finally { this.progressPrefsBusy = false; this.reloadProgressFlags(); }
+  }
+
+  private async markMovieProgress(item: Media): Promise<void> {
+    if (!this.pageVisible || this.tab !== 'progress' || this.mediaMode !== 'movie' ||
+        this.progressMode !== 'next' || this.selectedMedia || this.authBusy || this.setupBusy ||
+        this.backupBusy || this.localBusy || this.calendarBusy || this.progressPrefsBusy ||
+        !this.canEditLibrary() || !this.activeCloud()) { return; }
+    const row = this.movieProgressRows('').find((candidate: PersonalLibraryRow) => candidate.media.id === item.id);
+    if (!row) { return; }
+    await this.changeMediaIntent(row.media, 'movie', 'yes');
+  }
+
+  @Builder
+  movieSortButton(label: string, sort: string) {
+    Button(label).fontSize(12).layoutWeight(1)
+      .backgroundColor(this.movieProgressOptions.sort === sort ? $r('app.color.showly_accent') : $r('app.color.showly_muted_surface'))
+      .fontColor(this.movieProgressOptions.sort === sort ? $r('app.color.showly_on_accent') : $r('app.color.showly_text'))
+      .enabled(!this.progressPrefsBusy)
+      .onClick(() => { this.setMovieProgressSort(sort, this.movieProgressOptions.descending); })
   }
 
   @Builder
   movieProgressView() {
     Column({ space: 10 }) {
       this.librarySyncNotice()
-      Text('已上映、尚未观看的待看电影').fontSize(13).width('100%')
+      Text('已上映或仅有年份、尚未观看的待看电影').fontSize(13).width('100%')
       if (!this.signedIn) {
         Text('连接 Trakt 后可获取电影上映日期。待看电影仍可在收藏中管理。').fontSize(13).width('100%')
         Button('连接 Trakt').onClick(() => { this.navigate('account'); })
@@ -3609,20 +3686,42 @@ struct Index {
         if (this.calendarStatus) { Text(this.calendarStatus).fontSize(12).width('100%') }
         TextInput({ placeholder: '筛选电影', text: this.movieProgressQuery })
           .onChange((value: string) => { this.movieProgressQuery = value; this.movieProgressPage = 1; })
+        Row({ space: 4 }) {
+          this.movieSortButton('添加时间', 'added')
+          this.movieSortButton('片名', 'title')
+          this.movieSortButton('上映日期', 'newest')
+        }.width('100%')
+        Row({ space: 4 }) {
+          this.movieSortButton('时长', 'runtime')
+          this.movieSortButton('公众评分', 'rating')
+          this.movieSortButton('个人评分', 'userRating')
+          this.movieSortButton('随机', 'random')
+        }.width('100%')
+        Button(this.movieProgressOptions.descending ? '降序' : '升序').fontSize(12)
+          .enabled(!this.progressPrefsBusy)
+          .onClick(() => { this.setMovieProgressSort(this.movieProgressOptions.sort, !this.movieProgressOptions.descending); })
+        if (this.progressOptionStatus) { Text(this.progressOptionStatus).fontSize(12).width('100%') }
         if (!this.movieCalendarCurrent()) {
           Text('上映资料尚未就绪，请刷新。').fontSize(13).width('100%')
         } else {
+          if (this.movieCalendarData?.ratingsComplete !== true) {
+            Text('个人评分未完整读取；保留其他排序及观看功能。').fontSize(12).width('100%')
+          }
           if (!this.movieProgressRows().length) {
-            Text('暂无已确认上映的待看电影。日期未知的电影仍保留在待看。').fontSize(13).width('100%')
+            Text('暂无符合上映日期或年份条件的待看电影。').fontSize(13).width('100%')
           }
           ForEach(this.movieProgressRows().slice((this.movieProgressPage - 1) * this.collectionPageSize,
             this.movieProgressPage * this.collectionPageSize), (row: PersonalLibraryRow) => {
             Row({ space: 8 }) {
               this.posterImage(row.media, 54, 81)
-              Text(this.displayTitle(row.media)).layoutWeight(1).onClick(() => { this.openDetail(row.media); })
+              Column({ space: 4 }) {
+                Text(this.displayTitle(row.media)).width('100%').onClick(() => { this.openDetail(row.media); })
+                this.showProgressActions(row.media)
+              }.layoutWeight(1)
               Button('标记已看').fontSize(12)
-                .enabled(this.canEditLibrary() && this.ready && !this.saving && !this.cloudBusy && !this.syncBusy)
-                .onClick(() => { this.changeMediaIntent(row.media, 'movie', 'yes'); })
+                .enabled(this.canEditLibrary() && this.ready && !this.saving && !this.cloudBusy && !this.syncBusy &&
+                  !this.calendarBusy && !this.progressPrefsBusy)
+                .onClick(() => { this.markMovieProgress(row.media); })
             }.width('100%').padding(10).borderRadius(10).backgroundColor($r('app.color.showly_surface'))
           }, (row: PersonalLibraryRow) => row.media.id + ':' + this.artwork(row.media) + ':' + this.displayTitle(row.media))
           Row({ space: 8 }) {

@@ -10,6 +10,8 @@ interface Title {
   title: string;
   year?: number;
   released?: string;
+  runtime?: number;
+  rating?: number;
   ids: Ids;
 }
 interface Episode {
@@ -22,6 +24,8 @@ interface Season {
   episodes: Episode[];
 }
 interface SyncItem {
+  listed_at?: string;
+  rating?: number;
   plays?: number;
   last_watched_at?: string;
   last_updated_at?: string;
@@ -253,11 +257,17 @@ export interface PersonalMovie {
   cloudWatched: boolean;
   cloudWatchlist: boolean;
   localOnly: boolean;
+  runtime?: number;
+  rating?: number;
+  addedAt?: number;
+  userRating?: number;
+  dateUncertain?: boolean;
 }
 export interface PersonalMovieSnapshot {
   generation: number;
   activity: string;
   movies: PersonalMovie[];
+  ratingsComplete?: boolean;
 }
 
 // Release dates are calendar dates, not UTC instants. Reject rollover dates.
@@ -277,9 +287,17 @@ function appendPersonalMovies(target: Map<string, PersonalMovie>, rows: SyncItem
     const date = validReleaseDate(row.movie?.released);
     // Conflicting nonempty dates are not silently arbitrated.
     const released = prior && prior.released && date && prior.released !== date ? '' : (date || prior?.released || '');
+    const uncertain = !!prior?.dateUncertain || (!!row.movie?.released && !date) ||
+      (!!prior?.released && !!date && prior.released !== date);
+    const runtime = row.movie?.runtime;
+    const rating = row.movie?.rating;
+    const added = !watched && typeof row.listed_at === 'string' ? Date.parse(row.listed_at) : NaN;
     const item: PersonalMovie = { media: prior?.media ?? media, released: released,
       cloudWatched: watched || (prior?.cloudWatched ?? false),
-      cloudWatchlist: !watched || (prior?.cloudWatchlist ?? false), localOnly: false };
+      cloudWatchlist: !watched || (prior?.cloudWatchlist ?? false), localOnly: false,
+      runtime: typeof runtime === 'number' && Number.isFinite(runtime) && runtime >= 0 ? runtime : prior?.runtime,
+      rating: typeof rating === 'number' && Number.isFinite(rating) && rating >= 0 && rating <= 10 ? rating : prior?.rating,
+      addedAt: Number.isFinite(added) ? added : prior?.addedAt, dateUncertain: uncertain };
     target.set(media.id, item);
   }
 }
@@ -294,7 +312,25 @@ export async function readPersonalMovies(session: TraktSession): Promise<Persona
   const after = await readActivity(session);
   ensureCurrent(session);
   if (before !== after) { throw new Error('Library changed while reading; retry'); }
-  return { generation: session.generation, activity: after, movies: Array.from(movies.values()) };
+  // Preserve the already verified movie snapshot if optional ratings fail.
+  // No follow-up request after a failed read; never fabricate a rating.
+  let ratingsComplete = false;
+  try {
+    const ratings = await readAll(session, 'sync/ratings/movies');
+    const values = new Map<string, number>();
+    for (const row of ratings) {
+      const media = titleToMedia(row, 'movie', false);
+      if (typeof row.rating !== 'number' || !Number.isInteger(row.rating) ||
+          row.rating < 1 || row.rating > 10 || values.has(media.id)) { throw new Error('Invalid movie rating'); }
+      values.set(media.id, row.rating);
+    }
+    if (await readActivity(session) === after) {
+      for (const movie of movies.values()) { movie.userRating = values.get(movie.media.id); }
+      ratingsComplete = true;
+    }
+  } catch (error) { ensureCurrent(session); }
+  ensureCurrent(session);
+  return { generation: session.generation, activity: after, movies: Array.from(movies.values()), ratingsComplete: ratingsComplete };
 }
 
 // A single explicit lookup for metadata omitted by an embedded list object.
