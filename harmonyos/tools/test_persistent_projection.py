@@ -87,3 +87,6 @@ for builder,ds in [("nextShowsView","showRows"),("movieProgressView","movieRowsS
 assert "this.markNext(row)" in page and "this.markMovieProgress(row.media)" in page
 assert "this.cancelCatalogRepair()" in page and "this.showRows.replace([], [], [])" in page
 print("Persistent cache, foreground repair and native lazy-list wiring assertions passed")
+
+assert "Refresh({ refreshing: $$this.refreshing })" in page
+assert "Refresh({ refreshing: $this.refreshing })" not in page

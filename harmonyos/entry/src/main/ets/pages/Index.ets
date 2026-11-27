@@ -4727,7 +4727,7 @@ struct Index {
         this.mediaModeTabs()
         if (this.modeStatus) { Text(this.modeStatus).fontSize(12).width('100%') }
       }
-      Refresh({ refreshing: $this.refreshing }) {
+      Refresh({ refreshing: $$this.refreshing }) {
         if (!this.selectedMedia && this.tab === 'progress' && this.progressMode === 'next') {
           if (this.mediaMode === 'movie') { this.movieProgressView() }
           else { this.nextShowsView() }
