@@ -1,3 +1,4 @@
+import { SeasonSlice } from '../model/DetailSession';
 import { ReadCancel, ConsumerReadFlight } from '../model/ReadFlight';
 import { relationalStore } from '@kit.ArkData';
 import { common } from '@kit.AbilityKit';
@@ -75,7 +76,7 @@ export interface LocalEpisodeState {
   episode: LocalEpisode;
   watched: boolean;
 }
-export interface LocalSeasonState {
+export interface LocalSeasonState extends SeasonSlice<LocalEpisodeState> {
   number: number;
   episodes: LocalEpisodeState[];
   completed: number;
@@ -273,7 +274,7 @@ export class EpisodeStore {
 
   // Account/domain isolation; one validated JSON map per domain. No restored
   // backup, unknown local default, or pending mutation is a common baseline.
-  async commonStates(uuid: string, domain: string): Promise<Map<string, CommonEntry>> {
+  async commonStates(uuid: string, domain: string, scopeIds?: Set<number>): Promise<Map<string, CommonEntry>> {
     if (!uuid || await this.boundAccount() !== uuid || domain !== 'episode') { throw new Error('Invalid baseline scope'); }
     const rows = await this.queryRead('SELECT payload FROM sync_common_state WHERE account_uuid=? AND domain=?', [uuid, domain]);
     const result: Map<string, CommonEntry> = new Map<string, CommonEntry>();
@@ -281,11 +282,13 @@ export class EpisodeStore {
       if (!rows.goToFirstRow()) { return result; }
       const entries = JSON.parse(rows.getString(0)) as CommonEntry[];
       if (!Array.isArray(entries)) { throw new Error('Invalid common baseline'); }
+      const seen=new Set<string>();
       for (const entry of entries) {
         if (!entry || typeof entry.id !== 'string' || !commonId(domain, entry.id) ||
             typeof entry.value !== 'boolean' || typeof entry.activity !== 'string' || !entry.activity ||
-            result.has(entry.id)) { throw new Error('Invalid common baseline entry'); }
-        result.set(entry.id, entry);
+            seen.has(entry.id)) { throw new Error('Invalid common baseline entry'); }
+        seen.add(entry.id);
+        if (!scopeIds || scopeIds.has(Number(entry.id))) { result.set(entry.id, entry); }
       }
       return result;
     } finally { rows.close(); }
@@ -308,6 +311,7 @@ export class EpisodeStore {
     const payload = JSON.stringify(Array.from(entries.values()));
     await this.db.executeSql('INSERT OR REPLACE INTO sync_common_state(account_uuid,domain,payload) VALUES(?,?,?)',
       [uuid, domain, payload]);
+    this.projectionRevision++;
     const verified = await this.commonStates(uuid, domain);
     if (JSON.stringify(Array.from(verified.values())) !== payload) { throw new Error('Baseline verification failed'); }
     return updates.length;
@@ -502,6 +506,7 @@ export class EpisodeStore {
     }
     await this.db.executeSql('INSERT OR REPLACE INTO episode_schedule(show_id,payload) VALUES(?,?)',
       [full.media.id, JSON.stringify(full)]);
+    this.projectionRevision++;
   }
 
   async readRemoteObservation(uuid: string): Promise<RemoteLibraryObservation | undefined> {
@@ -522,7 +527,7 @@ export class EpisodeStore {
       [uuid, JSON.stringify(snapshot)]);
   }
 
-  async readCheckpoints(uuid: string): Promise<Map<number, ReadCheckpoint>> {
+  async readCheckpoints(uuid: string, scopeIds?: Set<number>): Promise<Map<number, ReadCheckpoint>> {
     if (!uuid || await this.boundAccount() !== uuid) { throw new Error('Invalid read checkpoint scope'); }
     const result: Map<number, ReadCheckpoint> = new Map<number, ReadCheckpoint>();
     const rows = await this.queryRead('SELECT payload FROM episode_read_checkpoint WHERE account_uuid=?', [uuid]);
@@ -530,10 +535,12 @@ export class EpisodeStore {
       if (!rows.goToFirstRow()) { return result; }
       const entries = JSON.parse(rows.getString(0)) as ReadCheckpoint[];
       if (!Array.isArray(entries)) { throw new Error('Invalid read checkpoints'); }
+      const seen=new Set<number>();
       for (const entry of entries) {
         if (!entry || !validId(entry.id) || !validId(entry.seq) ||
-            typeof entry.watched !== 'boolean' || result.has(entry.id)) { throw new Error('Invalid read checkpoint'); }
-        result.set(entry.id, entry);
+            typeof entry.watched !== 'boolean' || seen.has(entry.id)) { throw new Error('Invalid read checkpoint'); }
+        seen.add(entry.id);
+        if (!scopeIds || scopeIds.has(entry.id)) { result.set(entry.id, entry); }
       }
       return result;
     } finally { rows.close(); }
@@ -554,6 +561,7 @@ export class EpisodeStore {
     }
     await this.db.executeSql('INSERT OR REPLACE INTO episode_read_checkpoint(account_uuid,payload) VALUES(?,?)',
       [uuid, JSON.stringify(Array.from(entries.values()))]);
+    this.projectionRevision++;
   }
 
   async saveFullCatalog(full: FullEpisodeCatalog): Promise<void> {
@@ -570,6 +578,8 @@ export class EpisodeStore {
     } catch (error) {
       this.db.rollBack();
       throw new Error('Catalog refresh failed; previous data retained');
+    } finally {
+      this.projectionRevision++;
     }
   }
 
@@ -622,6 +632,7 @@ export class EpisodeStore {
     const authorized = watched && consent?.uuid === autoUuid && await this.boundAccount() === autoUuid ? autoUuid : '';
     await this.db.executeSql('INSERT INTO episode_event(show_id,episode_ids,watched,changed_at,auto_uuid) VALUES(?,?,?,?,?)',
       [showId, JSON.stringify(Array.from(unique)), watched ? 1 : 0, Date.now(), authorized]);
+    this.projectionRevision++;
   }
 
   async boundAccount(): Promise<string> {
@@ -814,10 +825,14 @@ export class EpisodeStore {
     return result;
   }
 
-  async journalIntents(): Promise<JournalIntent[]> {
-    const rows = await this.queryRead('SELECT e.show_id,e.episode_ids,e.watched,c.catalog,e.seq,e.auto_uuid,e.changed_at FROM episode_event e LEFT JOIN episode_catalog c ON c.show_id=e.show_id ORDER BY e.seq');
+  async journalIntents(showScope?: string): Promise<JournalIntent[]> {
+    if (showScope !== undefined && !/^show:[1-9][0-9]*$/.test(showScope)) { throw new Error('Invalid journal show scope'); }
+    const sql='SELECT e.show_id,e.episode_ids,e.watched,c.catalog,e.seq,e.auto_uuid,e.changed_at FROM episode_event e LEFT JOIN episode_catalog c ON c.show_id=e.show_id';
+    const rows = showScope === undefined ? await this.queryRead(sql+' ORDER BY e.seq') :
+      await this.queryRead(sql+' WHERE e.show_id=? ORDER BY e.seq',[showScope]);
     const latest: Map<number, JournalIntent> = new Map<number, JournalIntent>();
     const catalogs: Map<string, EpisodeCatalog> = new Map<string, EpisodeCatalog>();
+    const episodeIndexes: Map<string,Map<number,LocalEpisode>>=new Map<string,Map<number,LocalEpisode>>();
     try {
       while (rows.goToNextRow()) {
         const showId = rows.getString(0);
@@ -831,6 +846,9 @@ export class EpisodeStore {
           catalog = JSON.parse(rows.getString(3)) as EpisodeCatalog;
           validateCatalog(catalog, showId);
           catalogs.set(showId, catalog);
+          const index=new Map<number,LocalEpisode>();
+          for (const ep of catalog.episodes) { index.set(ep.id,ep); }
+          episodeIndexes.set(showId,index);
         }
         const seq = rows.getLong(4);
         const autoUuid = rows.getString(5);
@@ -839,7 +857,7 @@ export class EpisodeStore {
         for (const id of ids) {
           const prior = latest.get(id);
           if (prior && prior.showId !== showId) { throw new Error('Conflicting episode identity'); }
-          const episode = catalog?.episodes.find((ep: LocalEpisode) => ep.id === id);
+          const episode = episodeIndexes.get(showId)?.get(id);
           latest.set(id, { seq: seq, autoUuid: autoUuid, changedAt: changedAt, episodeId: id, showId: showId, watched: watched === 1,
             catalogKnown: !!episode, label: episode ?
               (catalog?.title ?? showId) + ' · S' + episode.season + 'E' + episode.number :

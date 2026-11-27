@@ -8,7 +8,7 @@ import { computeProjectionBatchTask } from './ProjectionTask';
 import { MediaRecord } from '../model/MediaState';
 import { LibraryShowEvidence, PersonalLibraryRow, buildPersonalLibrary, hasTrackingEvidence } from '../model/PersonalLibrary';
 import { RemoteLibraryObservation, RemoteShowObservation, RemotePlayPosition } from '../model/RemoteObservation';
-import { FullEpisodeCatalog, scheduleEpisodes } from '../model/ShowCatalog';
+import { FullEpisodeCatalog, ScheduledEpisode, scheduleEpisodes } from '../model/ShowCatalog';
 import { CommonEntry } from '../model/ThreeWay';
 import { NextShow, projectShow } from './NextShows';
 import { TimedDecision } from '../model/ProgressRules';
@@ -273,7 +273,7 @@ export interface DetailProjection {
 // The very same resolver as collection. Public schedule is sufficient to
 // render aired episodes; never save it into the eligible catalog on read.
 export async function projectDetail(store: EpisodeStore, full: FullEpisodeCatalog | undefined,
-  showId: string, cloud: RemoteLibraryObservation | undefined, uuid: string): Promise<DetailProjection> {
+  showId: string, cloud: RemoteLibraryObservation | undefined, uuid: string, displayOnly: boolean = false): Promise<DetailProjection> {
   const bound = await store.boundAccount();
   const localAllowed = allowLocalScope(!!cloud, bound, uuid);
   const local = localAllowed ? await store.read(showId) : undefined;
@@ -284,13 +284,16 @@ export async function projectDetail(store: EpisodeStore, full: FullEpisodeCatalo
   for (const season of local?.seasons ?? []) {
     for (const episode of season.episodes) { if (episode.watched) { localIds.push(episode.episode.id); } }
   }
-  const intents = localAllowed ? await store.journalIntents() : [];
+  // Scoped reads are only for display; mutation/sync verification retains the global identity check.
+  const intents = localAllowed ? (displayOnly ? await store.journalIntents(showId) : await store.journalIntents()) : [];
   const decisions = intents.filter((intent: JournalIntent) => intent.showId === showId)
     .map((intent: JournalIntent): ReadDecision => {
       return { episodeId: intent.episodeId, watched: intent.watched, seq: intent.seq };
     });
-  const checkpoints = cloud && localAllowed ? await store.readCheckpoints(uuid) : new Map<number, ReadCheckpoint>();
-  const common = cloud && localAllowed ? await store.commonStates(uuid, 'episode') : new Map<string, CommonEntry>();
+  // Validate the whole persisted account payload, materialize only relevant entries.
+  const ids=displayOnly ? new Set<number>(scheduleEpisodes(full).map((ep: ScheduledEpisode)=>ep.id)) : undefined;
+  const checkpoints = cloud && localAllowed ? await store.readCheckpoints(uuid,ids) : new Map<number, ReadCheckpoint>();
+  const common = cloud && localAllowed ? await store.commonStates(uuid, 'episode',ids) : new Map<string, CommonEntry>();
   const remote = cloud?.shows.find((show: RemoteShowObservation) => show.id === showId);
   const effective = resolveEpisodes(full, remote, !!cloud, localIds, decisions, checkpoints, common);
   return { state: effective.complete ? materializeEffective(eligibleCatalog(full, Date.now()), effective.ids) : undefined,

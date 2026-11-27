@@ -36,12 +36,16 @@ function count(value: number): boolean {
   return Number.isSafeInteger(value) && value >= 0;
 }
 
-export async function readSeriesProgress(item: Media, session: TraktSession): Promise<SeriesProgress> {
+export async function readSeriesProgress(item: Media, session: TraktSession, scope?: ReadCancel): Promise<SeriesProgress> {
   if (item.kind !== 'show' || !canReadDetails(item) ||
       !traktAuth.isCurrent(session.clientId, session.generation)) {
     throw new Error('Invalid show or session');
   }
+  scope?.check();
   const request = http.createHttp();
+  let closed=false;
+  const close=(): void=>{ if (!closed) { closed=true; request.destroy(); } };
+  scope?.subscribe(close);
   try {
     const response = await request.request('https://api.trakt.tv/shows/' + item.id.substring(5) +
       '/progress/watched?hidden=false&specials=false&count_specials=false', {
@@ -50,6 +54,7 @@ export async function readSeriesProgress(item: Media, session: TraktSession): Pr
         'trakt-api-key': session.clientId, 'Authorization': 'Bearer ' + session.token },
       expectDataType: http.HttpDataType.STRING
     });
+    scope?.check();
     if (!traktAuth.isCurrent(session.clientId, session.generation) ||
         response.responseCode !== 200 || typeof response.result !== 'string') {
       throw new Error('Progress HTTP ' + response.responseCode);
@@ -77,7 +82,7 @@ export async function readSeriesProgress(item: Media, session: TraktSession): Pr
     }
     return data;
   } finally {
-    request.destroy();
+    scope?.unsubscribe(close); close();
   }
 }
 

@@ -1,3 +1,5 @@
+import { DetailSession, SeasonSummary, summarizeSeasons } from '../model/DetailSession';
+import { DetailEpisodeList, EpisodeDisplayRow } from './DetailEpisodeList';
 import { ListDiffInput } from '../model/ListDiff';
 import { FrameCallback, LengthMetrics } from '@kit.ArkUI';
 import { ScrollRows, ScrollAnchor, ScrollAnchors, captureAnchor, resolveAnchor } from '../model/ScrollAnchor';
@@ -140,7 +142,14 @@ struct Index {
   private candidateRuns: number = 0;
   private cacheLifecycle: CacheLifecycle=new CacheLifecycle();
   private searchConsumer: ReadCancel=new ReadCancel();
-  private detailConsumer: ReadCancel=new ReadCancel();
+  private detailSession: DetailSession<FullEpisodeCatalog>=new DetailSession<FullEpisodeCatalog>();
+  private detailConsumer: ReadCancel=this.detailSession.consumer();
+  private detailResumePending: boolean=false;
+  private detailScroller: Scroller=new Scroller();
+  private detailScrollOffset: number=0;
+  @State episodePage: boolean=false;
+  @State episodeRows: EpisodeDisplayRow[]=[];
+  @State seasonSummaries: SeasonSummary[]=[];
   private discoverConsumer: ReadCancel=new ReadCancel();
   private searchLocalConsumer: ReadCancel=new ReadCancel();
   private lazyConsumer: ReadCancel=new ReadCancel();
@@ -454,6 +463,7 @@ struct Index {
     this.pageVisible = true;
     this.updateCacheLifecycle();
     this.updateSearchContext();
+    this.resumeDetail();
     if (this.tab === 'discover' && !this.selectedMedia) { this.loadDiscover(this.discoverPage); }
     this.requestPresentation();
     this.startNetworkListener();
@@ -471,6 +481,7 @@ struct Index {
 
   onPageHide(): void {
     this.pageVisible = false;
+    this.pauseDetail();
     this.updateCacheLifecycle();
     this.cancelCandidateWake();
     this.updateSearchContext();
@@ -493,6 +504,7 @@ struct Index {
     if (this.memorySubscribed) { memoryEvents.unsubscribe(this.memoryListener); this.memorySubscribed=false; }
     if (this.memoryTimer>=0) { clearTimeout(this.memoryTimer); this.memoryTimer=-1; this.memoryPending=false; }
     this.pageVisible = false;
+    this.pauseDetail();
     this.updateCacheLifecycle();
     this.cancelCandidateWake();
     this.updateSearchContext();
@@ -655,6 +667,7 @@ struct Index {
   private onRecoveryGateChanged(): void {
     if (this.backupBusy || !this.pageVisible || this.syncBusy || this.localBusy || this.cloudBusy || this.saving ||
         this.authBusy || this.setupBusy) { return; }
+    if (this.detailResumePending && this.selectedMedia) { this.resumeDetail(); if (this.localBusy) { return; } }
     if (this.recoveryPending && this.autoActive() && this.episodeReady) {
       this.recoveryPending = false;
       this.resumeQueued();
@@ -878,30 +891,37 @@ struct Index {
     if (!store || !this.episodeReady || this.localBusy || this.cloudBusy || this.syncBusy || item.kind !== 'show') { return; }
     const revision = this.detailRevision;
     const clientId = this.clientId;
+    const scope=this.currentSearchAccount();
+    const token=this.detailSession.token();
+    const current=(): boolean=>this.pageVisible && revision===this.detailRevision && this.detailSession.current(token,scope,item.id) && this.currentSearchAccount()===scope;
     this.localBusy = true;
     this.localStatus = '正在读取分集…';
     try {
-      let full = await store.fullCatalog(item.id);
-      if (revision !== this.detailRevision) { return; }
+      const readRevision=store.readModelRevision();
+      let full = this.detailSession.read(scope,item.id,readRevision);
+      if (!full) { full=await store.fullCatalog(item.id); }
+      if (!current() || readRevision!==store.readModelRevision()) { return; }
+      if (full) { this.detailSession.remember(token,scope,item.id,readRevision,full); }
       this.fullSchedule = full;
       this.schedulePage = 1;
       if ((refresh || !full) && clientId) {
         full = await fetchFullEpisodeCatalog(item, clientId,this.detailConsumer);
-        if (revision !== this.detailRevision || this.clientId !== clientId) { return; }
+        if (!current() || this.clientId !== clientId) { return; }
         if (refresh && this.canEditLibrary()) {
           this.invalidateSync();
           await store.saveFullCatalog(full);
         } else {
           await store.saveObservedSchedule(full);
         }
-        if (revision !== this.detailRevision || this.clientId !== clientId) { return; }
+        if (!current() || this.clientId !== clientId) { return; }
+        this.detailSession.remember(token,scope,item.id,store.readModelRevision(),full);
         this.fullSchedule = full;
         this.invalidateNextShows();
         this.requestProjection();
       }
       await this.refreshEffectiveDetail();
     } catch (error) {
-      if (revision === this.detailRevision) {
+      if (current()) {
         try { await this.refreshEffectiveDetail(); } catch (failure) {}
         this.localStatus = '资料更新失败，已有记录保留。';
       }
@@ -922,32 +942,40 @@ struct Index {
   private async refreshEffectiveDetail(): Promise<void> {
     const store = this.episodeStore;
     const item = this.selectedMedia;
-    if (!store || !item || item.kind !== 'show') { return; }
+    if (!store || !item || item.kind !== 'show' || !this.pageVisible) { return; }
     const revision = this.detailRevision;
+    const scope=this.currentSearchAccount();
+    if (!this.detailSession.current(this.detailSession.token(),scope,item.id)) { this.detailSession.begin(scope,item.id); this.detailConsumer=this.detailSession.consumer(); }
+    const token=this.detailSession.token();
     const snapshot = this.activeCloud();
     const uuid = this.cloudUuid;
     if (this.signedIn && !snapshot) {
       this.localSeries = undefined;
+      this.episodeRows=[]; this.seasonSummaries=[];
       this.effectiveEditable = false;
       this.localStatus = '正在等待账户验证；暂不读取本机私有记录。';
       return;
     }
-    const full = await store.fullCatalog(item.id);
-    const result = await projectDetail(store, full, item.id, snapshot, uuid);
-    if (revision !== this.detailRevision || snapshot !== this.activeCloud() || uuid !== this.cloudUuid) { return; }
-    this.fullSchedule = full;
-    this.localSeries = result.state;
-    this.localCatalogNeedsVerification = result.localAllowed ? await store.needsCatalogVerification(item.id) : false;
-    if (revision !== this.detailRevision || snapshot !== this.activeCloud() || uuid !== this.cloudUuid) {
-      this.localSeries = undefined;
-      this.effectiveEditable = false;
-      return;
-    }
+    this.effectiveEditable=false;
+    const readRevision=store.readModelRevision();
+    const current=(): boolean=>this.pageVisible && revision===this.detailRevision && this.detailSession.current(token,scope,item.id) && scope===this.currentSearchAccount() && snapshot===this.activeCloud() && uuid===this.cloudUuid && readRevision===store.readModelRevision();
+    let full=this.detailSession.read(scope,item.id,readRevision);
+    if (!full) { full=await store.fullCatalog(item.id); }
+    if (!current()) { return; }
+    if (full) { this.detailSession.remember(token,scope,item.id,readRevision,full); }
+    const result=await projectDetail(store,full,item.id,snapshot,uuid,true);
+    const verify=result.localAllowed ? await store.needsCatalogVerification(item.id) : false;
+    if (!current()) { return; }
+    this.fullSchedule=full;
+    this.localSeries=result.state;
+    this.localCatalogNeedsVerification=verify;
     this.effectiveEditable = result.complete && result.localAllowed && this.canEditLibrary();
     if (result.state && result.state.seasons.length > 0 &&
         !result.state.seasons.some((season: LocalSeasonState) => season.number === this.localSeason)) {
       this.localSeason = result.state.seasons[0].number;
     }
+    this.seasonSummaries=summarizeSeasons<LocalEpisodeState>(result.state?.seasons??[]);
+    this.updateEpisodePageRows();
     this.localStatus = !result.complete ? '分集资料未齐，暂不允许修改；请刷新个人库或目录。' :
       !this.effectiveEditable ? '当前账户仅供浏览；本机库需明确绑定，不能跨账户修改。' :
       result.state ? '有效观看状态 · 本机操作仍使用原有同步保护' : '请联网获取分集目录';
@@ -983,7 +1011,11 @@ struct Index {
         }
         await store.saveFullCatalog(fresh);
       }
-      if (revision !== this.detailRevision || !this.canEditLibrary()) { return; }
+      const editSnapshot=this.activeCloud();
+      const editUuid=this.cloudUuid;
+      const editRevision=store.readModelRevision();
+      const evidence=await projectDetail(store,await store.fullCatalog(item.id),item.id,editSnapshot,editUuid);
+      if (revision !== this.detailRevision || !this.canEditLibrary() || editSnapshot!==this.activeCloud() || editUuid!==this.cloudUuid || editRevision!==store.readModelRevision() || !evidence.complete || !evidence.localAllowed) { return; }
       await store.mark(item.id, ids, watched, watched && auto ? auto.uuid : '');
       if (watched && (!previous || !hasTrackingEvidence(previous)) && previous?.localRecord?.followState !== 'no') {
         await this.recordFirstEpisodeDate(dateScope,item.id);
@@ -1067,51 +1099,63 @@ struct Index {
             Text(this.localSeries.next ? '下一集：' + this.localSeries.next : '当前目录已看完')
               .fontSize(14).width('100%')
           }
-          ForEach(this.localSeries.seasons, (season: LocalSeasonState) => {
-            Column({ space: 8 }) {
-              Button('第 ' + season.number + ' 季 · ' + season.completed + '/' + season.episodes.length +
-                (this.localSeason === season.number ? '  收起' : '  展开')).width('100%').fontSize(14)
-                .onClick(() => { this.localSeason = this.localSeason === season.number ? -1 : season.number; this.confirmSeason = -1; })
-              if (this.localSeason === season.number) {
-                Row({ space: 8 }) {
-                  Button('整季已看').layoutWeight(1).enabled(this.effectiveEditable && !this.cloudBusy && !this.localCatalogNeedsVerification && !this.localBusy && !this.syncBusy && season.completed < season.episodes.length)
-                    .onClick(() => { this.confirmSeason = season.number; this.confirmWatched = true; })
-                  Button('整季撤销').layoutWeight(1).enabled(this.effectiveEditable && !this.cloudBusy && !this.localCatalogNeedsVerification && !this.localBusy && !this.syncBusy && season.completed > 0)
-                    .onClick(() => { this.confirmSeason = season.number; this.confirmWatched = false; })
-                }.width('100%')
-                if (this.confirmSeason === season.number) {
-                  Text(this.confirmWatched ? '确认将本季已播集全部标记已看？' : '确认撤销本季已看状态？同步删除需单独确认。').fontSize(13)
-                  Row({ space: 8 }) {
-                    Button('取消').layoutWeight(1).onClick(() => { this.confirmSeason = -1; })
-                    Button('确认').layoutWeight(1).enabled(this.effectiveEditable && !this.cloudBusy && !this.localBusy && !this.syncBusy)
-                      .onClick(() => {
-                        this.markLocal(item, season.episodes.filter((ep: LocalEpisodeState) =>
-                          ep.watched !== this.confirmWatched).map((ep: LocalEpisodeState) => ep.episode.id), this.confirmWatched);
-                      })
-                  }.width('100%')
-                }
-                ForEach(season.episodes, (entry: LocalEpisodeState) => {
-                  Row({ space: 8 }) {
-                    Column({ space: 3 }) {
-                      Text('第 ' + entry.episode.number + ' 集').fontSize(14).width('100%')
-                      if (this.displayEpisode(item, season.number, entry.episode.id, entry.episode.title)) {
-                        Text(this.displayEpisode(item, season.number, entry.episode.id, entry.episode.title)).fontSize(12).maxLines(2).width('100%')
-                          .fontColor($r('app.color.showly_secondary'))
-                      }
-                    }.layoutWeight(1)
-                    Button(entry.watched ? '撤销已看' : '标记已看').fontSize(12).enabled(this.effectiveEditable && !this.cloudBusy && !this.localCatalogNeedsVerification && !this.localBusy && !this.syncBusy)
-                      .onClick(() => { this.markLocal(item, [entry.episode.id], !entry.watched); })
-                  }.width('100%')
-                }, (entry: LocalEpisodeState) => entry.episode.id + ':' + entry.watched + ':' + this.displayEpisode(item, season.number, entry.episode.id, entry.episode.title))
-              }
-            }.width('100%').padding(10).borderRadius(10).backgroundColor($r('app.color.showly_surface'))
-          }, (season: LocalSeasonState) => season.number + ':' + season.completed)
+          ForEach(this.seasonSummaries,(season: SeasonSummary)=>{
+            Button('第 '+season.number+' 季 · '+season.completed+'/'+season.count+'  ›')
+              .width('100%').fontSize(14).onClick(()=>{ this.openSeasonPage(season.number); })
+          },(season: SeasonSummary)=>season.number+':'+season.completed+':'+season.count)
         }
         if (this.extraSchedule().length > 0) { this.scheduleView() }
       }
     }.width('100%')
   }
 
+  private currentSeason(): LocalSeasonState | undefined {
+    return this.localSeries?.seasons.find((season: LocalSeasonState)=>season.number===this.localSeason);
+  }
+  private updateEpisodePageRows(): void {
+    if (!this.episodePage || !this.selectedMedia) { this.episodeRows=[]; return; }
+    const item=this.selectedMedia;
+    const season=this.currentSeason();
+    this.episodeRows=(season?.episodes??[]).map((entry: LocalEpisodeState): EpisodeDisplayRow=>({
+      id:entry.episode.id,number:entry.episode.number,watched:entry.watched,
+      title:this.displayEpisode(item,entry.episode.season,entry.episode.id,entry.episode.title)
+    }));
+  }
+  private openSeasonPage(season: number): void {
+    if (!this.selectedMedia || !this.localSeries?.seasons.some((row: LocalSeasonState)=>row.number===season)) { return; }
+    try { this.detailScrollOffset=this.detailScroller.currentOffset().yOffset; } catch (error) { this.detailScrollOffset=0; }
+    this.localSeason=season;
+    this.episodePage=true;
+    this.updateEpisodePageRows();
+    this.requestPresentation();
+  }
+  private closeSeasonPage(): void {
+    this.episodePage=false; this.episodeRows=[];
+    const revision=this.detailRevision;
+    const offset=this.detailScrollOffset;
+    this.getUIContext().postFrameCallback(new RestoreScrollFrame(()=>{
+      if (revision===this.detailRevision && this.selectedMedia && !this.episodePage) {
+        try { this.detailScroller.scrollTo({xOffset:0,yOffset:offset,animation:false}); } catch (error) {}
+      }
+    }));
+    this.requestPresentation();
+  }
+  private markSeasonPage(item: Media,watched: boolean,id: number=0): void {
+    if (!this.episodePage || this.selectedMedia?.id!==item.id || !this.pageVisible) { return; }
+    const ids=(this.currentSeason()?.episodes??[]).filter((entry: LocalEpisodeState)=>entry.watched!==watched && (!id || entry.episode.id===id))
+      .map((entry: LocalEpisodeState)=>entry.episode.id);
+    this.markLocal(item,ids,watched);
+  }
+  @Builder
+  episodeDetailPage(item: Media) {
+    DetailEpisodeList({rows:this.episodeRows,title:this.displayTitle(item),season:this.localSeason,
+      completed:this.currentSeason()?.completed??0,
+      editable:this.effectiveEditable && !this.localCatalogNeedsVerification && !this.cloudBusy && !this.syncBusy,
+      busy:this.localBusy,status:this.localStatus,onBack:()=>{this.closeSeasonPage();},
+      onToggle:(id: number,watched: boolean)=>{this.markSeasonPage(item,watched,id);},
+      onMarkSeason:(watched: boolean)=>{this.markSeasonPage(item,watched);}
+    })
+  }
   private async initializePresentation(context: common.UIAbilityContext): Promise<void> {
     try {
       this.presentation = await PresentationRepository.open(context);
@@ -1199,6 +1243,7 @@ struct Index {
       this.seasonKeys.set(seasonKey,Array.from(keys));
     }
     this.presentationRevision = revision;
+    if (this.episodePage && this.selectedMedia) { this.updateEpisodePageRows(); }
     if (priorTitles!==this.titleSortRevision) { this.refreshSearchLocal(); }
     // A localized sort or query can reveal a different page. One more pass
     // only after real cache changes converges to the newly visible artwork.
@@ -2886,6 +2931,9 @@ struct Index {
     this.movieUndo = undefined;
     this.movieUndoStatus = '';
     this.cloudLocalAllowed = false;
+    this.detailSession.clear(); this.detailConsumer=this.detailSession.consumer();
+    this.detailRevision++; this.detailResumePending=!!this.selectedMedia;
+    this.episodeRows=[]; this.seasonSummaries=[];
     this.localSeries = undefined;
     this.effectiveEditable = false;
     this.nextShows = [];
@@ -5260,7 +5308,8 @@ struct Index {
     this.presentationStatus = '';
     try {
       if (this.selectedMedia) {
-        await this.openDetail(this.selectedMedia, true);
+        if (this.episodePage) { await this.loadLocalEpisodes(this.selectedMedia,true); }
+        else { await this.openDetail(this.selectedMedia, true); }
       } else if (this.tab === 'discover') {
         await this.loadDiscover(this.discoverPage,true);
       } else if (this.tab === 'library') {
@@ -5829,15 +5878,18 @@ struct Index {
     }
     const revision = this.detailRevision;
     const clientId = this.clientId;
+    const consumer=this.detailConsumer;
     this.progressBusy = true;
     this.progress = undefined;
     this.seasonNumber = -1;
     this.progressStatus = '正在读取真实分集进度…';
     try {
       await traktAuth.restore(clientId, true);
+      consumer.check();
+      if (!this.pageVisible || revision!==this.detailRevision) { return; }
       const session = traktAuth.session(clientId);
       if (!session) { throw new Error('Sign in required'); }
-      const progress = await readSeriesProgress(item, session);
+      const progress = await readSeriesProgress(item, session,consumer);
       if (revision === this.detailRevision && this.clientId === clientId &&
           traktAuth.isCurrent(clientId, session.generation)) {
         this.progress = progress;
@@ -5849,7 +5901,7 @@ struct Index {
         this.progressStatus = '分集进度读取失败，请检查 Trakt 登录和网络。';
       }
     } finally {
-      this.progressBusy = false;
+      if (revision===this.detailRevision) { this.progressBusy = false; }
     }
   }
 
@@ -5897,8 +5949,29 @@ struct Index {
     }.width('100%')
   }
 
+  private pauseDetail(): void {
+    if (!this.selectedMedia) { return; }
+    this.detailResumePending=true;
+    this.detailSession.clear(); this.detailConsumer=this.detailSession.consumer();
+    this.detailRevision++; this.detailBusy=false;
+    this.effectiveEditable=false;
+    this.localSeries=undefined; this.fullSchedule=undefined;
+    this.episodeRows=[]; this.seasonSummaries=[];
+    this.progress=undefined; this.progressBusy=false;
+  }
+  private resumeDetail(): void {
+    const item=this.selectedMedia;
+    if (!this.detailResumePending || !item || !this.pageVisible || this.localBusy || this.cloudBusy || this.syncBusy || this.setupBusy || this.authBusy) { return; }
+    this.detailResumePending=false;
+    this.detailSession.begin(this.currentSearchAccount(),item.id); this.detailConsumer=this.detailSession.consumer();
+    if (item.kind==='show') { this.loadLocalEpisodes(item); }
+    this.loadDetailSummary(item);
+  }
   private closeDetail(): void {
-    this.detailConsumer.cancel(); this.detailConsumer=new ReadCancel();
+    this.detailSession.clear(); this.detailConsumer=this.detailSession.consumer();
+    this.detailResumePending=false;
+    this.episodePage=false; this.episodeRows=[]; this.seasonSummaries=[];
+    this.detailScrollOffset=0;
     this.detailBusy=false;
     this.detailRevision++;
     this.localSeries = undefined;
@@ -5909,6 +5982,7 @@ struct Index {
     this.localStatus = '';
     this.confirmSeason = -1;
     this.progress = undefined;
+    this.progressBusy=false;
     this.progressStatus = '';
     this.seasonNumber = -1;
     this.translationBusy = false;
@@ -5922,6 +5996,7 @@ struct Index {
   }
 
   onBackPress(): boolean {
+    if (this.episodePage && this.selectedMedia) { this.closeSeasonPage(); return true; }
     if (this.selectedMedia) {
       this.closeDetail();
       if ((this.tab === 'library' || (this.tab === 'progress' && this.progressMode === 'next')) && !this.nextShows.length) { this.loadNextShows(); }
@@ -5940,15 +6015,22 @@ struct Index {
     }
     if (!this.selectedMedia) { this.rememberScroll(); }
     this.closeDetail();
-    if (preferredSeason > 0 && item.kind === 'show') { this.localSeason = preferredSeason; }
-    const revision = ++this.detailRevision;
-    const clientId = this.clientId;
+    if (preferredSeason > 0 && item.kind === 'show') { this.localSeason = preferredSeason; this.episodePage=true; }
+    this.detailRevision++;
+    this.detailSession.begin(this.currentSearchAccount(),item.id); this.detailConsumer=this.detailSession.consumer();
     this.selectedMedia = item;
     this.detail = undefined;
     this.posterUri = '';
+    if (item.kind === 'show') { this.loadLocalEpisodes(item); }
+    await this.loadDetailSummary(item,reload);
+  }
+
+  private async loadDetailSummary(item: Media,reload: boolean=false): Promise<void> {
+    const revision=this.detailRevision;
+    const clientId=this.clientId;
+    const scope=this.currentSearchAccount();
     this.detailBusy = true;
     this.detailStatus = '正在读取影视详情…';
-    if (item.kind === 'show') { this.loadLocalEpisodes(item); }
     if (!clientId) {
       this.detailStatus = '离线本机详情';
       this.detailBusy = false;
@@ -5956,7 +6038,7 @@ struct Index {
     }
     try {
       const data = await readDetails(item, clientId, reload,this.detailConsumer);
-      if (revision !== this.detailRevision || this.clientId !== clientId) {
+      if (!this.pageVisible || revision !== this.detailRevision || this.clientId !== clientId || scope!==this.currentSearchAccount()) {
         return;
       }
       this.detail = data;
@@ -6290,8 +6372,10 @@ struct Index {
           this.searchView()
         } else if (!this.selectedMedia && this.tab === 'progress' && this.progressMode === 'calendar') {
           if (this.mediaMode === 'movie') { this.personalMovieCalendarView() } else { this.calendarView() }
+        } else if (this.selectedMedia && this.episodePage) {
+          this.episodeDetailPage(this.selectedMedia)
         } else {
-        Scroll() {
+        Scroll(this.detailScroller) {
         Column({ space: 14 }) {
           if (this.presentationStatus) { Text(this.presentationStatus).fontSize(12).width('100%') }
           if (this.selectedMedia) {
