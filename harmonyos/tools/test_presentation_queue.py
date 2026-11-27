@@ -106,8 +106,8 @@ const tick=()=>new Promise(r=>setImmediate(r));
  idx.seed(source,'query',now,max,sortProgressCandidates(source,prefs,'all','专有'));
  idx.dirty(['show:1']);const query=idx.update(source,'query',now,prefs,'all','专有',x=>({...x,localizedTitle:'专有'}));assert.deepEqual(query.map(x=>x.media.id),['show:1']);
  const {StableDisplayOrder}=require('./StableDisplayOrder');
- const {movieProgressRows,movieSortEligible,compareMovieSources}=require('./MovieProgressRules');
- const {projectCollection,collectionSortEligible,compareCollectionCandidates,defaultCollection}=require('./CollectionRules');
+ const {movieProgressRows,movieSortEligible,compareMovieSources,sameMovieSource}=require('./MovieProgressRules');
+ const {projectCollection,collectionSortEligible,compareCollectionCandidates,defaultCollection,sameCollectionCandidate}=require('./CollectionRules');
  const {SearchCandidateTitles,searchRows,defaultSearch}=require('./SearchRules');
  for(const size of [393,10000]){
    const base=Array.from({length:size},(_,i)=>({row:{media:{id:'movie:'+(i+1),kind:'movie',title:'Movie '+(i%5),year:2020,watched:false},queued:true,watched:false,localEpisodes:-1,cloudEpisodes:-1},metadata:{id:'movie:'+(i+1),released:'2020-01-01',year:2020,rating:i%5,runtime:i%3,addedAt:i%7,userRating:i%4},translation:''}));
@@ -136,6 +136,38 @@ const tick=()=>new Promise(r=>setImmediate(r));
      assert.deepEqual(delta,projectCollection(candidates.map(patch),options,'mine','',now).map(x=>x.row));
      assert.equal(idx.patchCount(),1);
    }
+   // Stable equal-key ordering, additions/removals and state flips against full sort.
+   for(const sort of ['title','added','rating','runtime','newest','random','userRating']){
+     const options={sort,descending:true},seed=23,query='',idx=new StableDisplayOrder(x=>x.row);
+     let source=base.slice();let prior=movieProgressRows(source,flags,options,day,query,seed);
+     idx.seed('0',now,max,source,prior,'basis');
+     const rounds=sort==='title'?100:1;
+     for(let j=0;j<rounds;j++){
+       const at=(j*17)%source.length;
+       const old=source[at],changed={...old,row:{...old.row,watched:!old.row.watched}};
+       const added={...base[0],row:{...base[0].row,media:{...base[0].row.media,id:'movie:'+(size+j+1)}},metadata:{...base[0].metadata,id:'movie:'+(size+j+1)}};
+       source=source.slice();source[at]=changed;source.splice((at+1)%source.length,1);source.splice(at,0,added);
+       const delta=idx.reconcile('v'+j,'basis',now,max,source,sameMovieSource,x=>movieSortEligible(x,day,query),(a,b)=>compareMovieSources(a,b,options,pins,seed));
+       assert.deepEqual(delta,movieProgressRows(source,flags,options,day,query,seed));
+       prior=delta;
+     }
+     assert(idx.patchCount()<=rounds*3);
+     assert.equal(idx.reconcile('reordered','basis',now,max,source.slice().reverse(),sameMovieSource,()=>true,()=>0),undefined);
+   }
+   for(const sort of ['title','added','rating','runtime','newest','random','userRating','recent']){
+     const options={...defaultCollection(),sort},idx=new StableDisplayOrder(x=>x.row);
+     let source=candidates.slice();idx.seed('0',now,max,source,projectCollection(source,options,'mine','',now).map(x=>x.row),'basis');
+     const rounds=sort==='title'?100:1;
+     for(let j=0;j<rounds;j++){
+       const at=(j*17)%source.length,old=source[at];
+       const changed={...old,added:j,translation:'中文'+j};
+       const added={...candidates[0],row:{...candidates[0].row,media:{...candidates[0].row.media,id:'movie:'+(size+j+1)}}};
+       source=source.slice();source[at]=changed;source.splice((at+1)%source.length,1);source.splice(at,0,added);
+       const delta=idx.reconcile('v'+j,'basis',now,max,source,sameCollectionCandidate,x=>collectionSortEligible(x,options,'mine','',now),(a,b)=>compareCollectionCandidates(a,b,options,'mine'));
+       assert.deepEqual(delta,projectCollection(source,options,'mine','',now).map(x=>x.row));
+     }
+     assert(idx.patchCount()<=rounds*3);
+   }
    const catalog=base.map(x=>({media:x.row.media,votes:0,localized:''}));
    const idx=new SearchCandidateTitles();idx.seed(catalog);
    const first=catalog[0];const id=catalog[17].media.id;idx.patch(id,'独特标题');
@@ -143,6 +175,7 @@ const tick=()=>new Promise(r=>setImmediate(r));
    assert.deepEqual(searchRows({catalog,remote:[],query:'独特',suggestions:true,options:defaultSearch()}).map(x=>x.id),[id]);
    idx.clear();idx.patch(id,'wrong');assert.equal(catalog[17].localized,'独特标题');
  }
+ console.log('393/10k movie and collection members: 100 state and membership transitions, every sort mode, exact full-sort equivalence and reorder fallback passed');
  console.log('393/10k candidates: 100 title changes preserve original stable movie sort; collection sort and ID-scoped search title changes passed');
  const full={media:media(1),seasons:[],status:'returning series',fetchedAt:now};
  const remote={id:'show:1',title:'Show 1',positions:[],watchedEpisodes:0};
@@ -176,3 +209,5 @@ print("Frame coalescing, independent display owners, viewport/business separatio
 
 assert "this.searchTitleIndex.patch(row.id,row.text.title)" in page
 assert "this.movieSortKey(query,utc,false)" in page and "this.collectionTitleOrder.update(" in page
+
+assert "order.reconcile(this.movieSortKey(" in page and "this.collectionTitleOrder.reconcile(" in page

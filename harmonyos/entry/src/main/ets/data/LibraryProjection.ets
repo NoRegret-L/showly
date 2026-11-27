@@ -301,7 +301,7 @@ export class LibraryProjectionSession {
   private byQueue:Map<string,Media>=new Map<string,Media>();
   clear():void{
     this.epoch++;this.prior=undefined;this.store=undefined;this.records=undefined;this.cloud=undefined;this.scopeKey='';
-    this.members.clear();this.byRecord.clear();this.byRemote.clear();this.byQueue.clear();
+    this.members.clear();this.memberOrder=new ProjectionMemberOrder();this.byRecord.clear();this.byRemote.clear();this.byQueue.clear();
   }
   private seed(store:EpisodeStore,records:MediaRecord[],cloud:RemoteLibraryObservation|undefined,key:string,result:LibraryProjection):void{
     this.clear();this.store=store;this.records=records;this.cloud=cloud;this.scopeKey=key;this.prior=result;

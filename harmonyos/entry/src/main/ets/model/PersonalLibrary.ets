@@ -140,8 +140,9 @@ function sameRecord(a?:MediaRecord,b?:MediaRecord):boolean{
   return a===b||!!a&&!!b&&sameMedia(a.media,b.media)&&a.movieState===b.movieState&&a.watchlistState===b.watchlistState&&a.followState===b.followState&&a.restoredWatchlist===b.restoredWatchlist;
 }
 export function sameLibraryRow(a:PersonalLibraryRow,b:PersonalLibraryRow):boolean{
+  const sectionsA=a.sections,sectionsB=b.sections;
   return a===b||sameMedia(a.media,b.media)&&sameRecord(a.localRecord,b.localRecord)&&
     a.queued===b.queued&&a.watched===b.watched&&a.localEpisodes===b.localEpisodes&&a.cloudEpisodes===b.cloudEpisodes&&
     a.merged===b.merged&&a.effectiveWatched===b.effectiveWatched&&a.effectiveTotal===b.effectiveTotal&&
-    (a.sections===b.sections||!!a.sections&&!!b.sections&&a.sections.length===b.sections.length&&a.sections.every((x:string,i:number)=>x===b.sections?.[i]));
+    (sectionsA===sectionsB||!!sectionsA&&!!sectionsB&&sectionsA.length===sectionsB.length&&sectionsA.every((x:string,i:number)=>x===sectionsB[i]));
 }

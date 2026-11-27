@@ -25,7 +25,7 @@ const {planListDiff}=require('./ListDiff');
  const b=gate.begin();gate.finish(b,true,['show:1']);assert.equal(gate.version(),1);assert.deepEqual(gate.changedIds(),['show:1']);
  const c=gate.begin();gate.finish(c,true,['show:1','show:2']);assert.deepEqual(gate.changedIds(),['show:1','show:2']);
  const previous=gate.cacheVersion(),bad=gate.begin();gate.finish(bad,false,[],true);assert.notEqual(gate.cacheVersion(),previous);assert.equal(gate.version(),2);assert(gate.globalChanged());gate.clearChanges();assert(!gate.globalChanged());
- const {replaceProjectionRows,sameProjectionMembers,utf8ProjectionBytes}=require('./ProjectionRows');
+ const {replaceProjectionRows,sameProjectionMembers,utf8ProjectionBytes,ProjectionMemberOrder,mergeProjectionMembers,scopedProjectionMembers}=require('./ProjectionRows');
  const consumer=new CommitFence();assert(consumer.libraryGlobalChanged());consumer.acknowledgeLibrary(consumer.assertReadable());
  for(const size of [393,10000]){
    let rows=Array.from({length:size},(_,i)=>({id:'show:'+(i+1),watched:false}));
@@ -41,6 +41,34 @@ const {planListDiff}=require('./ListDiff');
      rows=delta;consumer.acknowledgeLibrary(consumer.assertReadable());assert.deepEqual(consumer.libraryChangedIds(),[]);
    }
  }
+ for(const size of [393,10000]){
+   const order=new ProjectionMemberOrder();
+   const seed=Array.from({length:size},(_,i)=>({id:'show:'+(i+1),watched:false}));
+   const records=seed.slice(0,Math.floor(size/3)).map(x=>x.id);
+   const queue=seed.slice(Math.floor(size/3),Math.floor(size/2)).map(x=>x.id);
+   order.seed(records,queue,[]);
+   let rows=seed.slice().sort((a,b)=>order.compare(a.id,b.id));
+   let expected=rows.slice();
+   for(let j=0;j<100;j++){
+     const old=expected[(j*17)%size],added={id:'show:'+(size+j+1),watched:true};
+     const ids=new Set([old.id,added.id]);assert(scopedProjectionMembers([added],ids,x=>x.id));
+     const delta=mergeProjectionMembers(rows,[added],ids,x=>x.id,order);
+     expected=expected.filter(x=>x.id!==old.id).concat(added).sort((a,b)=>order.compare(a.id,b.id));
+     assert.deepEqual(delta,expected);
+     const untouched=rows.find(x=>!ids.has(x.id));assert.equal(delta.find(x=>x.id===untouched.id),untouched);
+     rows=delta;
+   }
+ }
+ const versions=new MediaInputVersion();
+ const row=i=>({media:{id:'movie:'+i,kind:'movie',title:'Movie '+i,year:2026,watched:false},movieState:'unknown',watchlistState:'unknown'});
+ const aRows=[row(1),row(2),row(3)];versions.replace(aRows);versions.acknowledgeProjection(versions.version());
+ versions.replace([aRows[0],aRows[2],row(4)]);const stale=versions.version();
+ versions.replace([{...aRows[0],watchlistState:'yes'},aRows[2],row(4),row(5)]);
+ assert.deepEqual(new Set(versions.projectionChangedIds()),new Set(['movie:1','movie:2','movie:4','movie:5']));
+ versions.acknowledgeProjection(stale);assert.equal(versions.projectionChangedIds().length,4);
+ assert(!versions.projectionOrderChanged());versions.acknowledgeProjection(versions.version());
+ versions.replace([row(5),row(4),aRows[2],aRows[0]]);assert(versions.projectionOrderChanged());
+ console.log('393/10k members: 100 ordered add/remove cycles, identity preservation, multiple unacknowledged media revisions and stale acknowledgement passed');
  const badToken=consumer.begin();consumer.finish(badToken,false,[],true);assert(consumer.libraryGlobalChanged());
  assert.equal(utf8ProjectionBytes('中文😀'),Buffer.byteLength('中文😀'));
  console.log('Independent commit consumer: 393/10k rows, 100 scoped changes, exact full-result parity and untouched identity passed');

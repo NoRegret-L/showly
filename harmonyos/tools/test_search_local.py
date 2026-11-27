@@ -26,6 +26,19 @@ for (const kind of ['all','show','movie']) for (const sort of ['rank','title','y
  if(sort==='rank'){if(descending)expected.reverse()}else expected.sort((a,b)=>{if(sort==='year')return sign*(a.media.year-b.media.year);const x=(a.localized||a.media.title).toUpperCase(),y=(b.localized||b.media.title).toUpperCase();return sign*(x<y?-1:x>y?1:0)});
  assert.deepEqual(m.searchRows({...full,options:{kind,sort,descending}}),expected.map(x=>x.media));
 }
+for(const size of [393,10000]){
+ const catalog=Array.from({length:size},(_,i)=>({...row(i+1,i%2?'show':'movie','Test '+(i%13)),localized:i%3?'中文😀':''}));
+ let oldBytes=0,newBytes=0;
+ for(const kind of ['all','show','movie'])for(const sort of ['rank','title','year'])for(const suggestions of [false,true]){
+   const input={catalog,remote,query:'Test',suggestions,options:{kind,sort,descending:true}};
+   const raw=JSON.stringify(m.packSearch(input));
+   const restored=m.unpackSearch(JSON.parse(raw));
+   assert.deepEqual(restored,input);assert.deepEqual(m.searchRows(restored),m.searchRows(input));
+   oldBytes+=Buffer.byteLength(JSON.stringify(input));newBytes+=Buffer.byteLength(raw);
+ }
+ assert(newBytes<oldBytes);
+ console.log(size+' search candidates: compact wire '+oldBytes+' -> '+newBytes+' UTF-8 bytes across 18 exact parity cases');
+}
 const gate=new m.SearchGeneration(),old=gate.begin(),latest=gate.begin();assert(!gate.current(old));assert(gate.current(latest));gate.cancel();assert(!gate.current(latest));
 const A=m.searchScope('client','account:A'),B=m.searchScope('client','account:B');
 const catalog=new Map(),history=new Map();let reads=0,writes=0,calls=0;
@@ -88,3 +101,5 @@ assert "search_catalog WHERE scope=?" in repo and "search_recent WHERE scope=?" 
 assert "await store.saveReadCheckpoints(account.uuid, result.matches)" in page
 assert "await readSyncAccount(session)" in page and "await readActivity(session)" in page
 print("Search scope, latest-query gate, TaskPool, native lazy rows and sync safety wiring passed")
+
+assert "JSON.stringify(packSearch(input))" in task and "unpackSearch(JSON.parse(raw)" in task
