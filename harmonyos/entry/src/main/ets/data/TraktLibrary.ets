@@ -1,9 +1,9 @@
 import { http } from '@kit.NetworkKit';
 import { Media, CollectionDate, PersonalMovie, PersonalMovieSnapshot, validReleaseDate } from '../model/Media';
 import { ReadFlight } from '../model/ReadFlight';
-export { PersonalMovie, PersonalMovieSnapshot, validReleaseDate } from '../model/Media';
 import { TraktSession, traktAuth } from './TraktAuth';
 import { RemotePlayPosition, RemoteMovieObservation, RemoteLibraryObservation, RemoteShowObservation, validateObservation } from '../model/RemoteObservation';
+export { PersonalMovie, PersonalMovieSnapshot, validReleaseDate } from '../model/Media';
 
 interface Ids {
   trakt: number;

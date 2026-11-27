@@ -121,3 +121,7 @@ assert "summaryFlights.run(" in detail and "posterFlights.run(" in detail
 assert "if (epoch === summaryEpoch)" in detail
 assert "ratingFlights.run(" in lib and "await readActivity(session)" in section(lib,"async function readRatingsVerified(","async function readObservationCollections(")
 print("Shared movie source, lazy translation, independent presentation, incremental indexes, read-only request and sync guard wiring assertions passed")
+
+# ArkTS requires imports before re-exports and other statements.
+imports=lib.splitlines()
+assert max(i for i,line in enumerate(imports) if line.startswith('import ')) < min(i for i,line in enumerate(imports) if line.startswith('export '))
