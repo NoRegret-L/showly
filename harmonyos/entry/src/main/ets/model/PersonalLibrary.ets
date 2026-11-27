@@ -216,10 +216,14 @@ export class PersonalLibraryIndex {
     if(queue&&record?.watchlistState!=='no'&&record?.followState!=='yes'){queued=true;}
     let watched=record?.media.watched??false;
     if(movie&&record?.movieState!=='no'){watched=true;}
-    return {media:media,localRecord:record,queued:queued,watched:watched,
-      localEpisodes:localShow?.watchedEpisodes??-1,cloudEpisodes:cloudShow?.watchedEpisodes??-1,
-      sections:localShow?.sections,merged:localShow?.merged,effectiveWatched:localShow?.effectiveWatched,
-      effectiveTotal:localShow?.effectiveTotal};
+    const row:PersonalLibraryRow={media:media,queued:queued,watched:watched,localEpisodes:-1,cloudEpisodes:-1};
+    if(record){row.localRecord=record;}
+    if(cloudShow){row.cloudEpisodes=cloudShow.watchedEpisodes;}
+    if(localShow){
+      row.localEpisodes=localShow.watchedEpisodes;row.sections=localShow.sections;row.merged=localShow.merged;
+      row.effectiveWatched=localShow.effectiveWatched;row.effectiveTotal=localShow.effectiveTotal;
+    }
+    return row;
   }
   private reindex(from:number):void{for(let i=from;i<this.rows.length;i++){this.positions.set(this.rows[i].media.id,i);}}
   private removeAt(index:number,id:string):void{this.rows.splice(index,1);this.positions.delete(id);this.reindex(index);}
