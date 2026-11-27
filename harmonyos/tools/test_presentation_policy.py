@@ -73,7 +73,7 @@ assert "await repo.artwork(task.media,\'\',task.artwork,task.posterUrls,false)" 
 assert "this.summaryMissing.add(summaryKey)" in repo
 assert "throw error;" not in repo
 assert repo.count("const failure: PresentationFailure = presentationFailure(error as Error);")==2
-assert repo.count("if (failure.category!=\'missing\') { throw failure; }")==2
+assert repo.count("if (failure.category!=='missing') { throw failure; }")==2
 assert "this.hydrateFlights.run(" in repo and "this.seasonFlights.run(JSON.stringify([clientId,key,language])" in repo
 assert "checkPresentationService(service)" in detail and progress.count("checkPresentationService(service)")==2
 assert "presentationHttpError(service,response.responseCode" in detail and progress.count("presentationHttpError(service,response.responseCode")==2
