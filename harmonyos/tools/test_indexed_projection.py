@@ -96,7 +96,7 @@ if(process.argv[2]==='write'){
     assert db.execute("SELECT payload FROM progress_projection_row_v2 WHERE scope='account-B'").fetchone()==("different",)
     db.close()
     subprocess.run(["node","test.cjs","read"],cwd=work,check=True)
-assert "taskpool.execute(computeProjectionBatchTask, JSON.stringify(pending))" in lib
+assert "const payload=JSON.stringify(pending)" in lib and "taskpool.execute(computeProjectionBatchTask, payload)" in lib
 assert lib.count("taskpool.execute(")==1
 assert "if (pending.length)" in lib
 assert "indexedProjectionMatches(prior,input,work.catalogKey,work.key)" in lib

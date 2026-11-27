@@ -1,3 +1,5 @@
+import { hiTraceMeter } from '@kit.PerformanceAnalysisKit';
+import { replaceProjectionRows, sameProjectionMembers, utf8ProjectionBytes } from '../model/ProjectionRows';
 import { taskpool } from '@kit.ArkTS';
 import { CalendarSource } from '../model/CalendarRules';
 import { summarizeAired } from '../model/BatchEpisodeRead';
@@ -33,7 +35,15 @@ export interface LibraryProjection {
   diskParses: number;
   diskWrites: number;
   workerBatches: number;
+  visitedShows:number;
+  workerInputBytes:number;
   repairTargets: Media[];
+}
+interface ProjectionScope {
+  ids:Set<string>;
+  records:MediaRecord[];
+  shows:RemoteShowObservation[];
+  watchlist:Media[];
 }
 interface PreparedProjection {
   row: PersonalLibraryRow;
@@ -49,14 +59,14 @@ interface PreparedProjection {
 export async function projectLibrary(store: EpisodeStore, records: MediaRecord[],
   cloud: RemoteLibraryObservation | undefined, uuid: string, clientId: string, fill: boolean,
   current: () => boolean, progress: (done: number, total: number) => void,
-  cache: ShowProjectionCache): Promise<LibraryProjection> {
+  cache: ShowProjectionCache,scope?:ProjectionScope): Promise<LibraryProjection> {
   const readOnly = !fill;
   const revision = store.assertProjectionReadable();
   const bound = await store.boundAccount();
   const localAllowed = allowLocalScope(!!cloud, bound, uuid);
   const checkpoints = cloud && localAllowed ? (readOnly ? await store.projectionCheckpoints(uuid) : await store.readCheckpoints(uuid)) : new Map<number, ReadCheckpoint>();
   const common = cloud && localAllowed ? (readOnly ? await store.projectionCommonStates(uuid) : await store.commonStates(uuid, 'episode')) : new Map<string, CommonEntry>();
-  const inputs = localAllowed ? (readOnly ? await store.projectionReadInputs(bound) : await store.projectionLocalInputs(bound)) : undefined;
+  const inputs = localAllowed ? (readOnly ? (scope ? await store.projectionReadInputs(bound,scope.ids) : await store.projectionReadInputs(bound)) : await store.projectionLocalInputs(bound)) : undefined;
   const states: EpisodeBackupState[] = inputs?.states ?? [];
   const intents: JournalIntent[] = inputs?.intents ?? [];
   const local: LibraryShowEvidence[] = states.map((state: EpisodeBackupState): LibraryShowEvidence => {
@@ -64,21 +74,22 @@ export async function projectLibrary(store: EpisodeStore, records: MediaRecord[]
       year: state.catalog.year, watched: false };
     return { media: media, watchedEpisodes: state.watchedIds.length };
   });
-  const remote: LibraryShowEvidence[] = (cloud?.shows ?? []).map((show: RemoteShowObservation): LibraryShowEvidence => {
+  const remoteShows=scope ? scope.shows : cloud?.shows ?? [];
+  const remote: LibraryShowEvidence[] = remoteShows.map((show: RemoteShowObservation): LibraryShowEvidence => {
     const media: Media = { id: show.id, kind: 'show', title: show.title, year: show.year ?? 0, watched: false };
     return { media: media, watchedEpisodes: show.watchedEpisodes };
   });
-  const members = buildPersonalLibrary(localAllowed ? records : [], cloud?.watchedMovies ?? [], cloud?.watchlist ?? [], remote, local);
+  const members = buildPersonalLibrary(localAllowed ? (scope ? scope.records : records) : [], scope ? [] : cloud?.watchedMovies ?? [], scope ? scope.watchlist : cloud?.watchlist ?? [], remote, local);
   const targets = members.filter((row: PersonalLibraryRow) => row.media.kind === 'show' && (hasTrackingEvidence(row) || row.queued));
   const targetIds = new Set<string>(targets.map((row: PersonalLibraryRow) => row.media.id));
   const parseStart = store.projectionScheduleParseCount();
-  const schedules = readOnly ? await store.projectionReadCatalogs(targetIds) : await store.projectionCatalogs(targetIds);
+  const schedules = readOnly ? (scope ? await store.projectionReadCatalogs(targetIds,true) : await store.projectionReadCatalogs(targetIds)) : await store.projectionCatalogs(targetIds);
   const scheduleParses = store.projectionScheduleParseCount() - parseStart;
   if (!current() || !store.projectionReadable(revision)) { throw new Error('Projection inputs changed'); }
   const byId: Map<string, EpisodeBackupState> = new Map<string, EpisodeBackupState>();
   for (const state of states) { byId.set(state.catalog.showId, state); }
   const remoteById: Map<string, RemoteShowObservation> = new Map<string, RemoteShowObservation>();
-  for (const show of cloud?.shows ?? []) { remoteById.set(show.id, show); }
+  for (const show of remoteShows) { remoteById.set(show.id, show); }
   const decisionsByShow: Map<string, ReadDecision[]> = new Map<string, ReadDecision[]>();
   const timedByShow: Map<string, TimedDecision[]> = new Map<string, TimedDecision[]>();
   for (const intent of intents) {
@@ -112,6 +123,7 @@ export async function projectLibrary(store: EpisodeStore, records: MediaRecord[]
   let diskHits = 0;
   let diskParses = 0;
   let workerBatches = 0;
+  let workerInputBytes=0;
   let cacheable = true;
   let computedShows = 0;
   let reusedShows = 0;
@@ -201,7 +213,9 @@ export async function projectLibrary(store: EpisodeStore, records: MediaRecord[]
     workerBatches++;
     let outputs: ProjectionOutput[];
     try {
-      const serialized = await taskpool.execute(computeProjectionBatchTask, JSON.stringify(pending)) as string;
+      const payload=JSON.stringify(pending);
+      workerInputBytes=utf8ProjectionBytes(payload);
+      const serialized = await taskpool.execute(computeProjectionBatchTask, payload) as string;
       outputs = JSON.parse(serialized) as ProjectionOutput[];
       if (outputs.length !== pending.length) { throw new Error('Incomplete projection batch'); }
     } catch (error) {
@@ -257,7 +271,7 @@ export async function projectLibrary(store: EpisodeStore, records: MediaRecord[]
       sections: sections, merged: !!cloud, effectiveWatched: progressRow?.completed, effectiveTotal: progressRow?.total });
     progress(++done, targets.length);
   }
-  cache.retain(retained);
+  if(!scope){cache.retain(retained);}
   if (!current() || (readOnly && !store.projectionReadable(revision))) { throw new Error('Observation inputs changed'); }
   if (changedDisk.length && await store.saveProjectionRows(diskScope,changedDisk)) {
     for (const row of changedDisk) { cache.markDiskKnown(row.id,row.key,row.catalogKey); }
@@ -266,7 +280,91 @@ export async function projectLibrary(store: EpisodeStore, records: MediaRecord[]
   if (!current() || (readOnly && !store.projectionReadable(revision))) { throw new Error('Observation inputs changed'); }
   return { evidence: result, missing: missing, failed: failed, localAllowed: localAllowed, matches: matches, next: next, calendar: calendar,
     computedAt: now, validUntil: validUntil, cacheable: cacheable && !missing && !failed, computedShows: computedShows, reusedShows: reusedShows, diskHits: diskHits, scheduleParses: scheduleParses,
-    diskParses: diskParses, diskWrites: changedDisk.length, workerBatches: workerBatches, repairTargets: repairTargets };
+    diskParses: diskParses, diskWrites: changedDisk.length, workerBatches: workerBatches, visitedShows:targets.length, workerInputBytes:workerInputBytes, repairTargets: repairTargets };
+}
+
+// Separate consumer of committed changes; SQL read indexes may acknowledge
+// their own invalidation without losing this view's pending changes.
+export class LibraryProjectionSession {
+  private prior?:LibraryProjection;
+  private store?:EpisodeStore;
+  private records?:MediaRecord[];
+  private cloud?:RemoteLibraryObservation;
+  private scopeKey:string='';
+  private epoch:number=0;
+  private traceId:number=0;
+  private members:Set<string>=new Set<string>();
+  private nextMembers:Set<string>=new Set<string>();
+  private byRecord:Map<string,MediaRecord[]>=new Map<string,MediaRecord[]>();
+  private byRemote:Map<string,RemoteShowObservation>=new Map<string,RemoteShowObservation>();
+  private byQueue:Map<string,Media>=new Map<string,Media>();
+  clear():void{
+    this.epoch++;this.prior=undefined;this.store=undefined;this.records=undefined;this.cloud=undefined;this.scopeKey='';
+    this.members.clear();this.nextMembers.clear();this.byRecord.clear();this.byRemote.clear();this.byQueue.clear();
+  }
+  private seed(store:EpisodeStore,records:MediaRecord[],cloud:RemoteLibraryObservation|undefined,key:string,result:LibraryProjection):void{
+    this.clear();this.store=store;this.records=records;this.cloud=cloud;this.scopeKey=key;this.prior=result;
+    for(const row of result.evidence){this.members.add(row.media.id);}
+    for(const row of result.next){this.nextMembers.add(row.media.id);}
+    for(const row of records){let list=this.byRecord.get(row.media.id);if(!list){list=[];this.byRecord.set(row.media.id,list);}list.push(row);}
+    for(const row of cloud?.shows??[]){this.byRemote.set(row.id,row);}
+    for(const row of cloud?.watchlist??[]){this.byQueue.set(row.id,row);}
+  }
+  private select(ids:Set<string>):ProjectionScope{
+    const records:MediaRecord[]=[],shows:RemoteShowObservation[]=[],watchlist:Media[]=[];
+    for(const id of ids){
+      for(const row of this.byRecord.get(id)??[]){records.push(row);}
+      const remote=this.byRemote.get(id);if(remote){shows.push(remote);}
+      const queued=this.byQueue.get(id);if(queued){watchlist.push(queued);}
+    }
+    return {ids:ids,records:records,shows:shows,watchlist:watchlist};
+  }
+  async read(store:EpisodeStore,records:MediaRecord[],cloud:RemoteLibraryObservation|undefined,uuid:string,clientId:string,fill:boolean,force:boolean,
+    current:()=>boolean,progress:(done:number,total:number)=>void,cache:ShowProjectionCache):Promise<LibraryProjection>{
+    const revision=store.assertProjectionReadable(),now=Date.now(),epoch=this.epoch;
+    const valid=():boolean=>current()&&this.epoch===epoch;
+    const key=JSON.stringify([clientId,uuid,cloud?.generation??-1]);
+    const prior=this.prior,trace=++this.traceId;
+    let tracing=false;
+    try{hiTraceMeter.startTrace('Showly.LibraryProjection',trace);tracing=true;}catch(error){}
+    try{
+      const ids=new Set<string>(store.libraryChangedIds());
+      if(!fill&&!force&&prior&&this.store===store&&this.records===records&&this.cloud===cloud&&this.scopeKey===key&&
+        !store.libraryGlobalChanged()&&ids.size>0&&now>=prior.computedAt&&now<prior.validUntil&&
+        Array.from(ids).every((id:string)=>this.members.has(id))){
+        const scope=this.select(ids);
+        const delta=await projectLibrary(store,records,cloud,uuid,clientId,false,valid,progress,cache,scope);
+        if(!valid()||!store.projectionReadable(revision)){throw new Error('Projection inputs changed');}
+        const expectedNext=new Set<string>();
+        for(const id of ids){if(this.nextMembers.has(id)){expectedNext.add(id);}}
+        // Keep the exact original target order. A membership transition or a
+        // fresh checkpoint requires the full validated path, not a splice guess.
+        if(delta.cacheable&&!delta.matches.length&&delta.localAllowed===prior.localAllowed&&
+          delta.computedAt>=prior.computedAt&&delta.computedAt<prior.validUntil&&
+          sameProjectionMembers(delta.evidence,ids,(row:LibraryShowEvidence)=>row.media.id)&&
+          sameProjectionMembers(delta.calendar,ids,(row:CalendarSource)=>row.media.id)&&
+          sameProjectionMembers(delta.next,expectedNext,(row:NextShow)=>row.media.id)){
+          const result:LibraryProjection={
+            evidence:replaceProjectionRows(prior.evidence,delta.evidence,ids,(row:LibraryShowEvidence)=>row.media.id),
+            next:replaceProjectionRows(prior.next,delta.next,ids,(row:NextShow)=>row.media.id),
+            calendar:replaceProjectionRows(prior.calendar,delta.calendar,ids,(row:CalendarSource)=>row.media.id),
+            missing:0,failed:0,localAllowed:delta.localAllowed,matches:[],computedAt:delta.computedAt,
+            validUntil:Math.min(prior.validUntil,delta.validUntil),cacheable:true,
+            computedShows:delta.computedShows,reusedShows:prior.evidence.length-ids.size+delta.reusedShows,
+            diskHits:delta.diskHits,scheduleParses:delta.scheduleParses,diskParses:delta.diskParses,diskWrites:delta.diskWrites,
+            workerBatches:delta.workerBatches,visitedShows:delta.visitedShows,workerInputBytes:delta.workerInputBytes,repairTargets:[]
+          };
+          this.prior=result;store.acknowledgeLibrary(revision);return result;
+        }
+      }
+      const result=await projectLibrary(store,records,cloud,uuid,clientId,fill,valid,progress,cache);
+      if(!valid()||(!fill&&!store.projectionReadable(revision))){throw new Error('Projection inputs changed');}
+      if(!fill&&result.cacheable&&!result.matches.length&&store.projectionReadable(revision)){
+        this.seed(store,records,cloud,key,result);store.acknowledgeLibrary(revision);
+      }else{this.clear();}
+      return result;
+    }finally{if(tracing){try{hiTraceMeter.finishTrace('Showly.LibraryProjection',trace);}catch(error){}}}
+  }
 }
 
 export interface DetailProjection {

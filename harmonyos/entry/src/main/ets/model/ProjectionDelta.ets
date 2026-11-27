@@ -40,6 +40,16 @@ export class ProjectionInputIndex<S,I> {
     if (states.length) { this.stateByShow.set(id,states[0]); } else { this.stateByShow.delete(id); }
     if (intents.length) { this.intentByShow.set(id,intents); } else { this.intentByShow.delete(id); }
   }
+  selectStates(ids:Set<string>):S[]{
+    const result:S[]=[];
+    for(const id of Array.from(ids).sort()){const row=this.stateByShow.get(id);if(row!==undefined){result.push(row);}}
+    return result;
+  }
+  selectIntents(ids:Set<string>):I[]{
+    const result:I[]=[];
+    for(const id of ids){for(const row of this.intentByShow.get(id)??[]){result.push(row);}}
+    return result;
+  }
   states(): S[] {
     const result:S[]=[];
     for (const id of Array.from(this.stateByShow.keys()).sort()) { const row=this.stateByShow.get(id); if (row!==undefined) { result.push(row); } }

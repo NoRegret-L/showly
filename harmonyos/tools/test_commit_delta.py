@@ -11,7 +11,7 @@ with tempfile.TemporaryDirectory() as tmp:
 interface DataChangeListener { onDataReloaded():void; onDataAdd(i:number):void; onDataDelete(i:number):void; onDataMove(i:number,j:number):void; onDataChange(i:number):void; }
 interface IDataSource { totalCount():number; getData(i:number):unknown; registerDataChangeListener(l:DataChangeListener):void; unregisterDataChangeListener(l:DataChangeListener):void; }
 """)
-    subprocess.run(["tsc","--strict","--target","ES2020","--module","commonjs","arkui.d.ts","CommitFence.ts","MediaInputVersion.ts","RowDependencies.ts","LazyRows.ts"],cwd=work,check=True)
+    subprocess.run(["tsc","--strict","--target","ES2020","--module","commonjs","arkui.d.ts","CommitFence.ts","ProjectionRows.ts","MediaInputVersion.ts","RowDependencies.ts","LazyRows.ts"],cwd=work,check=True)
     (work/"test.cjs").write_text("""
 const assert=require('node:assert/strict');
 const {CommitFence}=require('./CommitFence');
@@ -25,6 +25,25 @@ const {planListDiff}=require('./ListDiff');
  const b=gate.begin();gate.finish(b,true,['show:1']);assert.equal(gate.version(),1);assert.deepEqual(gate.changedIds(),['show:1']);
  const c=gate.begin();gate.finish(c,true,['show:1','show:2']);assert.deepEqual(gate.changedIds(),['show:1','show:2']);
  const previous=gate.cacheVersion(),bad=gate.begin();gate.finish(bad,false,[],true);assert.notEqual(gate.cacheVersion(),previous);assert.equal(gate.version(),2);assert(gate.globalChanged());gate.clearChanges();assert(!gate.globalChanged());
+ const {replaceProjectionRows,sameProjectionMembers,utf8ProjectionBytes}=require('./ProjectionRows');
+ const consumer=new CommitFence();assert(consumer.libraryGlobalChanged());consumer.acknowledgeLibrary(consumer.assertReadable());
+ for(const size of [393,10000]){
+   let rows=Array.from({length:size},(_,i)=>({id:'show:'+(i+1),watched:false}));
+   const full=rows.slice();
+   for(let j=0;j<100;j++){
+     const at=(j*17)%size,id=rows[at].id,change={id,watched:!rows[at].watched};
+     const token=consumer.begin();consumer.finish(token,true,[id]);consumer.clearChanges();
+     assert.deepEqual(consumer.libraryChangedIds(),[id]);assert(!consumer.libraryGlobalChanged());
+     const ids=new Set([id]);assert(sameProjectionMembers([change],ids,x=>x.id));
+     const delta=replaceProjectionRows(rows,[change],ids,x=>x.id);
+     full[at]=change;assert.deepEqual(delta,full);assert.equal(delta[(at+1)%size],rows[(at+1)%size]);
+     assert.equal(utf8ProjectionBytes(JSON.stringify([change])),Buffer.byteLength(JSON.stringify([change])));
+     rows=delta;consumer.acknowledgeLibrary(consumer.assertReadable());assert.deepEqual(consumer.libraryChangedIds(),[]);
+   }
+ }
+ const badToken=consumer.begin();consumer.finish(badToken,false,[],true);assert(consumer.libraryGlobalChanged());
+ assert.equal(utf8ProjectionBytes('中文😀'),Buffer.byteLength('中文😀'));
+ console.log('Independent commit consumer: 393/10k rows, 100 scoped changes, exact full-result parity and untouched identity passed');
  const records=Array.from({length:10000},(_,i)=>({media:{id:'show:'+(i+1),kind:'show',title:'Show '+i,year:2026,watched:false},movieState:'unknown',watchlistState:'unknown'}));
  const media=new MediaInputVersion();assert(media.replace(records));const v=media.version();assert(!media.replace(JSON.parse(JSON.stringify(records))));assert.equal(media.version(),v);
  const edited=records.slice();edited[5000]={...edited[5000],watchlistState:'yes'};assert(media.replace(edited));assert.deepEqual(media.changedIds(),['show:5001']);

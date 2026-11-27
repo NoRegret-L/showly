@@ -55,7 +55,7 @@ import { ClientSettings, validateClientId } from '../data/ClientSettings';
 import { pasteboard } from '@kit.BasicServicesKit';
 import { traktAuth } from '../data/TraktAuth';
 import { CloudLibrary, ShowProgress, readCloudLibrary, mergeNewTitles, readActivity } from '../data/TraktLibrary';
-import { LibraryProjection, projectLibrary, projectDetail } from '../data/LibraryProjection';
+import { LibraryProjection, LibraryProjectionSession, projectDetail } from '../data/LibraryProjection';
 import { allowLocalScope } from '../model/EffectiveState';
 import { hasTrackingEvidence } from '../model/PersonalLibrary';
 import { CollectionGroup, GroupEntry, normalizeMode, progressTabs, collectionRows, pageGroups } from '../model/NavigationModel';
@@ -362,6 +362,7 @@ struct Index {
   private startupScheduled: boolean = false;
   private projectionMemo: RevisionMemo<LibraryProjection> = new RevisionMemo<LibraryProjection>();
   private showProjectionCache: ShowProjectionCache = new ShowProjectionCache();
+  private libraryProjectionSession:LibraryProjectionSession=new LibraryProjectionSession();
   private projectionRuns: number = 0;
   private projectionHits: number = 0;
   private startupAt: number = Date.now();
@@ -628,7 +629,7 @@ struct Index {
     this.discoverShownPage = 1;
     this.discoverMemo.clear();
     this.projectionMemo.clear();
-    this.showProjectionCache.clear();
+    this.showProjectionCache.clear(); this.libraryProjectionSession.clear();
     this.episodeStore?.releaseProjectionReadCache();
     this.libraryRevision++;
     this.displayRevisions.reset();
@@ -1534,7 +1535,7 @@ struct Index {
       this.episodeNameIndex.clear(); this.seasonKeys.clear(); this.episodeSearchRevision++;
       this.presentationAttempts.retry(); this.presentationQueues.clear();
     }
-    if (pressure || !this.pageVisible) { this.episodeStore?.releaseProjectionReadCache(); }
+    if (pressure || !this.pageVisible) { this.libraryProjectionSession.clear(); this.episodeStore?.releaseProjectionReadCache(); }
     if (pressure) {
       this.sortJobs.clear(); this.invalidateLazyWork();
       this.movieMetadataMemo.clear(); this.movieMemo.clear(); this.movieAllMemo.clear(); this.movieTitleOrder.clear(); this.movieAllTitleOrder.clear();
@@ -3056,7 +3057,7 @@ struct Index {
     this.discoverShownPage = 1;
     this.discoverMemo.clear();
     this.projectionMemo.clear();
-    this.showProjectionCache.clear();
+    this.showProjectionCache.clear(); this.libraryProjectionSession.clear();
     this.episodeStore?.releaseProjectionReadCache();
     this.libraryRevision++;
     this.displayRevisions.reset();
@@ -3109,7 +3110,8 @@ struct Index {
     this.projectionRuns++;
     const started = Date.now();
     const queryStart = store.readQueryCount();
-    const result = await projectLibrary(store, records, snapshot, uuid, clientId, fill, current,
+    const result = await this.libraryProjectionSession.read(store, records, snapshot, uuid, clientId, fill, force,
+      ():boolean=>current()&&recordKey===this.mediaInput.version(),
       (done: number, total: number): void => {
         if (fill) { this.cloudStatus = '计算个人库及补齐目录 ' + done + '/' + total; }
       }, this.showProjectionCache);
@@ -3121,7 +3123,7 @@ struct Index {
       this.projectionMemo.put(finalKey, result, result.computedAt, result.validUntil);
     }
     this.performanceStatus = '全库计算 ' + this.projectionRuns + ' 次 · 缓存命中 ' + this.projectionHits +
-      ' 次 · 本轮重算 ' + result.computedShows + ' 部 / 复用 ' + result.reusedShows + ' 部（磁盘 ' + result.diskHits + ' 部） · 目录解析 ' + result.scheduleParses + ' / 缓存解析 ' + result.diskParses + ' / 缓存行更新 ' + result.diskWrites + ' / 后台批次 ' + result.workerBatches + ' · 计算 ' +
+      ' 次 · 本轮重算 ' + result.computedShows + ' 部 / 复用 ' + result.reusedShows + ' 部（磁盘 ' + result.diskHits + ' 部） · 目录解析 ' + result.scheduleParses + ' / 缓存解析 ' + result.diskParses + ' / 缓存行更新 ' + result.diskWrites + ' / 后台批次 ' + result.workerBatches + ' · 遍历 ' + result.visitedShows + ' 部 / 工作输入 ' + result.workerInputBytes + ' B · 计算 ' +
       (Date.now() - started) + ' ms · EpisodeStore SELECT ' + (store.readQueryCount() - queryStart) + ' 次' + (this.projectionRuns === 1 ? ' · 启动至首轮计算完成 ' + (Date.now() - this.startupAt) + ' ms' : '');
     return result;
   }

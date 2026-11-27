@@ -228,6 +228,9 @@ export class EpisodeStore {
   committedProjectionKey(): string { return this.projectionFence.cacheVersion(); }
   projectionChangedIds(): string[] { return this.projectionFence.changedIds(); }
   projectionGlobalChanged(): boolean { return this.projectionFence.globalChanged(); }
+  libraryChangedIds():string[]{return this.projectionFence.libraryChangedIds();}
+  libraryGlobalChanged():boolean{return this.projectionFence.libraryGlobalChanged();}
+  acknowledgeLibrary(revision:number):void{this.projectionFence.acknowledgeLibrary(revision);}
   clearProjectionChanges(revision: number): void { if (this.projectionReadable(revision)) { this.projectionFence.clearChanges(); } }
   projectionReadable(revision: number): boolean { return this.projectionFence.readable(revision); }
   assertProjectionReadable(): number { return this.projectionFence.assertReadable(); }
@@ -300,7 +303,7 @@ export class EpisodeStore {
     else { return source; }
     return result;
   }
-  async projectionReadInputs(bound: string): Promise<ProjectionLocalInputs> {
+  async projectionReadInputs(bound: string,ids?:Set<string>): Promise<ProjectionLocalInputs> {
     const revision=this.assertProjectionReadable(); this.consumeProjectionChanges(revision);
     const residency=this.readResidency;
     if (await this.boundAccount()!==bound) { throw new Error('Account binding changed'); }
@@ -318,7 +321,8 @@ export class EpisodeStore {
           this.localInputIndex.replaceShow(id,delta.states,delta.intents);
           this.inputDirty.delete(id);
         }
-        return {states:this.localInputIndex.states(),intents:this.localInputIndex.intents()};
+        return ids ? {states:this.localInputIndex.selectStates(ids),intents:this.localInputIndex.selectIntents(ids)} :
+          {states:this.localInputIndex.states(),intents:this.localInputIndex.intents()};
       } catch (error) {
         // A partially applied read index is never returned. Full validation
         // either reconstructs it or fails closed on malformed evidence.
@@ -330,9 +334,9 @@ export class EpisodeStore {
     this.checkReadSnapshot(revision,residency);
     this.localInputIndex.replaceAll(full.states,full.intents);
     this.baselineIndex=baseline; this.inputBound=bound; this.inputDirty.clear();
-    return full;
+    return ids ? {states:this.localInputIndex.selectStates(ids),intents:this.localInputIndex.selectIntents(ids)} : full;
   }
-  async projectionReadCatalogs(ids: Set<string>): Promise<Map<string,FullEpisodeCatalog>> {
+  async projectionReadCatalogs(ids: Set<string>,retainAll:boolean=false): Promise<Map<string,FullEpisodeCatalog>> {
     const revision=this.assertProjectionReadable(); this.consumeProjectionChanges(revision);
     const residency=this.readResidency;
     const missing=new Set<string>();
@@ -345,8 +349,10 @@ export class EpisodeStore {
     this.checkReadSnapshot(revision,residency);
     const result=new Map<string,FullEpisodeCatalog>();
     for (const id of ids) { const full=this.scheduleIndex.get(id); if (full) { result.set(id,full); } }
-    for (const id of this.scheduleIndex.keys()) { if (!ids.has(id)) { this.scheduleIndex.delete(id); } }
-    this.projectionSchedules.retain(new Set<string>(result.keys()));
+    if(!retainAll){
+      for (const id of this.scheduleIndex.keys()) { if (!ids.has(id)) { this.scheduleIndex.delete(id); } }
+      this.projectionSchedules.retain(new Set<string>(result.keys()));
+    }
     return result;
   }
   private readQueries: number = 0;
