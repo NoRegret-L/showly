@@ -1,0 +1,70 @@
+name: HarmonyOS compressed SDK and minimum dependency probe
+on:
+  push:
+    branches: [harmonyos-bootstrap]
+    paths: ['.github/workflows/harmonyos-sdk-archive-probe.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  archive:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      matrix:
+        cache: ['false','true']
+    env:
+      SDK_VERSION: '6.1.1.280'
+      SDK_FILE: ohos-sdk-linux-amd64.tar.gz
+    steps:
+      - name: Check out exact source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Obtain official checksum and begin measurement
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/sdk-archive" "$RUNNER_TEMP/sdk-checksum" "$HOME/ohos-sdk"
+          date +%s > "$RUNNER_TEMP/archive-start"
+          gh release download "$SDK_VERSION" --repo ErBWs/ohos-sdk --pattern "$SDK_FILE.sha256" --dir "$RUNNER_TEMP/sdk-checksum"
+          digest="$(awk 'NR==1 {print $1}' "$RUNNER_TEMP/sdk-checksum/$SDK_FILE.sha256")"
+          [[ "$digest" =~ ^[a-fA-F0-9]{64}$ ]]
+          echo "SDK_DIGEST=$digest" >> "$GITHUB_ENV"
+      - name: Restore compressed archive only
+        if: matrix.cache == 'true'
+        uses: actions/cache@v4
+        with:
+          path: ~/sdk-archive/ohos-sdk-linux-amd64.tar.gz
+          key: ohos-archive-v1-${{ runner.os }}-${{ runner.arch }}-${{ env.SDK_VERSION }}-${{ env.SDK_DIGEST }}
+      - name: Download missing archive, verify and extract
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd "$HOME/sdk-archive"
+          if [[ ! -s "$SDK_FILE" ]]; then
+            gh release download "$SDK_VERSION" --repo ErBWs/ohos-sdk --pattern "$SDK_FILE.a?"
+            cat "$SDK_FILE.aa" "$SDK_FILE.ab" > "$SDK_FILE"
+            rm "$SDK_FILE.aa" "$SDK_FILE.ab"
+          fi
+          printf '%s  %s\n' "$SDK_DIGEST" "$SDK_FILE" | sha256sum -c -
+          tar -xzf "$SDK_FILE" -C "$HOME/ohos-sdk"
+          echo "archive_cache=${{ matrix.cache }} elapsed_seconds=$(( $(date +%s)-$(cat "$RUNNER_TEMP/archive-start") ))"
+          du -sh "$SDK_FILE"
+          echo "$HOME/ohos-sdk/command-line-tools/bin" >> "$GITHUB_PATH"
+          echo "$HOME/ohos-sdk/command-line-tools/tool/node/bin" >> "$GITHUB_PATH"
+          echo "DEVECO_SDK_HOME=$HOME/ohos-sdk/command-line-tools/sdk" >> "$GITHUB_ENV"
+      - name: Verify native compile on stock runner without apt
+        working-directory: harmonyos
+        run: |
+          set -euo pipefail
+          dpkg-query -W libgl1-mesa-dev libgl1 || true
+          node --version
+          ohpm --version
+          hvigorw --version
+          ohpm install --all
+          hvigorw assembleHap --mode module -p module=entry@default -p product=default -p buildMode=debug --no-daemon
+          echo 'Stock runner native HAP build succeeded without apt installation.'
