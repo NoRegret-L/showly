@@ -1,0 +1,55 @@
+name: jsDelivr update detection probe
+on:
+  push:
+    branches: [harmonyos-bootstrap]
+    paths: ['.github/workflows/jsdelivr-update-probe.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    steps:
+      - name: Compare public version sources without credentials
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import concurrent.futures, json, re, time, urllib.request
+          repo='NoRegret-L/showly'
+          tag='harmonyos-v0.9.3.49-b73'
+          path='harmonyos/entry/src/main/ets/config/BuildInfo.ets'
+          urls={
+            'official_release':'https://api.github.com/repos/'+repo+'/releases/tags/'+tag,
+            'cdn_pinned_tag':'https://cdn.jsdelivr.net/gh/'+repo+'@'+tag+'/'+path,
+            'cdn_pinned_commit':'https://cdn.jsdelivr.net/gh/'+repo+'@8c066f4a573e5bea845f3c22085de5d94dca1dde/'+path,
+            'cdn_branch':'https://cdn.jsdelivr.net/gh/'+repo+'@harmonyos-bootstrap/'+path,
+            'cdn_version_index':'https://data.jsdelivr.com/v1/package/gh/'+repo,
+            'official_raw_tag':'https://raw.githubusercontent.com/'+repo+'/'+tag+'/'+path
+          }
+          def probe(item):
+            name,url=item
+            start=time.monotonic()
+            try:
+              with urllib.request.urlopen(urllib.request.Request(url,headers={'User-Agent':'Showly-public-update-probe'}),timeout=15) as r:
+                status=r.status; headers=r.headers; body=r.read(1_000_000).decode('utf-8')
+              result={'name':name,'status':status,'ms':round((time.monotonic()-start)*1000),'cache_control':headers.get('Cache-Control'),'age':headers.get('Age')}
+              if name=='official_release':
+                obj=json.loads(body)
+                result.update(tag=obj.get('tag_name'),draft=obj.get('draft'),assets=[a['name'] for a in obj.get('assets',[])])
+              elif name=='cdn_version_index':
+                obj=json.loads(body); versions=obj.get('versions',[])
+                result.update(versions=len(versions),contains_expected_tag=tag in versions,examples=versions[:5])
+              else:
+                match=re.search(r'APP_VERSION_CODE: number = (\d+)',body)
+                result.update(version_code=int(match.group(1)) if match else None)
+              return result
+            except Exception as e:
+              return {'name':name,'ms':round((time.monotonic()-start)*1000),'error':str(e)}
+          with concurrent.futures.ThreadPoolExecutor(max_workers=len(urls)) as pool:
+            results=list(pool.map(probe,urls.items()))
+          for result in results: print(json.dumps(result,ensure_ascii=False))
+          official=results[0]
+          if official.get('tag')!=tag or official.get('draft') is not False:
+            raise SystemExit('Official published baseline could not be verified')
+          PY
