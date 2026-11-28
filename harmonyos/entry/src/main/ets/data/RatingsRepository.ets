@@ -139,6 +139,28 @@ export class RatingsRepository{
     await this.persist(scope,t.kind,old,confirmed,current,resolved?t.id:0);
     return ratingState(confirmed,t.id,!resolved,true);
   }
+  stageDeviceRatings(scope:string,kind:string,session:TraktSession,current:()=>boolean):Promise<number>{
+    return this.serial(async():Promise<number>=>{
+      this.guard(scope,kind,current);await this.verify(scope,session,current);
+      const fresh=await this.remote(scope,kind,session,current),known=new Set<number>(fresh.rows.map((row:RatingRecord)=>row.id));
+      const device=await this.db.querySql('SELECT payload FROM personal_rating WHERE scope=? AND kind=?',['device',kind]);const source:RatingRecord[]=[];
+      try{while(device.goToNextRow()){source.push(JSON.parse(device.getString(0)) as RatingRecord);}}finally{device.close();}
+      if(!validRatingRows(source)){throw new Error('Invalid local rating history');}
+      let count=0;this.db.beginTransaction();
+      try{for(const row of source){
+        if(known.has(row.id)||!row.ratedAt||row.ratedAt>Date.now()){continue;}
+        const exists=await this.db.querySql('SELECT media_id FROM rating_migration WHERE scope=? AND kind=? AND media_id=?',[scope,kind,row.id]);let migrated=false;
+        try{migrated=exists.goToFirstRow();}finally{exists.close();}if(migrated){continue;}
+        const target:RatingTarget={kind:kind,id:row.id,label:''};if(await this.receipt(scope,target)){continue;}
+        const intentRows=await this.db.querySql('SELECT media_id FROM rating_intent WHERE scope=? AND kind=? AND media_id=?',[scope,kind,row.id]);let pending=false;
+        try{pending=intentRows.goToFirstRow();}finally{intentRows.close();}if(pending){continue;}
+        const intent:RatingReceipt={target:target,desired:row.value,before:0,createdAt:row.ratedAt};
+        await this.db.executeSql('INSERT INTO rating_intent(scope,kind,media_id,payload) VALUES(?,?,?,?)',[scope,kind,row.id,JSON.stringify(intent)]);
+        await this.db.executeSql('INSERT INTO rating_migration(scope,kind,media_id) VALUES(?,?,?)',[scope,kind,row.id]);count++;
+      }this.guard(scope,kind,current);this.db.commit();}catch(error){this.db.rollBack();throw new Error('Rating migration failed');}
+      return count;
+    });
+  }
   private async sendRatings(session:TraktSession,body:string,remove:boolean,current:()=>boolean):Promise<void>{
     const req=http.createHttp();
     try{
@@ -230,6 +252,7 @@ export function openRatings(context:common.UIAbilityContext):Promise<RatingsRepo
     await db.executeSql('CREATE TABLE IF NOT EXISTS rating_snapshot(scope TEXT NOT NULL,kind TEXT NOT NULL,activity TEXT NOT NULL,PRIMARY KEY(scope,kind))');
     await db.executeSql('CREATE TABLE IF NOT EXISTS rating_receipt(scope TEXT NOT NULL,kind TEXT NOT NULL,media_id INTEGER NOT NULL,payload TEXT NOT NULL,PRIMARY KEY(scope,kind,media_id))');
     await db.executeSql('CREATE TABLE IF NOT EXISTS rating_intent(scope TEXT NOT NULL,kind TEXT NOT NULL,media_id INTEGER NOT NULL,payload TEXT NOT NULL,PRIMARY KEY(scope,kind,media_id))');
+    await db.executeSql('CREATE TABLE IF NOT EXISTS rating_migration(scope TEXT NOT NULL,kind TEXT NOT NULL,media_id INTEGER NOT NULL,PRIMARY KEY(scope,kind,media_id))');
     return new RatingsRepository(db);
   }).catch((error:Error):RatingsRepository=>{opening=undefined;throw error;});}return opening;
 }

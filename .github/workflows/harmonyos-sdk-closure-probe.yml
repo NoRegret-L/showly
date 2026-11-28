@@ -2,7 +2,7 @@ name: HarmonyOS SDK traced dependency closure
 # Recheck exact Build 96 correction revision; no candidate is promoted without proof.
 on:
   push:
-    branches: [harmonyos-bootstrap, harmonyos-build99]
+    branches: [harmonyos-bootstrap, harmonyos-build100]
     paths: ['.github/workflows/harmonyos-sdk-closure-probe.yml']
   workflow_dispatch:
 permissions:
@@ -48,7 +48,7 @@ jobs:
           build=(hvigorw assembleHap --mode module -p module=entry@default -p product=default -p buildMode=debug --no-daemon --optimization-strategy=performance)
           parent="$RUNNER_TEMP/parent-source"
           mkdir "$parent"
-          baseline=e513e42c4de9db493f717c8ecfb4a8e890d31499
+          baseline=6f93f53510e15425a78325476734d9f28f062ad9
           git cat-file -e "$baseline^{commit}" 2>/dev/null || git fetch --no-tags --depth=1 origin "$baseline"
           git archive "$baseline" harmonyos | tar -xf - -C "$parent"
           echo "Closure parent=$(git rev-parse "$baseline") current=$(git rev-parse HEAD)" | tee -a "$GITHUB_STEP_SUMMARY"
@@ -118,6 +118,13 @@ jobs:
         with:
           name: sdk-closure-proof-${{ github.sha }}
           path: ${{ runner.temp }}/closure-proof/
+          if-no-files-found: error
+      - name: Upload portable SDK archive for exact future cross-branch restoration
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: sdk-portable-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/closure-sdk.tar.zst
+          compression-level: 0
           if-no-files-found: error
       - name: Save exact candidate for remote restore experiment
         uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684
@@ -211,14 +218,14 @@ jobs:
           mv "$RUNNER_TEMP/full.hap" "$RUNNER_TEMP/current-full.hap"
           rm "$RUNNER_TEMP/closure-sdk.tar.zst" "$RUNNER_TEMP/closure-sdk.sha256"
           date +%s%N > "$RUNNER_TEMP/cache-start"
-      - name: Restore previous Build 98 closure (branch-scoped candidate)
+      - name: Restore previous Build 99 closure (branch-scoped candidate)
         uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684
         with:
           path: |
             ${{ runner.temp }}/closure-sdk.tar.zst
             ${{ runner.temp }}/closure-sdk.sha256
             ${{ runner.temp }}/full.hap
-          key: closure-6.1.1.280-Linux-X64-18ba896d781f6a0a4a4874de60b6a927632cbba2-46161884628-1
+          key: closure-6.1.1.280-Linux-X64-60b6f86cad652a1a37a2602e803a5bf31e59d753-46164771035-1
           fail-on-cache-miss: false
       - name: Test old closure; reject incompatible build and recover with full SDK
         env:

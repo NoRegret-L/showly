@@ -3,7 +3,8 @@ import { SyncStatusPanel } from './SyncStatusPanel';
 import { syncDirections } from '../model/ManualSync';
 import { actualWatchTime } from '../model/ExportEvidence';
 import { openCustomLists } from '../data/CustomListsRepository';
-import { readCustomLists } from '../data/TraktCustomLists';
+import { readCustomLists,readHiddenArchive } from '../data/TraktCustomLists';
+import { mergeHiddenArchive } from '../model/CollectionRules';
 import { lastScheduleWake } from '../data/SyncSchedule';
 import { executeEpisodeQueue } from '../data/EpisodeQueueExecutor';
 import { SyncCoordinator, syncService } from '../model/SyncCoordinator';
@@ -295,7 +296,7 @@ struct Index {
   }
   private async ratingSave(expected:RatingState,value:number):Promise<RatingState>{
     const ticket=this.ratingTicket,scope=this.ratingScopeCaptured,target=this.ratingTarget,session=scope==='device'?undefined:traktAuth.session(this.clientId);
-    const current=():boolean=>this.ratingCurrent(ticket,scope)&&(scope==='device'?!this.hasAccount():!!this.activeCloud())&&!this.setupBusy&&!this.authBusy&&!this.syncBusy&&!this.cloudBusy&&(!session||traktAuth.isCurrent(session.clientId,session.generation));
+    const current=():boolean=>this.ratingCurrent(ticket,scope)&&(scope==='device'?!this.hasAccount():!!this.activeCloud())&&!this.manualRunning&&!this.setupBusy&&!this.authBusy&&!this.syncBusy&&!this.cloudBusy&&(!session||traktAuth.isCurrent(session.clientId,session.generation));
     const repo=await openRatings(this.context()),state=await repo.change(scope,target,expected,value,session,current);
     if(current()&&!state.pending){
       const item=this.selectedMedia;
@@ -1021,6 +1022,11 @@ struct Index {
         if (!current() || !this.uploadStatus.startsWith('已新增保存')) { throw new Error('Episode import incomplete'); }
         await this.importCloud();
         if (!current() || this.cloudStatus.includes('失败')) { throw new Error('Title import incomplete'); }
+        this.manualStatus='正在核对隐藏与归档…';
+        const hidden=await readHiddenArchive(session,account.uuid,signal);
+        if(!current()||!this.settings||this.currentProgressScope()!==scope){throw new Error('Archive scope changed');}
+        const previous=this.settings.loadCollectionState(scope),merged=mergeHiddenArchive(previous,hidden);
+        if(merged!==previous){await this.settings.saveCollectionState(scope,merged);if(!current()){throw new Error('Archive scope changed');}this.collectionState=merged;this.collectionScope=scope;this.onCollectionStateChanged();this.resetCollection();}
         this.manualStatus='正在导入自定义列表…';
         const lists=await openCustomLists(this.context());
         const remoteLists=await readCustomLists(session,account.uuid,signal);
@@ -1077,7 +1083,7 @@ struct Index {
         this.manualStatus=(direction.importEnabled?'四类导入已核对；':'')+'分集回读 '+completed+'/'+eligible.length+'，影视核对 '+titleChecked+'，列表新增 '+listResult.created+' 个、成员 '+listResult.added+' 项，列表待核对 '+listResult.blocked+'，评分待核对 '+ratingBlocked+'。未核对项目保留，非完整双向同步。';
         this.observationPending=true;
       } else {
-        this.manualStatus='观看进度、待看、自定义列表与评分导入已核对。';
+        this.manualStatus='观看进度、待看、隐藏归档、自定义列表与评分导入已核对。';
       }
     } catch (error) {
       this.manualStatus='同步未全部完成；已有记录与保护凭证保留。请重试读取或查看高级管理。';
@@ -1087,6 +1093,18 @@ struct Index {
     }
   }
 
+  private async stageOldRatings():Promise<void>{
+    if(this.syncPageBusy()||!this.signedIn||!this.syncAccount||!this.syncBound){return;}
+    const account=this.syncAccount,session=traktAuth.session(this.clientId),store=this.episodeStore;
+    if(!session||!store||account.generation!==session.generation){return;}
+    this.manualRunning=true;this.manualSignal.cancel();this.manualSignal=new ReadCancel();const signal=this.manualSignal;
+    const current=():boolean=>this.pageVisible&&this.tab==='cloud'&&!signal.cancelled()&&traktAuth.isCurrent(session.clientId,session.generation)&&this.currentProgressScope()==='account:'+account.uuid;
+    try{if((await store.boundAccount())!==account.uuid||!current()){throw new Error('Account changed');}
+      const repo=await openRatings(this.context());let total=0;
+      for(const kind of ['show','movie','season','episode']){total+=await repo.stageDeviceRatings('account:'+account.uuid,kind,session,current);}
+      this.manualStatus='已准备 '+total+' 条缺失旧评分；本机记录保留。下次选择导出时才发送。';
+    }catch(error){this.manualStatus='旧评分迁移未全部准备，已保存意图保留。';}finally{this.manualRunning=false;this.onRecoveryGateChanged();}
+  }
   private async changeQuickSync(enabled:boolean):Promise<void> {
     if (this.syncPageBusy() || !this.syncBound || !this.syncAccount ||
         !traktAuth.isCurrent(this.clientId,this.syncAccount.generation)) { return; }
@@ -6230,7 +6248,7 @@ struct Index {
   private async editHidden(media: Media): Promise<void> {
     const scope = this.currentProgressScope();
     const settings = this.settings;
-    if (!settings || !scope || scope !== this.collectionScope || !this.canEditLibrary() || !this.pageVisible ||
+    if (!settings || !scope || scope !== this.collectionScope || !this.canEditLibrary() || !this.pageVisible || this.manualRunning ||
         this.collectionEditBusy || this.progressPrefsBusy || this.saving || this.syncBusy || this.localBusy ||
         this.cloudBusy || this.authBusy || this.setupBusy || this.backupBusy || !isTraktMedia(media)) { return; }
     const hidden = !this.isHidden(media);
@@ -7341,6 +7359,9 @@ struct Index {
         Text(this.advancedSync?'收起':'›').fontSize(14)
       }.width('100%').onClick(()=>{this.advancedSync=!this.advancedSync;})
       if(this.advancedSync && !this.manualRunning && !this.quickChanging) {
+        Button('准备迁移本机旧评分').fontSize(12).enabled(!this.syncPageBusy()&&this.syncBound&&!!this.syncAccount).onClick(()=>{
+          this.getUIContext().showActionSheet({title:'确认旧评分归属',message:'仅当本机旧评分属于当前 Trakt 账户时确认。只准备云端缺失且时间已知的评分，不覆盖云端，不删除本机记录。',autoCancel:true,sheets:[{title:'确认归属并准备',action:()=>{this.stageOldRatings();}}]});
+        })
         this.syncPreviewView()
         this.mediaPreviewView()
         Text(this.cloudStatus).fontSize(12).width('100%')

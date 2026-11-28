@@ -7,9 +7,9 @@ import { ReadCancel } from '../model/ReadFlight';
 import { readCustomLists } from './TraktCustomLists';
 import { readActivity } from './TraktLibrary';
 import { readSyncAccount } from './TraktSyncPreview';
-import { createPrivateList,appendListMembers } from './TraktListExport';
+import { createPrivateList,appendListMembers,updateListMetadata } from './TraktListExport';
 import { missingMemberIds,membersSatisfied } from '../model/ExportEvidence';
-import { mergeMappedLists,SyncListLink } from '../model/ListSyncMerge';
+import { mergeMappedLists,SyncListLink,ListMetadataBase,listMetadataDecision } from '../model/ListSyncMerge';
 interface ListExportLink {remoteId:number;pending:string;}
 interface ListExportObservation {activity:string;rows:CustomList[];}
 export interface ListExportResult {created:number;added:number;blocked:number;}
@@ -25,7 +25,7 @@ export class CustomListsRepository{
     const task=this.tail.catch(()=>{}).then(body);this.tail=task.then(()=>{},()=>{});return task;
   }
   private check(scope:string,current:()=>boolean):void{if(!validScope(scope)||!current()){throw new Error('List scope changed');}}
-  private async apply(scope:string,delta:ListDelta,mark:boolean,current:()=>boolean,links:SyncListLink[]=[]):Promise<void>{
+  private async apply(scope:string,delta:ListDelta,mark:boolean,current:()=>boolean,links:SyncListLink[]=[],bases:ListMetadataBase[]=[]):Promise<void>{
     this.db.beginTransaction();
     try{
       for(const id of delta.removedLists){await this.db.executeSql('DELETE FROM list_member_v2 WHERE scope=? AND list_id=?',[scope,id]);await this.db.executeSql('DELETE FROM list_header_v2 WHERE scope=? AND list_id=?',[scope,id]);await this.db.executeSql('DELETE FROM list_preference_v2 WHERE scope=? AND list_id=?',[scope,id]);}
@@ -33,6 +33,7 @@ export class CustomListsRepository{
       for(const item of delta.removedMembers){await this.db.executeSql('DELETE FROM list_member_v2 WHERE scope=? AND list_id=? AND media_id=?',[scope,item.listId,item.mediaId]);}
       for(const item of delta.members){await this.db.executeSql('INSERT OR REPLACE INTO list_member_v2(scope,list_id,media_id,position,payload) VALUES(?,?,?,?,?)',[scope,item.listId,item.member.media.id,item.position,JSON.stringify(item.member)]);}
       for(const link of links){await this.db.executeSql('INSERT INTO list_export_link(scope,local_id,remote_id,pending) VALUES(?,?,?,?)',[scope,link.localId,link.remoteId,link.pending]);}
+      for(const base of bases){await this.db.executeSql('INSERT OR REPLACE INTO list_metadata_base(scope,local_id,remote_id,name,description) VALUES(?,?,?,?,?)',[scope,base.localId,base.remoteId,base.name,base.description]);}
       // Marker commits only alongside all migrated rows. Legacy stays untouched.
       if(mark){await this.db.executeSql('INSERT OR REPLACE INTO list_scope_v2(scope,next_id) VALUES(?,?)',[scope,delta.nextId]);}
       this.check(scope,current);this.db.commit();
@@ -75,9 +76,16 @@ export class CustomListsRepository{
       const old=await this.readBody(scope,current),data=await this.db.querySql('SELECT local_id,remote_id,pending FROM list_export_link WHERE scope=?',[scope]);
       const links:SyncListLink[]=[];
       try{while(data.goToNextRow()){links.push({localId:data.getString(0),remoteId:data.getLong(1),pending:data.getString(2)});}}finally{data.close();}
-      const next=mergeMappedLists(old,rows,links);
+      const bases=await this.metadataBases(scope),next=mergeMappedLists(old,rows,links,bases);
       if(!validStorageDocument(next.doc)){throw new Error('Invalid merged list');}
-      await this.apply(scope,listDelta(old,next.doc),old.nextId!==next.doc.nextId,current,next.links);
+      const localById=new Map<string,CustomList>(),remoteById=new Map<string,CustomList>();
+      for(const row of next.doc.local){localById.set(row.id,row);}for(const row of rows){remoteById.set(row.id,row);}
+      const matched:ListMetadataBase[]=[];
+      for(const link of links.concat(next.links)){
+        const local=localById.get(link.localId),remote=remoteById.get('trakt:'+link.remoteId);
+        if(local&&remote&&!link.pending&&listMetadataDecision(local,remote)==='match'){matched.push({localId:local.id,remoteId:link.remoteId,name:local.name,description:local.description});}
+      }
+      await this.apply(scope,listDelta(old,next.doc),old.nextId!==next.doc.nextId,current,next.links,matched);
       this.docs.set(scope,next.doc);return next.doc;
     });
   }
@@ -93,6 +101,17 @@ export class CustomListsRepository{
     const doc=await this.readBody(scope,current);if(!doc.local.concat(doc.remote).some((r:CustomList)=>r.id===id)){throw new Error('List missing');}
     this.check(scope,current);await this.db.executeSql('INSERT OR REPLACE INTO list_preference_v2(scope,list_id,payload) VALUES(?,?,?)',[scope,id,JSON.stringify(p)]);
   });}
+  private async metadataBases(scope:string):Promise<ListMetadataBase[]>{
+    const rows=await this.db.querySql('SELECT local_id,remote_id,name,description FROM list_metadata_base WHERE scope=?',[scope]);const result:ListMetadataBase[]=[];
+    try{while(rows.goToNextRow()){result.push({localId:rows.getString(0),remoteId:rows.getLong(1),name:rows.getString(2),description:rows.getString(3)});}}finally{rows.close();}return result;
+  }
+  private async settleMetadata(scope:string,id:string,remoteId:number,name:string,description:string,current:()=>boolean):Promise<void>{
+    this.db.beginTransaction();try{
+      await this.db.executeSql('INSERT OR REPLACE INTO list_metadata_base(scope,local_id,remote_id,name,description) VALUES(?,?,?,?,?)',[scope,id,remoteId,name,description]);
+      await this.db.executeSql('UPDATE list_export_link SET pending=? WHERE scope=? AND local_id=?',['',scope,id]);
+      this.check(scope,current);this.db.commit();
+    }catch(error){this.db.rollBack();throw new Error('Metadata receipt commit failed');}
+  }
   private async link(scope:string,id:string):Promise<ListExportLink|undefined>{
     const rows=await this.db.querySql('SELECT remote_id,pending FROM list_export_link WHERE scope=? AND local_id=?',[scope,id]);
     try{if(!rows.goToFirstRow()){return undefined;}return {remoteId:rows.getLong(0),pending:rows.getString(1)};}finally{rows.close();}
@@ -111,6 +130,7 @@ export class CustomListsRepository{
       const result:ListExportResult={created:0,added:0,blocked:0};
       if(!doc.local.length){return result;}
       let observed=await this.observeExport(scope,session,signal,current);
+      const bases=new Map<string,ListMetadataBase>();for(const base of await this.metadataBases(scope)){bases.set(base.localId,base);}
       for(const local of doc.local){
         this.check(scope,current);
         let link=await this.link(scope,local.id);
@@ -133,12 +153,29 @@ export class CustomListsRepository{
           if(remote.name!==local.name||remote.description!==local.description){result.blocked++;continue;}
           await this.db.executeSql('UPDATE list_export_link SET pending=? WHERE scope=? AND local_id=?',['',scope,local.id]);
           result.created++;link.pending='';
+        }else if(link.pending.startsWith('meta:')){
+          const expected=JSON.parse(link.pending.substring(5)) as ListMetadataBase;
+          if(expected.localId!==local.id||expected.remoteId!==link.remoteId||remote.name!==expected.name||remote.description!==expected.description){result.blocked++;continue;}
+          await this.settleMetadata(scope,local.id,link.remoteId,expected.name,expected.description,current);bases.set(local.id,expected);link.pending='';
         }else if(link.pending){
           const expected=JSON.parse(link.pending) as string[];
           if(!Array.isArray(expected)||!expected.length||!membersSatisfied(expected,remote.members.map((m:ListMember)=>m.media.id))){result.blocked++;continue;}
           await this.db.executeSql('UPDATE list_export_link SET pending=? WHERE scope=? AND local_id=?',['',scope,local.id]);
           link.pending='';
         }
+        const decision=listMetadataDecision(local,remote,bases.get(local.id));
+        if(decision==='match'){
+          await this.settleMetadata(scope,local.id,link.remoteId,local.name,local.description,current);
+        }else if(decision==='export'&&!remote.unsupported){
+          const expected:ListMetadataBase={localId:local.id,remoteId:link.remoteId,name:local.name,description:local.description};
+          this.check(scope,current);
+          await this.db.executeSql('UPDATE list_export_link SET pending=? WHERE scope=? AND local_id=?',['meta:'+JSON.stringify(expected),scope,local.id]);
+          try{await updateListMetadata(session,uuid,observed.activity,link.remoteId,local.name,local.description,current);}catch(error){}
+          observed=await this.observeExport(scope,session,signal,current);
+          remote=observed.rows.find((row:CustomList)=>row.id==='trakt:'+link?.remoteId);
+          if(!remote||remote.name!==expected.name||remote.description!==expected.description){result.blocked++;continue;}
+          await this.settleMetadata(scope,local.id,link.remoteId,expected.name,expected.description,current);
+        }else if(decision!=='match'){result.blocked++;continue;}
         const missing=missingMemberIds(local.members.map((m:ListMember)=>m.media.id),remote.members.map((m:ListMember)=>m.media.id));
         if(!missing.length){continue;}
         // One durable receipt for the exact additive delta; no removal or rename.
@@ -167,6 +204,7 @@ export function openCustomLists(context:common.UIAbilityContext):Promise<CustomL
     await db.executeSql('CREATE INDEX IF NOT EXISTS list_member_reverse_v2 ON list_member_v2(scope,media_id,list_id)');
     await db.executeSql('CREATE TABLE IF NOT EXISTS list_preference_v2(scope TEXT NOT NULL,list_id TEXT NOT NULL,payload TEXT NOT NULL,PRIMARY KEY(scope,list_id))');
     await db.executeSql('CREATE TABLE IF NOT EXISTS list_export_link(scope TEXT NOT NULL,local_id TEXT NOT NULL,remote_id INTEGER NOT NULL,pending TEXT NOT NULL,PRIMARY KEY(scope,local_id))');
+    await db.executeSql('CREATE TABLE IF NOT EXISTS list_metadata_base(scope TEXT NOT NULL,local_id TEXT NOT NULL,remote_id INTEGER NOT NULL,name TEXT NOT NULL,description TEXT NOT NULL,PRIMARY KEY(scope,local_id))');
     return new CustomListsRepository(db);
   }).catch((error:Error):CustomListsRepository=>{opening=undefined;throw error;});}
   return opening;

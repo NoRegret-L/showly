@@ -26,7 +26,7 @@ console.log('List storage: 10k delta add/remove/reorder, canonical ranks, backup
 repo=(root/"data/CustomListsRepository.ets").read_text()
 sql=re.findall(r"executeSql\('([^']+)'",repo)
 ddl=[x for x in sql if x.startswith("CREATE ")]
-expected={"list_document","list_scope_v2","list_header_v2","list_member_v2","list_preference_v2","list_export_link"}
+expected={"list_document","list_scope_v2","list_header_v2","list_member_v2","list_preference_v2","list_export_link","list_metadata_base"}
 assert {re.match(r"CREATE TABLE IF NOT EXISTS (\w+)",q).group(1) for q in ddl if q.startswith("CREATE TABLE")}==expected
 assert any("list_member_reverse_v2" in q for q in ddl)
 with tempfile.TemporaryDirectory() as tmp:

@@ -137,3 +137,10 @@ export function sameCollectionCandidate(a:CollectionCandidate,b:CollectionCandid
     a.userRating===b.userRating&&a.randomOrder===b.randomOrder&&(x===y||!!x&&!!y&&x.network===y.network&&x.release===y.release&&
     x.rating===y.rating&&x.runtime===y.runtime&&x.genres.length===y.genres.length&&x.genres.every((g:string,i:number)=>g===y.genres[i]));
 }
+
+// Android imports hidden/dropped shows and hidden movies additively. Retain local choices and actual remote time.
+export function mergeHiddenArchive(state:CollectionState,remote:HiddenEntry[]):CollectionState{
+  const seen=new Set<string>(state.hidden.map((row:HiddenEntry)=>row.media.id)),added:HiddenEntry[]=[];
+  for(const row of remote){if(!validCollectionState({hidden:[row],mine:[],queue:[]})){throw new Error('Invalid archive item');}if(!seen.has(row.media.id)){seen.add(row.media.id);added.push(row);}}
+  return added.length?{hidden:state.hidden.concat(added),mine:state.mine,queue:state.queue}:state;
+}

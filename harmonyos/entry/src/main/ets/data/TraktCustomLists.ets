@@ -5,6 +5,7 @@ import { TraktSession, traktAuth } from './TraktAuth';
 import { readSyncAccount } from './TraktSyncPreview';
 import { readActivity } from './TraktLibrary';
 import { ReadCancel } from '../model/ReadFlight';
+import { HiddenEntry } from '../model/CollectionRules';
 interface ListIds{trakt:number;}
 interface ListWire{ids:ListIds;name:string;description?:string;created_at?:string;updated_at?:string;item_count:number;}
 interface TitleWire{ids:ListIds;title:string;year?:number;rating?:number;released?:string;first_aired?:string;}
@@ -59,4 +60,31 @@ export async function readCustomLists(session:TraktSession,uuid:string,signal:Re
   const after=await manifest(session,signal),confirmed=await readSyncAccount(session);
   if(confirmed.uuid!==uuid||await readActivity(session)!==activity||JSON.stringify(initial)!==JSON.stringify(after)){throw new Error('Lists changed during read');}
   ensure(session,signal);return rows;
+}
+
+interface HiddenWire{type:string;hidden_at:string;show?:TitleWire;movie?:TitleWire;}
+async function hiddenSection(session:TraktSession,section:string,kind:string,signal:ReadCancel):Promise<HiddenEntry[]>{
+  const path='users/hidden/'+section+'?type='+kind+'&extended=full';
+  const first=await page(session,path,1,signal),rows=JSON.parse(first.raw) as HiddenWire[];
+  if(!Array.isArray(rows)||!first.hasPagination){throw new Error('Incomplete hidden observation');}
+  for(let i=2;i<=first.pages;i++){
+    const next=await page(session,path,i,signal),items=JSON.parse(next.raw) as HiddenWire[];
+    if(!next.hasPagination||next.pages!==first.pages||next.total!==first.total||!Array.isArray(items)||!items.length){throw new Error('Hidden pagination changed');}rows.push(...items);
+  }
+  if(rows.length!==first.total){throw new Error('Incomplete hidden observation');}
+  const result:HiddenEntry[]=[];const seen=new Set<string>();
+  for(const row of rows){
+    const title=kind==='show'?row.show:row.movie,at=instant(row.hidden_at);
+    if(row.type!==kind||!title||!title.ids||!Number.isSafeInteger(title.ids.trakt)||title.ids.trakt<=0||!title.title.trim()||!at){throw new Error('Invalid hidden item');}
+    const id=kind+':'+title.ids.trakt;if(seen.has(id)){throw new Error('Duplicate hidden identity');}seen.add(id);
+    result.push({media:{id:id,kind:kind,title:title.title,year:title.year??0,watched:false},at:at});
+  }
+  return result;
+}
+export async function readHiddenArchive(session:TraktSession,uuid:string,signal:ReadCancel):Promise<HiddenEntry[]>{
+  ensure(session,signal);if((await readSyncAccount(session)).uuid!==uuid){throw new Error('Wrong account');}
+  const activity=await readActivity(session);
+  const groups=await Promise.all([hiddenSection(session,'progress_watched','show',signal),hiddenSection(session,'dropped','show',signal),hiddenSection(session,'calendar','movie',signal)]);
+  if((await readSyncAccount(session)).uuid!==uuid||await readActivity(session)!==activity){throw new Error('Hidden observation changed');}
+  ensure(session,signal);const byId=new Map<string,HiddenEntry>();for(const rows of groups){for(const row of rows){const old=byId.get(row.media.id);if(!old||row.at>old.at){byId.set(row.media.id,row);}}}return Array.from(byId.values());
 }
