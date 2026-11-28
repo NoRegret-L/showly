@@ -43,3 +43,8 @@ jobs:
           export SHOWLY_GRAPH_CAPTURE="$RUNNER_TEMP/independent"
           python3 .github/ci/ts/compare_onepass.py | tee -a "$GITHUB_STEP_SUMMARY"
           grep -E '^34/34 passed in ' "$RUNNER_TEMP/onepass.log" "$RUNNER_TEMP/independent.log" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Independent custom-list specialist reference
+        run: |
+          set -euo pipefail
+          export PATH="$GITHUB_WORKSPACE/.github/ci/ts/node_modules/.bin:$PATH"
+          python3 harmonyos/tools/test_custom_lists.py | tee -a "$GITHUB_STEP_SUMMARY"
