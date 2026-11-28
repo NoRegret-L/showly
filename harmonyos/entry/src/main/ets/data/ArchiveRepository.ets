@@ -7,7 +7,7 @@ import { readActivity } from './TraktLibrary';
 import { readArchiveObservation } from './TraktCustomLists';
 import { ReadCancel } from '../model/ReadFlight';
 import { CollectionState,HiddenEntry,mergeHiddenArchive } from '../model/CollectionRules';
-import { ARCHIVE_SECTIONS,ArchiveItem,ArchiveLedger,ArchiveMutation,ArchiveObservation,archiveIndex,archiveImportRows,archivePlan } from '../model/ArchiveSyncRules';
+import { ARCHIVE_SECTIONS,ArchiveItem,ArchiveLedger,ArchiveMutation,ArchiveObservation,archiveIndex,archiveImportRows,archivePlan,validArchiveLedger,sameArchiveBase } from '../model/ArchiveSyncRules';
 interface ArchiveWire {ids:ArchiveIds;hidden_at?:string;}
 interface ArchiveIds {trakt:number;}
 interface ArchiveBody {shows:ArchiveWire[];movies:ArchiveWire[];}
@@ -20,7 +20,7 @@ export class ArchiveRepository {
   private guard(scope:string,current:()=>boolean):void{if(!scope.startsWith('account:')||scope.length<=8||scope.trim()!==scope||!current()){throw new Error('Archive scope changed');}}
   private async rows(scope:string):Promise<Map<string,ArchiveLedger>>{
     const data=await this.db.querySql('SELECT payload FROM archive_sync WHERE scope=?',[scope]),result=new Map<string,ArchiveLedger>();
-    try{while(data.goToNextRow()){const row=JSON.parse(data.getString(0)) as ArchiveLedger;if(!row||!Array.isArray(row.base)||typeof row.remove!=='boolean'||! /^(show|movie):[1-9][0-9]*$/.test(row.id)){throw new Error('Invalid archive ledger');}archiveIndex(row.base);result.set(row.id,row);}}finally{data.close();}return result;
+    try{while(data.goToNextRow()){const row=JSON.parse(data.getString(0)) as ArchiveLedger;if(!validArchiveLedger(row)||result.has(row.id)){throw new Error('Invalid archive ledger');}result.set(row.id,row);}}finally{data.close();}return result;
   }
   private async save(scope:string,row:ArchiveLedger):Promise<void>{
     await this.db.executeSql('INSERT OR REPLACE INTO archive_sync(scope,media_id,payload) VALUES(?,?,?)',[scope,row.id,JSON.stringify(row)]);
@@ -28,7 +28,8 @@ export class ArchiveRepository {
   // Stage before changing local preference. A crash before the local change blocks remote removal.
   stageLocal(scope:string,id:string,hidden:boolean,current:()=>boolean):Promise<void>{
     return this.serial(async():Promise<void>=>{
-      this.guard(scope,current);const all=await this.rows(scope),old=all.get(id);
+      this.guard(scope,current);const data=await this.db.querySql('SELECT payload FROM archive_sync WHERE scope=? AND media_id=?',[scope,id]);let old:ArchiveLedger|undefined;
+      try{if(data.goToFirstRow()){old=JSON.parse(data.getString(0)) as ArchiveLedger;if(!validArchiveLedger(old)||old.id!==id){throw new Error('Invalid archive ledger');}}}finally{data.close();}
       if(old?.pending){throw new Error('Unconfirmed archive receipt');}
       this.guard(scope,current);
       await this.save(scope,{id:id,base:old?.base??[],remove:!hidden});
@@ -47,6 +48,7 @@ export class ArchiveRepository {
       for(const id of new Set<string>(Array.from(rows.keys()).concat(Array.from(index.keys())))){
         const old=rows.get(id);if(old?.remove||old?.pending){continue;}
         const base=index.get(id)??[];
+        if(old&&sameArchiveBase(old.base,base)){continue;}
         if(!base.length){await this.db.executeSql('DELETE FROM archive_sync WHERE scope=? AND media_id=?',[scope,id]);rows.delete(id);}
         else{const row:ArchiveLedger={id:id,base:base,remove:false};await this.save(scope,row);rows.set(id,row);}
       }

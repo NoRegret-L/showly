@@ -20,6 +20,8 @@ for(let i=0;i<100;i++){
  const pending={...row,pending:{section:'dropped',entry:item,remove:true}};
  a.equal(m.archivePlan(pending,undefined,[remote]).send,undefined);
  a.equal(m.archivePlan(pending,undefined,[]).settled,true);
+ a.equal(m.validArchiveLedger(pending),true);a.equal(m.validArchiveLedger({...pending,id:'show:2'}),false);
+ a.equal(m.validArchiveLedger({...pending,base:[]}),false);a.equal(m.sameArchiveBase([remote],[remote]),true);
  a.equal(m.archiveImportRows([remote],[row],{hidden:[],mine:[],queue:[]}).length,0);
  const many=Array.from({length:10000},(_,j)=>({section:'calendar',entry:{media:{id:'movie:'+(j+1),kind:'movie',title:'M',year:2020,watched:false},at:123}}));
  a.equal(m.archiveIndex(many).size,10000);
@@ -47,3 +49,7 @@ page=(root/"pages/Index.ets").read_text()
 assert "await archive.stageLocal" in page and "await archive.export" in page
 assert "trySyncLease" in page and "trySyncLease" in (root/"data/BackgroundObservation.ets").read_text()
 print("Archive durable reservations, scope and 100 host cross-process lock attempts passed; no live network")
+
+for method in ('ratingSave','stageOldRatings','confirmBatchUpload','confirmEpisodeUpload','confirmEpisodeRemoval','confirmMediaOperation'):
+    body=page.split('  private async '+method+'(',1)[1].split('\n  private ',1)[0]
+    assert 'trySyncLease' in body and 'releaseSyncLease' in body,method

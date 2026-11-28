@@ -41,3 +41,18 @@ export function archiveImportRows(items:ArchiveItem[],ledgers:ArchiveLedger[],st
   for(const [id,rows] of archiveIndex(items)){if(!blocked.has(id)){let newest=rows[0].entry;for(const r of rows){if(r.entry.at>newest.at){newest=r.entry;}}result.push(newest);}}
   return result;
 }
+
+export function validArchiveLedger(row:ArchiveLedger):boolean{
+  if(!row||typeof row.id!=='string'||! /^(show|movie):[1-9][0-9]*$/.test(row.id)||typeof row.remove!=='boolean'||!Array.isArray(row.base)){return false;}
+  const seen=new Set<string>();
+  for(const item of row.base){if(!validArchiveItem(item)||item.entry.media.id!==row.id||seen.has(item.section)){return false;}seen.add(item.section);}
+  const pending=row.pending;
+  if(pending){
+    if(typeof pending.remove!=='boolean'||pending.remove!==row.remove||!validArchiveItem({section:pending.section,entry:pending.entry})||pending.entry.media.id!==row.id){return false;}
+    if(pending.remove&&!row.base.some((item:ArchiveItem)=>item.section===pending.section&&item.entry.at===pending.entry.at)){return false;}
+  }
+  return true;
+}
+export function sameArchiveBase(a:ArchiveItem[],b:ArchiveItem[]):boolean{
+  return a.length===b.length&&a.every((x:ArchiveItem)=>b.some((y:ArchiveItem)=>x.section===y.section&&x.entry.at===y.entry.at&&x.entry.media.id===y.entry.media.id));
+}

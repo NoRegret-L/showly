@@ -298,6 +298,10 @@ struct Index {
   private async ratingSave(expected:RatingState,value:number):Promise<RatingState>{
     const ticket=this.ratingTicket,scope=this.ratingScopeCaptured,target=this.ratingTarget,session=scope==='device'?undefined:traktAuth.session(this.clientId);
     const current=():boolean=>this.ratingCurrent(ticket,scope)&&(scope==='device'?!this.hasAccount():!!this.activeCloud())&&!this.manualRunning&&!this.setupBusy&&!this.authBusy&&!this.syncBusy&&!this.cloudBusy&&(!session||traktAuth.isCurrent(session.clientId,session.generation));
+    if(!current()){throw new Error('Rating scope changed');}
+    const operation=scope==='device'?undefined:trySyncLease(this.context().filesDir);
+    if(scope!=='device'&&!operation){throw new Error('同步正在进行，请稍后评分。');}
+    try{
     const repo=await openRatings(this.context()),state=await repo.change(scope,target,expected,value,session,current);
     if(current()&&!state.pending){
       const item=this.selectedMedia;
@@ -308,6 +312,7 @@ struct Index {
       if(scope!=='device'){this.requestObservation();}else{this.scheduleLazyRows();}
     }
     return state;
+    }finally{if(operation){releaseSyncLease(operation);}}
   }
   @Builder ratingSheet(){
     RatingEditor({target:this.ratingTarget,read:()=>this.ratingRead(),save:(state:RatingState,value:number)=>this.ratingSave(state,value),onClose:()=>{this.closeRating();}})
@@ -984,7 +989,7 @@ struct Index {
 
   private syncPageBusy(): boolean {
     return this.manualRunning || this.quickChanging || this.syncBusy || this.cloudBusy || this.localBusy ||
-      this.authBusy || this.setupBusy || this.backupBusy || this.saving || syncService.busy();
+      this.authBusy || this.setupBusy || this.backupBusy || this.saving || this.collectionEditBusy || this.progressPrefsBusy || syncService.busy();
   }
 
   private async runManualSync(): Promise<void> {
@@ -1096,9 +1101,7 @@ struct Index {
     } catch (error) {
       this.manualStatus='同步未全部完成；已有记录与保护凭证保留。请重试读取或查看高级管理。';
     } finally {
-      releaseSyncLease(operation);
-      this.manualRunning=false;
-      this.onRecoveryGateChanged();
+      try{releaseSyncLease(operation);}finally{this.manualRunning=false;this.onRecoveryGateChanged();}
     }
   }
 
@@ -1106,13 +1109,14 @@ struct Index {
     if(this.syncPageBusy()||!this.signedIn||!this.syncAccount||!this.syncBound){return;}
     const account=this.syncAccount,session=traktAuth.session(this.clientId),store=this.episodeStore;
     if(!session||!store||account.generation!==session.generation){return;}
+    const operation=trySyncLease(this.context().filesDir);if(!operation){this.manualStatus='同步正在进行，请稍后准备旧评分。';return;}
     this.manualRunning=true;this.manualSignal.cancel();this.manualSignal=new ReadCancel();const signal=this.manualSignal;
     const current=():boolean=>this.pageVisible&&this.tab==='cloud'&&!signal.cancelled()&&traktAuth.isCurrent(session.clientId,session.generation)&&this.currentProgressScope()==='account:'+account.uuid;
     try{if((await store.boundAccount())!==account.uuid||!current()){throw new Error('Account changed');}
       const repo=await openRatings(this.context());let total=0;
       for(const kind of ['show','movie','season','episode']){total+=await repo.stageDeviceRatings('account:'+account.uuid,kind,session,current);}
       this.manualStatus='已准备 '+total+' 条缺失旧评分；本机记录保留。下次选择导出时才发送。';
-    }catch(error){this.manualStatus='旧评分迁移未全部准备，已保存意图保留。';}finally{this.manualRunning=false;this.onRecoveryGateChanged();}
+    }catch(error){this.manualStatus='旧评分迁移未全部准备，已保存意图保留。';}finally{try{releaseSyncLease(operation);}finally{this.manualRunning=false;this.onRecoveryGateChanged();}}
   }
   private async changeQuickSync(enabled:boolean):Promise<void> {
     if (this.syncPageBusy() || !this.syncBound || !this.syncAccount ||
@@ -3184,6 +3188,9 @@ struct Index {
         !traktAuth.isCurrent(this.clientId, preview.account.generation)) { return; }
     const session = traktAuth.session(this.clientId);
     if (!session) { return; }
+    if(this.manualRunning){return;}
+    const operation=trySyncLease(this.context().filesDir);
+    if(!operation){this.uploadStatus='同步正在进行，请稍后重试。';return;}
     this.syncBusy = true;
     this.batchIds = [];
     this.batchConfirm = false;
@@ -3199,7 +3206,7 @@ struct Index {
       this.syncPreview = undefined;
       this.syncPage = 1;
       this.syncStatus = '批量流程结束；请重新生成预览。';
-      this.syncBusy = false;
+      try{releaseSyncLease(operation);}finally{this.syncBusy = false;}
     }
   }
 
@@ -3244,6 +3251,9 @@ struct Index {
     const selected=preview.rows.find((row:SyncDifference)=>row.episodeId===episodeId);
     if(!selected?.watchedAt){this.uploadStatus='观看时间未知，未发送。';return;}
     const watchedAt=selected.watchedAt;
+    if(this.manualRunning){return;}
+    const operation=trySyncLease(this.context().filesDir);
+    if(!operation){this.uploadStatus='同步正在进行，请稍后重试。';return;}
     this.syncBusy = true;
     this.uploadSelectedId = 0;
     this.removeSelectedId = 0;
@@ -3260,7 +3270,7 @@ struct Index {
       this.syncPreview = undefined;
       this.syncPage = 1;
       this.syncStatus = '本次流程已结束。重新生成差异预览可查看最新状态。';
-      this.syncBusy = false;
+      try{releaseSyncLease(operation);}finally{this.syncBusy = false;}
     }
   }
 
@@ -3274,6 +3284,9 @@ struct Index {
         !traktAuth.isCurrent(clientId, preview.account.generation)) { return; }
     const session = traktAuth.session(clientId);
     if (!session) { return; }
+    if(this.manualRunning){return;}
+    const operation=trySyncLease(this.context().filesDir);
+    if(!operation){this.uploadStatus='同步正在进行，请稍后重试。';return;}
     this.syncBusy = true;
     this.removeSelectedId = 0;
     this.uploadSelectedId = 0;
@@ -3290,7 +3303,7 @@ struct Index {
       this.syncPreview = undefined;
       this.syncPage = 1;
       this.syncStatus = '本次流程已结束。重新生成差异预览可查看最新状态。';
-      this.syncBusy = false;
+      try{releaseSyncLease(operation);}finally{this.syncBusy = false;}
     }
   }
 
@@ -4232,6 +4245,9 @@ struct Index {
         !traktAuth.isCurrent(clientId, preview.account.generation)) { return; }
     const session = traktAuth.session(clientId);
     if (!session) { return; }
+    if(this.manualRunning){return;}
+    const operation=trySyncLease(this.context().filesDir);
+    if(!operation){this.mediaSyncStatus='同步正在进行，请稍后重试。';return;}
     this.syncBusy = true;
     this.mediaSelected = undefined;
     this.mediaWatchTime = '';
@@ -4291,7 +4307,7 @@ struct Index {
           this.mediaLogs = await store.operationLogs(preview.account.uuid);
         }
       } catch (error) { this.mediaPreviewStatus += '；本机日志刷新失败。'; }
-      this.syncBusy = false;
+      try{releaseSyncLease(operation);}finally{this.syncBusy = false;}
     }
   }
 
