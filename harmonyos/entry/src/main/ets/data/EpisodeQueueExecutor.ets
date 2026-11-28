@@ -53,7 +53,7 @@ export async function executeEpisodeQueue(store: EpisodeStore, expected: string,
       if (!eligible.length) {
         status = '只读核对完成：已清理 ' + reconciled + ' 集；剩余 ' + pending.length +
           ' 集受保护或目录异常，未发送新增请求。'; publishStatus(status);
-        return;
+        return status;
       }
       stage = '上传未发送的新增分集';
       if (!canSend()) { throw new Error('Foreground ended'); }
