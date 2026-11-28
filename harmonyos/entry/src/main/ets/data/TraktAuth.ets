@@ -159,8 +159,9 @@ class TraktAuth {
     const lease = tryVaultLock();
     if (!lease) { this.busy = false; this.status('授权存储正在使用，请重新授权。'); return; }
     this.status('正在确认授权…');
-    const request = http.createHttp();
+    let request: http.HttpRequest | undefined;
     try {
+      request = http.createHttp();
       const response = await request.request('https://auth.trakt.tv/oauth/token', {
         method: http.RequestMethod.POST,
         header: { 'Content-Type': 'application/json' },
@@ -195,7 +196,7 @@ class TraktAuth {
         this.status('授权失败，请检查应用配置、回调地址及网络后重试。');
       }
     } finally {
-      request.destroy();
+      if (request) { request.destroy(); }
       releaseVaultLock(lease);
       if (pending.generation === this.generation) {
         this.busy = false;

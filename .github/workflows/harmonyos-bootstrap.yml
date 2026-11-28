@@ -61,7 +61,60 @@ jobs:
         if: ${{ hashFiles('harmonyos/build-profile.json5') != '' }}
         run: python3 harmonyos/tools/preflight_arkui.py
 
+      # Optional production candidate. Only an independently reviewed digest
+      # committed to source enables it; no restore-keys or self-signed cache.
+      - name: Read trusted closure pin
+        id: closure-pin
+        run: |
+          set -euo pipefail
+          pin=harmonyos/ci/sdk-closure-pin.txt
+          if [[ ! -f "$pin" ]]; then exit 0; fi
+          mapfile -t lines < "$pin"
+          [[ ${#lines[@]} == 2 && "${lines[0]}" =~ ^closure-6\.1\.1\.280-Linux-X64-[a-f0-9]{40}-[0-9]+-[0-9]+$ && "${lines[1]}" =~ ^[a-f0-9]{64}$ ]] || exit 1
+          echo "key=${lines[0]}" >> "$GITHUB_OUTPUT"
+          echo "sha=${lines[1]}" >> "$GITHUB_OUTPUT"
+      - name: Restore independently pinned SDK candidate
+        if: steps.closure-pin.outputs.key != ''
+        id: closure-cache
+        uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684
+        with:
+          path: |
+            ${{ runner.temp }}/closure-sdk.tar.zst
+            ${{ runner.temp }}/closure-sdk.sha256
+            ${{ runner.temp }}/full.hap
+          key: ${{ steps.closure-pin.outputs.key }}
+      - name: Try verified cached native build
+        if: steps.closure-cache.outputs.cache-hit == 'true'
+        id: closure-build
+        continue-on-error: true
+        env:
+          PINNED_SHA: ${{ steps.closure-pin.outputs.sha }}
+        run: |
+          set -euo pipefail
+          start=$(date +%s)
+          cd "$RUNNER_TEMP"
+          printf '%s  %s\n' "$PINNED_SHA" closure-sdk.tar.zst | sha256sum -c -
+          mkdir -p closure-native
+          zstd -dc closure-sdk.tar.zst | tar -xf - -C closure-native
+          export PATH="$RUNNER_TEMP/closure-native/command-line-tools/bin:$RUNNER_TEMP/closure-native/command-line-tools/tool/node/bin:$PATH"
+          export HOS_SDK_HOME="$RUNNER_TEMP/closure-native/command-line-tools/sdk"
+          export DEVECO_SDK_HOME="$HOS_SDK_HOME"
+          cd "$GITHUB_WORKSPACE"
+          node --version; ohpm --version; hvigorw --version
+          python3 harmonyos/tools/preflight_arkui.py --sdk "$HOS_SDK_HOME"
+          cd harmonyos
+          ohpm install --all
+          hvigorw assembleHap --mode module -p module=entry@default -p product=default -p buildMode=debug --no-daemon --optimization-strategy=performance
+          test -n "$(find entry/build -type f -name '*.hap' -print -quit)"
+          echo "Verified closure build seconds=$(( $(date +%s)-start ))" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Clean failed candidate before full fallback
+        if: steps.closure-build.outcome == 'failure'
+        run: |
+          set -euo pipefail
+          git clean -fdx -- harmonyos
+          rm -rf "$RUNNER_TEMP/closure-native"
       - name: Check out pinned SDK setup
+        if: steps.closure-build.outcome != 'success'
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: ErBWs/setup-ohos
@@ -72,6 +125,7 @@ jobs:
       # Build 77 stock-runner probe passed both cold and warm HAP builds.
       # Keep pinned setup and verified archive; no unmeasured cache or apt.
       - name: Prepare SDK on stock runner
+        if: steps.closure-build.outcome != 'success'
         id: sdk
         env:
           GH_TOKEN: ${{ github.token }}
@@ -115,6 +169,7 @@ jobs:
           echo "SDK setup seconds=$(( $(date +%s)-start ))" | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Verify toolchain
+        if: steps.closure-build.outcome != 'success'
         run: |
           set -euo pipefail
           node --version
@@ -132,12 +187,12 @@ jobs:
           }
 
       - name: Install project dependencies
-        if: ${{ inputs.mode == 'build' || hashFiles('harmonyos/build-profile.json5') != '' }}
+        if: ${{ steps.closure-build.outcome != 'success' && (inputs.mode == 'build' || hashFiles('harmonyos/build-profile.json5') != '') }}
         working-directory: harmonyos
         run: ohpm install --all
 
       - name: Build native HAP
-        if: ${{ inputs.mode == 'build' || hashFiles('harmonyos/build-profile.json5') != '' }}
+        if: ${{ steps.closure-build.outcome != 'success' && (inputs.mode == 'build' || hashFiles('harmonyos/build-profile.json5') != '') }}
         working-directory: harmonyos
         run: |
           export DEVECO_SDK_HOME="$HOS_SDK_HOME"
@@ -199,6 +254,7 @@ jobs:
           python3 harmonyos/tools/test_sync_coordinator.py
           python3 harmonyos/tools/test_observation_delta.py
           python3 harmonyos/tools/test_sync_batch_index.py
+          python3 harmonyos/tools/test_sync_schedule.py
           echo '34 historical regressions and custom-list, statistics, list persistence, rating and people specialist gates passed' >> "$GITHUB_STEP_SUMMARY"
 
   publish-preview:

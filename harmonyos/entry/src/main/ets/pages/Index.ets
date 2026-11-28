@@ -1,4 +1,5 @@
 import { SyncStatusPanel } from './SyncStatusPanel';
+import { lastScheduleWake } from '../data/SyncSchedule';
 import { executeEpisodeQueue } from '../data/EpisodeQueueExecutor';
 import { SyncCoordinator, syncService } from '../model/SyncCoordinator';
 import { GalleryTarget } from '../model/GalleryRules';
@@ -412,6 +413,7 @@ struct Index {
   @State queueRows: QueueEntry[] = [];
   private pageVisible: boolean = false;
   private syncCoordinator: SyncCoordinator = syncService.coordinator;
+  private seenScheduleWake: number = 0;
   private get recoveryPending(): boolean { return this.syncCoordinator.has('episodes'); }
   private set recoveryPending(value: boolean) { this.syncCoordinator.mark('episodes', value); }
   private get mediaRecoveryPending(): boolean { return this.syncCoordinator.has('media'); }
@@ -743,6 +745,11 @@ struct Index {
     this.requestMediaRecovery();
     const initialized = this.startupScheduled;
     this.requestObservation(true);
+    const wake = lastScheduleWake(this.context().filesDir);
+    if (wake > this.seenScheduleWake && this.ready && this.episodeReady && this.signedIn) {
+      this.seenScheduleWake = wake;
+      this.requestSyncNow();
+    }
     this.scheduleInitialRead();
     if (initialized && !this.signedIn) { this.requestProjection(); }
     if (this.autoActive()) { this.requestRecovery(); }

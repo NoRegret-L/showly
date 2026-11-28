@@ -46,7 +46,7 @@ jobs:
           build=(hvigorw assembleHap --mode module -p module=entry@default -p product=default -p buildMode=debug --no-daemon --optimization-strategy=performance)
           parent="$RUNNER_TEMP/parent-source"
           mkdir "$parent"
-          baseline=810af06e12b0207111a7db4e26d3934aa2d4d5bb
+          baseline=db5bf5e99d03340a9cdfb6c8c7d5fa7b2590ea3e
           git cat-file -e "$baseline^{commit}" 2>/dev/null || git fetch --no-tags --depth=1 origin "$baseline"
           git archive "$baseline" harmonyos | tar -xf - -C "$parent"
           echo "Closure parent=$(git rev-parse "$baseline") current=$(git rev-parse HEAD)" | tee -a "$GITHUB_STEP_SUMMARY"
@@ -102,6 +102,19 @@ jobs:
           assert a==b,sorted(k for k in a.keys()|b.keys() if a.get(k)!=b.get(k))
           print('Traced SDK candidate HAP entries equivalent')
           PY
+      - name: Record independent candidate digest
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/closure-proof"
+          sha256sum "$RUNNER_TEMP/closure-sdk.tar.zst" | cut -d' ' -f1 > "$RUNNER_TEMP/closure-proof/sha256"
+          printf '%s\n' "$GITHUB_SHA" > "$RUNNER_TEMP/closure-proof/source"
+          printf '%s\n' "closure-6.1.1.280-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}" > "$RUNNER_TEMP/closure-proof/key"
+      - name: Upload independent closure proof
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: sdk-closure-proof-${{ github.sha }}
+          path: ${{ runner.temp }}/closure-proof/
+          if-no-files-found: error
       - name: Save exact candidate for remote restore experiment
         uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684
         with:
@@ -189,7 +202,7 @@ jobs:
             ${{ runner.temp }}/closure-sdk.tar.zst
             ${{ runner.temp }}/closure-sdk.sha256
             ${{ runner.temp }}/full.hap
-          key: closure-6.1.1.280-Linux-X64-91ba87c7b4d398845f6f9b72f701ea2356c9e382-46154937322-1
+          key: closure-6.1.1.280-Linux-X64-db5bf5e99d03340a9cdfb6c8c7d5fa7b2590ea3e-46155879114-1
           fail-on-cache-miss: true
       - name: Validate old closure against current source
         run: |
