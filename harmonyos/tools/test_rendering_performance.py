@@ -83,7 +83,7 @@ assert "this.candidateRuns+=plan.pending.length" in page
 assert "const tasks = new Map<string,PresentationTask>()" in page
 assert "if (artwork && !this.selectedMedia && !this.viewport.has(item,season))" in page
 assert "if (task.artwork && !this.selectedMedia && !this.viewport.has(task.media,task.season))" in page
-for name in ("discoverRows","searchRows","calendarRows","movieCalendarRows","showRows","movieRowsSource","collectionRowsSource"):
+for name in ("discoverRows","searchRows","calendarRows","movieCalendarRows","showRows","movieRowsSource","showCollectionRowsSource","movieCollectionRowsSource"):
     assert "LazyForEach(this."+name in page
 assert page.count(".onVisibleAreaChange([0]")>=7
 assert "JSON.stringify(entry)" not in page and "JSON.stringify(row) + ':'" not in page
