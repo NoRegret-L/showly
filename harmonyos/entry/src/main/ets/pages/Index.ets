@@ -1,3 +1,5 @@
+import { CommentTarget } from '../model/CommentRules';
+import { CommentsPage } from './CommentsPage';
 import { WatchOptions } from '../model/AvailabilityRules';
 import { WatchSettings } from './WatchSettings';
 import { StreamingSection } from './StreamingSection';
@@ -315,6 +317,14 @@ struct Index {
       }
     }catch(error){}
   }
+  @State commentSheetOpen:boolean=false;
+  @State commentTarget:CommentTarget={kind:'show',id:0,label:''};
+  private commentScope:string='';
+  private commentRevision:number=0;
+  private commentClient:string='';
+  private commentCurrent():boolean{return this.commentSheetOpen&&this.pageVisible&&this.commentScope===this.currentProgressScope()&&this.commentRevision===this.detailRevision&&this.commentClient===this.clientId;}
+  private openComments(t:CommentTarget):void{if(!this.clientId||!this.selectedMedia){return;}this.commentScope=this.currentProgressScope();this.commentRevision=this.detailRevision;this.commentClient=this.clientId;this.commentTarget=t;this.commentSheetOpen=true;}
+  @Builder commentSheet(){CommentsPage({target:this.commentTarget,client:this.commentClient,scope:this.commentScope,session:()=>this.commentScope.startsWith('account:')?traktAuth.session(this.commentClient):undefined,current:()=>this.commentCurrent()&&!this.setupBusy&&!this.authBusy,onClose:()=>{this.commentSheetOpen=false;}})}
   private partRatingScope():string{return JSON.stringify([this.currentProgressScope(),this.activeCloud()?.generation??-1,this.activeCloud()?.activity??'',this.cloudFresh]);}
   private publishSeasonPresentation():void{this.seasonDetail=this.seasonDetailOwner.touch();this.updateEpisodePageRows();}
   private displaySeasonRows():DetailSeasonRow[]{
@@ -1402,7 +1412,7 @@ struct Index {
       editable:this.localSeason!==0 && this.effectiveEditable && !this.localCatalogNeedsVerification && !this.cloudBusy && !this.syncBusy,
       busy:this.localBusy,status:this.localStatus,onBack:()=>{this.closeSeasonPage();},
       onToggle:(id: number,watched: boolean)=>{this.markSeasonPage(item,watched,id);},
-      onMarkSeason:(watched: boolean)=>{this.markSeasonPage(item,watched);},onQuickProgress:(id:number)=>{this.quickFillTo(item,id);},onRate:(id:number,label:string)=>{this.openRating('episode',id,label);}
+      onMarkSeason:(watched: boolean)=>{this.markSeasonPage(item,watched);},onQuickProgress:(id:number)=>{this.quickFillTo(item,id);},onRate:(id:number,label:string)=>{this.openRating('episode',id,label);},onComments:(id:number,episode:number)=>{this.openComments({kind:'episode',id:id,showId:Number(item.id.substring(5)),season:this.localSeason,episode:episode,label:'第 '+this.localSeason+' 季 · 第 '+episode+' 集'});}
     })
   }
   private async initializePresentation(context: common.UIAbilityContext): Promise<void> {
@@ -6781,6 +6791,7 @@ struct Index {
     this.loadDetailRating(item); this.loadDetailFanart(item); this.loadDetailSummary(item);
   }
   private closeDetail(preserveRelated:boolean=false): void {
+    this.commentSheetOpen=false;
     this.closeRating();
     if(!preserveRelated){this.relatedBack=[];this.relatedOffsets=[];}
     this.detailSession.clear(); this.detailConsumer=this.detailSession.consumer();
@@ -6813,6 +6824,7 @@ struct Index {
     this.openDetail(previous).then(()=>{const revision=this.detailRevision;this.getUIContext().postFrameCallback(new RestoreScrollFrame(()=>{if(revision===this.detailRevision&&this.selectedMedia?.id===previous.id){try{this.detailScroller.scrollTo({xOffset:0,yOffset:offset,animation:false});}catch(error){}}}));});return true;
   }
   onBackPress(): boolean {
+    if(this.commentSheetOpen){this.commentSheetOpen=false;return true;}
     if(this.ratingSheetOpen){this.closeRating();return true;}
     if (this.episodePage && this.selectedMedia) { this.closeSeasonPage(); return true; }
     if (this.selectedMedia) {
@@ -7025,6 +7037,7 @@ struct Index {
         DetailRelatedSection({item:item,client:this.clientId,scope:this.currentSearchAccount(),cacheDir:this.context().filesDir,repository:this.presentation,
           hiddenKey:this.hiddenVersion('show'),onOpen:(related:Media)=>{this.openRelatedDetail(related);}})
       },(key:string)=>key)
+      Button('评论').fontSize(14).enabled(!!this.clientId).onClick(()=>{this.openComments({kind:item.kind,id:Number(item.id.substring(item.kind.length+1)),label:this.displayTitle(item)});})
       Button('我的评分').fontSize(14).enabled(!!this.currentProgressScope()&&!this.syncBusy&&!this.cloudBusy).onClick(()=>{this.openRating(item.kind,Number(item.id.substring(item.kind.length+1)),this.displayTitle(item));})
       if(this.detailUi.ratingBusy){LoadingProgress().width(24).height(24)}
       if(this.detailUi.rating!==undefined){Text('我的评分：'+this.detailUi.rating+' / 10').fontSize(15).width('100%')}
@@ -7357,5 +7370,6 @@ struct Index {
         .backgroundColor($r('app.color.showly_surface'))
     }.width('100%').height('100%').backgroundColor($r('app.color.showly_background'))
       .bindSheet($$this.ratingSheetOpen,this.ratingSheet(),{height:SheetSize.MEDIUM,showClose:true})
+      .bindSheet($$this.commentSheetOpen,this.commentSheet(),{height:SheetSize.LARGE,showClose:true})
   }
 }
