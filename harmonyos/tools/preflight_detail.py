@@ -13,4 +13,5 @@ assert "@State detailUi:" in p and "@State detailBusy:" not in p
 assert "message:'选择时间范围'" in p
 assert "this.detailOwner.current(token,scope,item.id)" in p
 assert "this.detailSession.read(scope,item.id,readRevision)" in p
+assert "consumer=this.detailConsumer" in p and "readDetails(item,clientId,reload,consumer)" in p
 print("Source versions, Python syntax, detail lifecycle and historical dialog assertions passed")

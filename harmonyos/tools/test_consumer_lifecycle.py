@@ -27,7 +27,13 @@ page=(root/"pages"/"Index.ets").read_text()
 for name in ("Show","Movie","Calendar","MovieCalendar","Collection","Detail","Discover","Search"):
     assert "@Watch('on"+name+"ViewChanged')" in page
 assert "this.movieRowsSource.replace([],[],[])" in page and "this.movieCalendarRows.replace([],[],[])" in page
-assert "repo.remote(client,query,consumer)" in page and "readDetails(item, clientId, reload,this.detailConsumer)" in page
+assert "repo.remote(client,query,consumer)" in page
+detail=page.split("  private async loadDetailSummary(",1)[1].split("  private async loadDetailRating(",1)[0]
+assert "consumer=this.detailConsumer" in detail
+assert "readDetails(item,clientId,reload,consumer)" in detail
+assert "this.detailCurrent(token,scope,item)&&this.clientId===clientId&&!consumer.cancelled()" in detail
+assert "if(!current()){return;}" in detail
+assert "this.detailOwner.summary(token,data,false,'')" in detail
 assert "const rows = prepared;" in page and "return {items:rows,page:1,pages:1,total:rows.length};" in page
 assert "this.viewport.update(item,season,urls,visible,slot)) { this.requestViewportPresentation();" in page
 assert "await store.saveReadCheckpoints(account.uuid, result.matches)" in page

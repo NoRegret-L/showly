@@ -2,6 +2,7 @@
 """Scoped journal plan, active catalog ownership and full evidence equivalence."""
 from pathlib import Path
 import shutil,subprocess,tempfile,sqlite3,json
+import re
 root=Path(__file__).resolve().parents[1]/"entry/src/main/ets"
 store=(root/"data/EpisodeStore.ets").read_text()
 projection=(root/"data/LibraryProjection.ets").read_text()
@@ -23,6 +24,10 @@ for(let i=0;i<100;i++){
  assert.equal(initial.summary,undefined);assert.equal(s.summary,summary);
  owner.summary(token,summary,false,'');assert.strictEqual(owner.snapshot(),s);
  owner.personalRating(token,8,false,'');assert.strictEqual(owner.snapshot().summary,summary);
+ const ratingSnapshot=owner.snapshot();
+ owner.summary(token,summary,true,'cached');assert.equal(owner.snapshot().rating,8);
+ owner.summary(token,summary,false,'offline');assert.strictEqual(owner.snapshot().summary,summary);
+ assert.equal(ratingSnapshot.summaryStatus,'');assert.equal(owner.snapshot().summaryStatus,'offline');
  owner.artwork(token,'fanart',false,'');assert.equal(owner.snapshot().rating,8);
  owner.reveal(token,'rating');assert(owner.snapshot().ratingRevealed);assert(!owner.snapshot().descriptionRevealed);
  const newer=owner.begin('B','show:1',{description:true,rating:true,reveal:false});
@@ -87,3 +92,26 @@ assert "this.presentation?.readCachedDetail(item,consumer)" in page and "this.pr
 assert "readCollectionRatings(session,item.kind,source.activity)" in page
 assert "this.detailFanart.visible(" in page
 assert "DetailHeader({" in page
+
+# Verify the exact optional presentation-cache SQL with a closed/reopened database.
+# This is a host SQLite round trip, not a native ArkData/device test.
+repo=(root/"data/PresentationRepository.ets").read_text()
+schema=re.search(r"CREATE TABLE IF NOT EXISTS presentation_detail \(id TEXT PRIMARY KEY,payload TEXT NOT NULL\)",repo).group(0)
+write_sql="INSERT OR REPLACE INTO presentation_detail(id,payload) VALUES(?,?)"
+read_sql="SELECT payload FROM presentation_detail WHERE id=?"
+assert write_sql in repo and read_sql in repo
+summary={"title":"Fixture","year":2026,"overview":"Public summary","runtime":42,"rating":8.0,"status":"returning series","genres":"drama","airedEpisodes":2,"posterUrls":[],"fanartUrls":[]}
+with tempfile.TemporaryDirectory() as tmp:
+    db_path=Path(tmp)/"presentation.db"
+    conn=sqlite3.connect(db_path)
+    conn.execute(schema)
+    conn.execute(write_sql,("show:1",json.dumps({"id":"show:1","summary":summary})))
+    conn.commit();conn.close()
+    conn=sqlite3.connect(db_path)
+    assert json.loads(conn.execute(read_sql,("show:1",)).fetchone()[0])["summary"]==summary
+    assert conn.execute(read_sql,("show:2",)).fetchone() is None
+    assert conn.execute(read_sql,("movie:1",)).fetchone() is None
+    conn.close()
+assert "row.id!==item.id" in repo and "consumer.check()" in repo
+assert "readCachedDetail(item,consumer)" in page and "if(cached)" in page
+print("Public detail cache: exact SQL cold reopen, show/movie identity separation and offline snapshot retention passed (host)")

@@ -44,6 +44,8 @@ jobs:
             export PATH="$GITHUB_WORKSPACE/.github/ci/ts/bin:$PATH"
           fi
           python3 harmonyos/tools/preflight_detail.py
-          python3 harmonyos/tools/run_regressions.py | tee "$RUNNER_TEMP/regressions.log"
+          result=0
+          python3 harmonyos/tools/run_regressions.py | tee "$RUNNER_TEMP/regressions.log" || result=$?
           echo "mode=${{ matrix.mode }} shared_hits=$(grep -c '^TSC_IDENTICAL_CACHE_HIT' "$RUNNER_TEMP/regressions.log" || true) shared_misses=$(grep -c '^TSC_IDENTICAL_CACHE_MISS' "$RUNNER_TEMP/regressions.log" || true)" | tee -a "$GITHUB_STEP_SUMMARY"
           tail -n 1 "$RUNNER_TEMP/regressions.log" >> "$GITHUB_STEP_SUMMARY"
+          exit "$result"
