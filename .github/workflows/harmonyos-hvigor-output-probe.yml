@@ -2,7 +2,7 @@ name: HarmonyOS Hvigor intermediate output pair
 on:
   push:
     branches: [harmonyos-bootstrap]
-    paths: ['.github/workflows/harmonyos-hvigor-output-probe.yml']
+    paths: ['.github/workflows/harmonyos-hvigor-output-probe.yml'] # repeat after native comment key fix
   workflow_dispatch:
 permissions:
   contents: read

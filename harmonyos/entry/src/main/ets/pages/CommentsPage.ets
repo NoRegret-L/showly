@@ -32,8 +32,8 @@ export struct CommentsPage{
  aboutToAppear():void{this.active=true;this.initialize();}
  aboutToDisappear():void{this.active=false;this.signal.cancel();this.index.clear();this.draft='';}
  private allowed():boolean{return this.active&&this.current()&&!this.signal.cancelled();}
- private key(row:CommentRow):string{return JSON.stringify([row,this.index.isRevealed(row),this.uuid,this.username,this.pending,this.replyNext.get(row.id)??-1,this.deleting]);}
- private publish():void{const rows=this.index.project(this.uuid,this.username);this.source.replace(rows,rows.map((r:CommentRow)=>r.id.toString()),rows.map((r:CommentRow)=>this.key(r)));}
+ private commentRowKey(row:CommentRow):string{return JSON.stringify([row,this.index.isRevealed(row),this.uuid,this.username,this.pending,this.replyNext.get(row.id)??-1,this.deleting]);}
+ private publish():void{const rows=this.index.project(this.uuid,this.username);this.source.replace(rows,rows.map((r:CommentRow)=>r.id.toString()),rows.map((r:CommentRow)=>this.commentRowKey(r)));}
  private async initialize():Promise<void>{
   try{this.repo=await openComments(this.getUIContext().getHostContext() as common.UIAbilityContext);if(!this.allowed()){return;}
    const session=this.session();if(session&&this.scope.startsWith('account:')){try{const a=await this.repo.account(this.scope,session,()=>this.allowed());if(this.allowed()){this.uuid=a.uuid;this.username=a.username;this.pending=await this.repo.pending(this.scope);}}catch(error){this.uuid='';this.username='';}}
@@ -71,7 +71,7 @@ export struct CommentsPage{
     Column({space:3}){Text(row.username+(ownComment(row,this.uuid,this.username)?' · 我':'')).fontSize(14).fontWeight(FontWeight.Medium);Text(row.updated?new Date(row.updated).toLocaleString():row.created?new Date(row.created).toLocaleString():'日期未知').fontSize(11)}.layoutWeight(1).alignItems(HorizontalAlign.Start)
     if(row.rating){Text(row.rating+' / 10').fontSize(12)}
    }.width('100%')
-   if(hasSpoiler(row)&&!this.index.isRevealed(row)){Button('包含剧透，点击查看').fontSize(13).onClick(()=>{this.index.reveal(row);this.source.patchRow(row.id.toString(),row,this.key(row));})}
+   if(hasSpoiler(row)&&!this.index.isRevealed(row)){Button('包含剧透，点击查看').fontSize(13).onClick(()=>{this.index.reveal(row);this.source.patchRow(row.id.toString(),row,this.commentRowKey(row));})}
    else{Text(row.text).fontSize(14).width('100%')}
    Row({space:6}){
     if(!row.parent&&row.replies>0&&(!this.index.loaded(row.id)||(this.replyNext.get(row.id)??0)>0)){Button(this.index.loaded(row.id)?'更多回复':'查看 '+row.replies+' 条回复').fontSize(11).enabled(!this.busy).onClick(()=>{this.load(row.id,this.replyNext.get(row.id)??1);})}

@@ -44,3 +44,10 @@ for component in ("StreamingSection","MovieSeriesSection"):
     assert "private updateSectionVisibility(" in source
     assert "this.updateSectionVisibility(v&&r>0)" in source
 print("Availability native visibility method preflight passed")
+
+# Custom component helpers must not shadow inherited ArkUI attributes.
+comment_page=(root/"entry/src/main/ets/pages/CommentsPage.ets").read_text()
+assert "private key(" not in comment_page and "this.key(" not in comment_page
+assert "private commentRowKey(" in comment_page and comment_page.count("this.commentRowKey(")==2
+assert ".bindSheet($$this.commentSheetOpen,this.commentSheet()" in p
+print("Comments native component key and sheet preflight passed")
