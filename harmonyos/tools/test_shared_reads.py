@@ -27,8 +27,9 @@ let stopped=false;
 let active=0;
 let maximum=0;
 export function scenario(change:boolean=false,fail:boolean=false) { requests=[];activity='revision';changed=change;stopped=fail;active=0;maximum=0; }
-export function setVersions(m:string,s:string){movies=m;shows=s;activity='changed-revision';}
-async function readActivityVersions(session:TraktSession):Promise<ObservationVersions> { return {all:await readActivity(session),movies,shows}; }
+let watchedShows:string|undefined,queuedShows:string|undefined;
+export function setVersions(m:string,s:string,w?:string,q?:string){movies=m;shows=s;watchedShows=w;queuedShows=q;activity='changed-revision';}
+async function readActivityVersions(session:TraktSession):Promise<ObservationVersions> { return {all:await readActivity(session),movies,shows,watchedShows,queuedShows}; }
 export function stats(){return {requests,maximum,active};}
 function ensureCurrent(session:TraktSession):void { if(session.generation!==1)throw Error('session'); }
 async function readActivity(session:TraktSession):Promise<string> {
@@ -107,6 +108,17 @@ const {mergeText}=require('./MediaPresentation.js');
  const moviesOnly=await h.readCloudLibraryIncremental(session,delta);
  assert.equal(h.stats().requests.length,6); // global revision identical but domain inconsistent -> full
  assert.deepEqual(moviesOnly.movieDetails,baseline.movieDetails);
+ h.scenario();h.setVersions('m','s','w','q');
+ const split=await h.readCloudLibraryIncremental(session);
+ h.scenario();h.setVersions('m','s2','w2','q');
+ const splitPrior={...split,activity:'prior',versions:{...split.versions,all:'prior'}};
+ const showOnly=await h.readCloudLibraryIncremental(session,splitPrior);
+ assert.equal(h.stats().requests.length,3);
+ assert.deepEqual(showOnly.shows,split.shows);
+ assert.deepEqual(showOnly.watchlist,split.watchlist);
+ assert.deepEqual(showOnly.queueDates,split.queueDates);
+ assert.deepEqual(showOnly.movieDetails,split.movieDetails);
+ console.log('Split show endpoint fixture: 6 full requests -> 3; complete observation parity passed');
  const legacy={...snap};delete legacy.movieDetails;validateObservation(legacy);
  h.scenario(true);
  await assert.rejects(h.readCloudLibrary(session),/activity changed/);

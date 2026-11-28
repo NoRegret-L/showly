@@ -157,3 +157,63 @@ jobs:
           assert manifest(sys.argv[1])==manifest(sys.argv[2])
           print('Remote cache HAP entries equivalent; experiment only')
           PY
+
+  cross-version-restore:
+    needs: pair
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+          sparse-checkout: harmonyos
+      - name: Restore current full HAP reference
+        uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684
+        with:
+          path: |
+            ${{ runner.temp }}/closure-sdk.tar.zst
+            ${{ runner.temp }}/closure-sdk.sha256
+            ${{ runner.temp }}/full.hap
+          key: closure-6.1.1.280-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          fail-on-cache-miss: true
+      - name: Preserve reference and start independent old-cache timer
+        run: |
+          set -euo pipefail
+          mv "$RUNNER_TEMP/full.hap" "$RUNNER_TEMP/current-full.hap"
+          rm "$RUNNER_TEMP/closure-sdk.tar.zst" "$RUNNER_TEMP/closure-sdk.sha256"
+          date +%s%N > "$RUNNER_TEMP/cache-start"
+      - name: Restore exact Build 92 closure
+        uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684
+        with:
+          path: |
+            ${{ runner.temp }}/closure-sdk.tar.zst
+            ${{ runner.temp }}/closure-sdk.sha256
+            ${{ runner.temp }}/full.hap
+          key: closure-6.1.1.280-Linux-X64-91ba87c7b4d398845f6f9b72f701ea2356c9e382-46154937322-1
+          fail-on-cache-miss: true
+      - name: Validate old closure against current source
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          echo "Cross-version transfer nanoseconds=$(( $(date +%s%N)-$(cat cache-start) ))" | tee -a "$GITHUB_STEP_SUMMARY"
+          sha256sum -c closure-sdk.sha256
+          mkdir verified-sdk
+          zstd -dc closure-sdk.tar.zst | tar -xf - -C verified-sdk
+          echo "Cross-version SDK ready nanoseconds=$(( $(date +%s%N)-$(cat cache-start) ))" | tee -a "$GITHUB_STEP_SUMMARY"
+          export PATH="$RUNNER_TEMP/verified-sdk/command-line-tools/bin:$RUNNER_TEMP/verified-sdk/command-line-tools/tool/node/bin:$PATH"
+          export DEVECO_SDK_HOME="$RUNNER_TEMP/verified-sdk/command-line-tools/sdk"
+          export HOS_SDK_HOME="$DEVECO_SDK_HOME"
+          cd "$GITHUB_WORKSPACE/harmonyos"
+          ohpm install --all
+          hvigorw assembleHap --mode module -p module=entry@default -p product=default -p buildMode=debug --no-daemon --optimization-strategy=performance
+          hap="$(find entry/build -type f -name '*.hap' -print -quit)"
+          test -s "$hap"
+          python3 - "$RUNNER_TEMP/current-full.hap" "$hap" <<'PY'
+          import sys,zipfile,hashlib
+          def manifest(path):
+              with zipfile.ZipFile(path) as z:
+                  assert z.testzip() is None
+                  return {n:hashlib.sha256(z.read(n)).hexdigest() for n in z.namelist() if not n.endswith('/')}
+          assert manifest(sys.argv[1])==manifest(sys.argv[2])
+          print('Build 92 closure on Build 93 source: HAP entries equivalent')
+          PY
