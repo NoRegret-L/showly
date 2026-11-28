@@ -1,3 +1,5 @@
+import { SeasonDetailOwner, SeasonDetailSnapshot, emptySeasonDetail, VerifiedEpisode, DetailEpisodeEntry } from '../model/SeasonDetailOwner';
+import { DetailSeasons } from './DetailSeasons';
 import { DetailSummarySection } from './DetailSummarySection';
 import { DetailPeopleSection } from './DetailPeopleSection';
 import { DetailRelatedSection } from './DetailRelatedSection';
@@ -245,8 +247,9 @@ struct Index {
   private relatedOffsets:number[]=[];
   @State episodePage: boolean=false;
   private episodeRowOwner=new EpisodeRowsOwner();
-  @State episodeRowCount: number=0;
-  @State seasonSummaries: SeasonSummary[]=[];
+  private seasonDetailOwner:SeasonDetailOwner=new SeasonDetailOwner();
+  @State seasonDetail:SeasonDetailSnapshot=emptySeasonDetail();
+  private clearSeasonDetail():void{this.seasonDetailOwner.clear();this.seasonDetail=this.seasonDetailOwner.snapshot();this.episodeRowOwner.clear();}
   private presentationReaders: Map<string, ReadCancel>=new Map<string, ReadCancel>();
   private presentationReaderTasks: Map<string, PresentationTask>=new Map<string, PresentationTask>();
   private businessPresentationTasks?: Map<string,PresentationTask>;
@@ -1111,7 +1114,7 @@ struct Index {
     const uuid = this.cloudUuid;
     if (this.signedIn && !snapshot) {
       this.localSeries = undefined;
-      this.episodeRowOwner.clear(); this.episodeRowCount=0; this.seasonSummaries=[];
+      this.clearSeasonDetail();
       this.effectiveEditable = false;
       this.localStatus = '正在等待账户验证；暂不读取本机私有记录。';
       return;
@@ -1134,14 +1137,17 @@ struct Index {
         !result.state.seasons.some((season: LocalSeasonState) => season.number === this.localSeason)) {
       this.localSeason = result.state.seasons[0].number;
     }
-    this.seasonSummaries=summarizeSeasons<LocalEpisodeState>(result.state?.seasons??[]);
+    const verified:VerifiedEpisode[]=[];
+    for(const season of result.state?.seasons??[]){for(const row of season.episodes){verified.push({id:row.episode.id,season:row.episode.season,number:row.episode.number,title:row.episode.title,watched:row.watched});}}
+    this.seasonDetail=this.seasonDetailOwner.update(JSON.stringify([scope,item.id]),full,verified);
     this.updateEpisodePageRows();
     this.localStatus = !result.complete ? '分集资料未齐，暂不允许修改；请刷新个人库或目录。' :
       !this.effectiveEditable ? '当前账户仅供浏览；本机库需明确绑定，不能跨账户修改。' :
       result.state ? '有效观看状态 · 本机操作仍使用原有同步保护' : '请联网获取分集目录';
   }
 
-  private async markLocal(item: Media, ids: number[], watched: boolean): Promise<void> {
+  private async markLocal(item: Media, ids: number[], watched: boolean,watchedAt:number=Date.now()): Promise<void> {
+    if(!validWatchTime(watchedAt,Date.now())||this.selectedMedia?.id!==item.id){return;}
     if (this.isHidden(item) || this.collectionEditBusy) { return; }
     const store = this.episodeStore;
     if (!store || !this.episodeReady || this.localBusy || this.cloudBusy || this.syncBusy || ids.length === 0 ||
@@ -1176,7 +1182,7 @@ struct Index {
       const editRevision=store.readModelRevision();
       const evidence=await projectDetail(store,await store.fullCatalog(item.id),item.id,editSnapshot,editUuid);
       if (revision !== this.detailRevision || !this.canEditLibrary() || editSnapshot!==this.activeCloud() || editUuid!==this.cloudUuid || !store.projectionReadable(editRevision) || !evidence.complete || !evidence.localAllowed) { return; }
-      await store.mark(item.id, ids, watched, watched && auto ? auto.uuid : '');
+      await store.mark(item.id, ids, watched, watched && auto && this.autoActive() ? auto.uuid : '',watchedAt);
       if (watched && (!previous || !hasTrackingEvidence(previous)) && previous?.localRecord?.followState !== 'no') {
         await this.recordFirstEpisodeDate(dateScope,item.id);
       }
@@ -1235,55 +1241,27 @@ struct Index {
 
   @Builder
   localEpisodesView(item: Media) {
-    Column({ space: 10 }) {
-      Text('分集观看状态').fontSize(20).fontWeight(FontWeight.Medium).width('100%')
-      Text('仅统计已播普通集。').fontSize(12).width('100%')
-      if (!this.episodeReady) {
-        Text(this.episodeInitStatus || '正在打开分集数据库…').fontSize(13).width('100%')
-      } else {
-        Button(this.localBusy ? '更新中…' : '刷新分集')
-          .enabled(!this.localBusy && !this.cloudBusy && !this.syncBusy && !!this.clientId)
-          .onClick(() => { this.loadLocalEpisodes(item, true); })
-        if (this.localBusy) { Text('正在更新分集…').fontSize(12).width('100%') }
-        else if (!this.localSeries) { Text('暂无完整分集资料，请刷新。').fontSize(12).width('100%') }
-        else if (!this.effectiveEditable) { Text('暂不可编辑，请检查同步设置。').fontSize(12).width('100%') }
-        if (!this.localBusy && this.localStatus.includes('失败')) { Text(this.localStatus).fontSize(12).width('100%') }
-        if (this.localSeries) {
-          if (this.localCatalogNeedsVerification) { Text('恢复的资料需刷新后才能编辑。').fontSize(12).width('100%') }
-          Text('已看 ' + this.localSeries.completed + ' / ' + this.localSeries.catalog.episodes.length + ' 集')
-            .fontSize(16).width('100%')
-          if (this.localSeries.catalog.episodes.length > 0) {
-            Progress({ value: this.localSeries.completed, total: this.localSeries.catalog.episodes.length,
-              type: ProgressType.Linear }).width('100%').color($r('app.color.showly_accent'))
-            Text(this.localSeries.next ? '下一集：' + this.localSeries.next : '当前目录已看完')
-              .fontSize(14).width('100%')
-          }
-          ForEach(this.seasonSummaries,(season: SeasonSummary)=>{
-            Button('第 '+season.number+' 季 · '+season.completed+'/'+season.count+'  ›')
-              .width('100%').fontSize(14).onClick(()=>{ this.openSeasonPage(season.number); })
-          },(season: SeasonSummary)=>season.number+':'+season.completed+':'+season.count)
-        }
-        if (this.extraSchedule().length > 0) { this.scheduleView() }
-      }
-    }.width('100%')
+    DetailSeasons({rows:this.seasonDetail.seasons,ready:this.episodeReady,busy:this.localBusy,editable:this.effectiveEditable,
+      verify:this.localCatalogNeedsVerification,refreshable:!this.cloudBusy&&!this.syncBusy&&!!this.clientId,
+      status:this.episodeReady?this.localStatus:this.episodeInitStatus,completed:this.localSeries?.completed??0,count:this.localSeries?.catalog.episodes.length??0,next:this.localSeries?.next??'',
+      onRefresh:()=>{this.loadLocalEpisodes(item,true);},onOpen:(season:number)=>{this.openSeasonPage(season);}})
   }
 
   private currentSeason(): LocalSeasonState | undefined {
     return this.localSeries?.seasons.find((season: LocalSeasonState)=>season.number===this.localSeason);
   }
   private updateEpisodePageRows(): void {
-    if (!this.episodePage || !this.selectedMedia) { this.episodeRowOwner.clear(); this.episodeRowCount=0; return; }
+    if (!this.episodePage || !this.selectedMedia) { this.episodeRowOwner.clear(); this.seasonDetail=this.seasonDetailOwner.count(0); return; }
     const item=this.selectedMedia;
-    const season=this.currentSeason();
-    const rows=(season?.episodes??[]).map((entry: LocalEpisodeState): EpisodeDisplayRow=>({
-      id:entry.episode.id,number:entry.episode.number,watched:entry.watched,originalTitle:entry.episode.title,
-      title:this.displayEpisode(item,entry.episode.season,entry.episode.id,entry.episode.title)
+    const rows=this.seasonDetailOwner.season(this.localSeason).map((entry:DetailEpisodeEntry):EpisodeDisplayRow=>({
+      id:entry.id,number:entry.number,watched:entry.watched,originalTitle:entry.title,eligible:entry.eligible,firstAired:entry.firstAired,
+      title:this.displayEpisode(item,entry.season,entry.id,entry.title)
     }));
-    this.episodeRowOwner.replace(this.episodeRowsScope(),rows); this.episodeRowCount=rows.length;
+    this.episodeRowOwner.replace(this.episodeRowsScope(),rows);this.seasonDetail=this.seasonDetailOwner.count(rows.length);
   }
   private episodeRowsScope(): string { return JSON.stringify([this.currentSearchAccount(),this.selectedMedia?.id??'',this.localSeason,this.presentationLanguage]); }
   private openSeasonPage(season: number): void {
-    if (!this.selectedMedia || !this.localSeries?.seasons.some((row: LocalSeasonState)=>row.number===season)) { return; }
+    if (!this.selectedMedia || !this.seasonDetail.seasons.some((row:SeasonSummary)=>row.number===season)) { return; }
     try { this.detailScrollOffset=this.detailScroller.currentOffset().yOffset; } catch (error) { this.detailScrollOffset=0; }
     this.localSeason=season;
     this.episodePage=true;
@@ -1291,7 +1269,7 @@ struct Index {
     this.requestPresentation();
   }
   private closeSeasonPage(): void {
-    this.episodePage=false; this.episodeRowOwner.clear(); this.episodeRowCount=0;
+    this.episodePage=false; this.episodeRowOwner.clear(); this.seasonDetail=this.seasonDetailOwner.count(0);
     const revision=this.detailRevision;
     const offset=this.detailScrollOffset;
     this.getUIContext().postFrameCallback(new RestoreScrollFrame(()=>{
@@ -1305,16 +1283,34 @@ struct Index {
     if (!this.episodePage || this.selectedMedia?.id!==item.id || !this.pageVisible) { return; }
     const ids=(this.currentSeason()?.episodes??[]).filter((entry: LocalEpisodeState)=>entry.watched!==watched && (!id || entry.episode.id===id))
       .map((entry: LocalEpisodeState)=>entry.episode.id);
-    this.markLocal(item,ids,watched);
+    if(!watched){this.markLocal(item,ids,false);return;}
+    const season=this.localSeason,scope=this.episodeRowsScope(),revision=this.detailRevision;
+    const release=id?this.seasonDetailOwner.episode(id)?.firstAired??'':'';
+    this.chooseWatchTime(release,(at:number)=>{if(this.episodePage&&season===this.localSeason&&scope===this.episodeRowsScope()&&revision===this.detailRevision){this.markLocal(item,ids,true,at);}});
+  }
+  private quickFillTo(item:Media,id:number):void{
+    if(!this.episodePage||this.selectedMedia?.id!==item.id||!this.effectiveEditable){return;}
+    const delta=this.seasonDetailOwner.delta(id);if(!delta.valid){return;}
+    if(delta.remove.length){this.localStatus='存在后续已看记录；不会自动撤销。请单独核对观看历史。';return;}
+    if(!delta.add.length){this.localStatus='截至本集的已播普通集已看完。';return;}
+    const revision=this.detailRevision,scope=this.episodeRowsScope(),signature=JSON.stringify(delta.add);
+    try{this.getUIContext().showActionSheet({title:'补齐观看进度',message:'确认实际看过这 '+delta.add.length+' 集？保留已有历史，不自动删除。',alignment:DialogAlignment.Bottom,autoCancel:true,sheets:[
+      {title:'确认并选择观看时间',action:()=>{this.chooseWatchTime('',(at:number)=>{
+        if(revision!==this.detailRevision||scope!==this.episodeRowsScope()||!this.episodePage){return;}
+        const fresh=this.seasonDetailOwner.delta(id);if(!fresh.valid||fresh.remove.length||JSON.stringify(fresh.add)!==signature){this.localStatus='进度已变化，请重新选择。';return;}
+        this.markLocal(item,fresh.add,true,at);
+      });}}
+    ]});}catch(error){this.localStatus='无法打开进度确认，未修改记录。';}
   }
   @Builder
   episodeDetailPage(item: Media) {
-    DetailEpisodeList({source:this.episodeRowOwner.source,count:this.episodeRowCount,title:this.displayTitle(item),season:this.localSeason,
+    DetailEpisodeList({source:this.episodeRowOwner.source,count:this.seasonDetail.count,title:this.displayTitle(item),season:this.localSeason,
+      eligibleCount:this.currentSeason()?.episodes.length??0,
       completed:this.currentSeason()?.completed??0,
       editable:this.effectiveEditable && !this.localCatalogNeedsVerification && !this.cloudBusy && !this.syncBusy,
       busy:this.localBusy,status:this.localStatus,onBack:()=>{this.closeSeasonPage();},
       onToggle:(id: number,watched: boolean)=>{this.markSeasonPage(item,watched,id);},
-      onMarkSeason:(watched: boolean)=>{this.markSeasonPage(item,watched);}
+      onMarkSeason:(watched: boolean)=>{this.markSeasonPage(item,watched);},onQuickProgress:(id:number)=>{this.quickFillTo(item,id);}
     })
   }
   private async initializePresentation(context: common.UIAbilityContext): Promise<void> {
@@ -3406,7 +3402,7 @@ struct Index {
     this.cloudLocalAllowed = false;
     this.detailSession.clear(); this.detailConsumer=this.detailSession.consumer();
     this.detailRevision++; this.detailResumePending=!!this.selectedMedia; this.relatedBack=[];this.relatedOffsets=[];this.resetDetailUi();
-    this.episodeRowOwner.clear(); this.episodeRowCount=0; this.seasonSummaries=[];
+    this.clearSeasonDetail();
     this.localSeries = undefined;
     this.effectiveEditable = false;
     this.nextShows = [];
@@ -6674,7 +6670,7 @@ struct Index {
     this.detailRevision++; this.resetDetailUi();
     this.effectiveEditable=false;
     this.localSeries=undefined; this.fullSchedule=undefined;
-    this.episodeRowOwner.clear(); this.episodeRowCount=0; this.seasonSummaries=[];
+    this.clearSeasonDetail();
     this.progress=undefined; this.progressBusy=false;
   }
   private resumeDetail(): void {
@@ -6690,7 +6686,7 @@ struct Index {
     if(!preserveRelated){this.relatedBack=[];this.relatedOffsets=[];}
     this.detailSession.clear(); this.detailConsumer=this.detailSession.consumer();
     this.detailResumePending=false;
-    this.episodePage=false; this.episodeRowOwner.clear(); this.episodeRowCount=0; this.seasonSummaries=[];
+    this.episodePage=false; this.clearSeasonDetail();
     this.detailScrollOffset=0;
     this.resetDetailUi();
     this.detailRevision++;

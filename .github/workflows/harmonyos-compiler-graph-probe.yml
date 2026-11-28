@@ -6,6 +6,7 @@ on:
       - '.github/workflows/harmonyos-compiler-graph-probe.yml'
       - '.github/ci/ts/graph-bin/**'
       - '.github/ci/ts/compare_graph.py'
+      - 'harmonyos/entry/src/main/ets/config/BuildInfo.ets'
   workflow_dispatch:
 permissions:
   contents: read

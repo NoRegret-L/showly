@@ -2,7 +2,7 @@ name: HarmonyOS compressed SDK and minimum dependency probe
 on:
   push:
     branches: [harmonyos-bootstrap]
-    paths: ['.github/workflows/harmonyos-sdk-archive-probe.yml']
+    paths: ['.github/workflows/harmonyos-sdk-archive-probe.yml', 'harmonyos/entry/src/main/ets/config/BuildInfo.ets']
   workflow_dispatch:
 permissions:
   contents: read

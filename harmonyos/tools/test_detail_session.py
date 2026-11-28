@@ -12,7 +12,7 @@ with tempfile.TemporaryDirectory() as tmp:
     work=Path(tmp)
     for path in (root/"model").glob("*.ets"):
         shutil.copyfile(path,work/(path.stem+".ts"))
-    subprocess.run(["tsc","--strict","--target","ES2020","--module","commonjs","DetailSession.ts","EffectiveState.ts","DetailViewOwner.ts","DetailSections.ts"],cwd=work,check=True)
+    subprocess.run(["tsc","--strict","--target","ES2020","--module","commonjs","DetailSession.ts","EffectiveState.ts","DetailViewOwner.ts","DetailSections.ts","SeasonDetailOwner.ts"],cwd=work,check=True)
     (work/"test.cjs").write_text("""
 const assert=require('node:assert/strict'),{DetailSession,summarizeSeasons}=require('./DetailSession'),{resolveEpisodes}=require('./EffectiveState');
 const {DetailViewOwner}=require('./DetailViewOwner');
@@ -47,6 +47,17 @@ for(let i=0;i<100;i++){const a=sections.begin(),signal=sections.consumer();asser
 console.log('Detail sections: 100 cancellation cycles, credit grouping and roles, related sort, hidden exclusion and identity dedup passed');
 const session=new DetailSession();
 const full={media:{id:'show:1',title:'Long show',year:2020,kind:'show',watched:false},status:'returning series',fetchedAt:Date.now(),seasons:Array.from({length:20},(_,s)=>({number:s+1,firstAired:'2020-01-01T00:00:00Z',episodes:Array.from({length:100},(_,e)=>({id:s*100+e+1,season:s+1,number:e+1,title:'Episode',firstAired:'2020-01-01T00:00:00Z'}))}))};
+const {SeasonDetailOwner}=require('./SeasonDetailOwner');
+const seasonOwner=new SeasonDetailOwner(),verified=full.seasons.flatMap(s=>s.episodes.map(e=>({...e,watched:false})));
+const first=seasonOwner.update('A',full,verified);assert.equal(first.seasons[0].number,20);assert.equal(seasonOwner.updates(),2000);
+const change=verified.map(e=>e.id===101?{...e,watched:true}:e);
+const second=seasonOwner.update('A',full,change);assert.equal(seasonOwner.updates(),2001);assert.equal(second.seasons.find(s=>s.number===2).completed,1);assert.strictEqual(first.seasons[0],second.seasons[0]);
+const fallback=new SeasonDetailOwner();assert.deepEqual(fallback.update('A',full,change).seasons,second.seasons);
+assert.equal(seasonOwner.delta(100).remove.length,1);assert.equal(seasonOwner.delta(102).add.length,101);
+const future={...full,seasons:[...full.seasons,{number:21,firstAired:'',episodes:[{id:3000,season:21,number:1,title:'Future',firstAired:''}]}]};
+seasonOwner.update('A',future,change);assert(!seasonOwner.episode(3000).eligible);assert(!seasonOwner.delta(3000).valid);
+seasonOwner.update('B',future,[]);assert.equal(seasonOwner.snapshot().seasons.reduce((n,s)=>n+s.completed,0),0);
+console.log('Season detail: descending order, 2000-row reference reuse, one changed row, full parity, read-only future and account isolation passed');
 let reads=0;
 for(let i=0;i<100;i++){
  const token=session.begin('account:A','show:1'),signal=session.consumer();
@@ -129,3 +140,7 @@ assert "presentation_section" in repo and "WHERE id=? AND section=?" in repo
 assert "DetailPeopleSection({" in page and "DetailRelatedSection({" in page
 assert "this.backFromDetail()" in page
 assert "LazyForEach(this.source" in (root/"pages/DetailRelatedSection.ets").read_text()
+
+assert "DetailSeasons({" in page and "seasonDetailOwner.delta(id)" in page
+assert "fresh.remove.length" in page and "watchedAt);" in page
+assert "row.eligible!==false" in component
