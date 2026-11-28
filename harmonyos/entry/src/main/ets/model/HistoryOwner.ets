@@ -18,7 +18,9 @@ export function historyRange(period:string,now:number):HistoryRange{
   if(period==='thisMonth'||period==='lastMonth'){
     d.setDate(1);if(period==='lastMonth'){d.setMonth(d.getMonth()-1);}const start=d.getTime();d.setMonth(d.getMonth()+1);return {start:start,end:d.getTime()-1};
   }
-  const days=period==='all'?36159:Number(period);return {start:now-days*86400000,end:now};
+  // Zero denotes unknown watch time; all valid stored timestamps are positive.
+  if(period==='all'){return {start:1,end:now};}
+  const days=Number(period);return {start:now-days*86400000,end:now};
 }
 export function historyDay(at:number):string{const d=new Date(at);return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');}
 interface IndexedShow {source:ProgressSource;key:string;episodes:HistoryEpisode[];}

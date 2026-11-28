@@ -1,4 +1,4 @@
-import { CollectionViewOwner, CollectionNetworkGroup, CollectionGenreOption, COLLECTION_NETWORK_GROUPS, COLLECTION_GENRES, toggleCollectionSelection, COLLECTION_RECENT_AMOUNTS, CollectionDependencyVersions, CollectionMetadataVersions, CollectionRatingRequest, CollectionRecoveryOwner, CollectionUiSnapshot, emptyCollectionUi, collectionUiNext, CollectionSpoilers, defaultCollectionSpoilers, collectionSpoilerText, collectionEmptyText } from '../model/CollectionViewOwner';
+import { CollectionViewOwner, CollectionNetworkGroup, CollectionGenreOption, COLLECTION_NETWORK_GROUPS, COLLECTION_GENRES, toggleCollectionSelection, COLLECTION_RECENT_AMOUNTS, CollectionDependencyVersions, CollectionMetadataVersions, CollectionRatingRequest, CollectionRecoveryOwner, CollectionUiSnapshot, emptyCollectionUi, collectionUiNext, CollectionSpoilers, defaultCollectionSpoilers, collectionSpoilerText, progressRatingSpoilerText, collectionEmptyText } from '../model/CollectionViewOwner';
 import { StableDisplayOrder, StableOrderChange } from '../model/StableDisplayOrder';
 import { PageStateOwner, PageWork, PageWorkSet, PageSortJobs, PageSummary } from '../model/PageStateOwner';
 import { ProgressTitleOrder } from '../model/ProgressTitleOrder';
@@ -4845,17 +4845,17 @@ struct Index {
     try{await this.settings?.saveProgressEpisodeHidden(next);this.progressEpisodeHidden=next;this.requestPresentation(false);}catch(error){this.progressOptionStatus='剧透设置保存失败。';}
   }
   private progressEpisodeLabel(row:ProgressRow):string{
-    return collectionSpoilerText(this.displayEpisode(row.media,row.episode.season,row.episode.id,row.episode.title),this.progressEpisodeHidden,this.progressRevealed.has(row.media.id+':'+row.episode.id+':title'));
+    return collectionSpoilerText(this.displayEpisode(row.media,row.episode.season,row.episode.id,row.episode.title),this.progressEpisodeHidden,this.progressRevealed.has(this.progressRevealKey(row,'title')));
   }
   private progressRatingLabel(row:ProgressRow):string{
-    if(row.fresh||row.upcoming){return '';}
-    if(this.progressPrefs.sort==='userRating'){return row.userRating===undefined?'':row.userRating.toString();}
-    if(this.progressPrefs.sort!=='rating'||row.rating===undefined||!Number.isFinite(row.rating)){return '';}
-    return collectionSpoilerText(row.rating.toFixed(1),this.progressRatingHidden,this.progressRevealed.has(row.media.id+':'+row.episode.id+':rating'),true);
+    return progressRatingSpoilerText(this.progressPrefs.sort,row.fresh,row.upcoming,row.rating,row.userRating,this.progressRatingHidden,this.progressRevealed.has(this.progressRevealKey(row,'rating')));
+  }
+  private progressRevealKey(row:ProgressRow,field:string):string{
+    return JSON.stringify([this.currentProgressScope(),row.media.id,row.episode.id,field]);
   }
   private revealProgress(row:ProgressRow,field:string):void{
     if(!this.progressTapReveal){return;}
-    this.progressRevealed.add(row.media.id+':'+row.episode.id+':'+field);
+    this.progressRevealed.add(this.progressRevealKey(row,field));
     this.refreshPresentationRows([row.media.id]);
   }
   private async toggleProgressSpoiler(field:string):Promise<void>{

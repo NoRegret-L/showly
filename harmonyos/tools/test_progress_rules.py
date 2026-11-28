@@ -38,7 +38,8 @@ assert.equal(HISTORY_PERIODS.length,8);
 for(const {key} of HISTORY_PERIODS){
  const range=historyRange(key,localNow);
  if(expected[key])assert.deepEqual([range.start,range.end],expected[key]);
- else if(key!=='all')assert.deepEqual([range.start,range.end],[localNow-Number(key)*day,localNow]);
+ else if(key==='all')assert.deepEqual([range.start,range.end],[1,localNow]);
+ else assert.deepEqual([range.start,range.end],[localNow-Number(key)*day,localNow]);
  const limit=Math.min(range.end,localNow);
  const fixture={...source,episodes:[ep(11,-1,true,range.start-1),ep(12,-1,true,range.start),ep(13,-1,true,limit),ep(14,-1,true,limit+1),ep(15,-1,true,0),ep(16,-1,false,limit)]};
  const owner=new HistoryOwner();owner.update('A',[{media,source:fixture,sourceStateKey:'1',sourceCatalogKey:'1'}]);

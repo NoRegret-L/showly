@@ -16,7 +16,7 @@ interface IDataSource { totalCount():number; getData(i:number):unknown; register
 const assert=require('node:assert/strict');
 const {PageStateOwner,PageWorkSet,PageSortJobs}=require('./PageStateOwner');
 const {planListDiff}=require('./ListDiff');
-const {CollectionViewOwner,COLLECTION_NETWORK_GROUPS,COLLECTION_GENRES,toggleCollectionSelection,CollectionDependencyVersions,CollectionMetadataVersions,CollectionRatingRequest,CollectionRecoveryOwner,emptyCollectionUi,collectionUiNext,collectionSpoilerText,COLLECTION_RECENT_AMOUNTS,validCollectionRecentAmount,collectionEmptyText}=require('./CollectionViewOwner');
+const {CollectionViewOwner,COLLECTION_NETWORK_GROUPS,COLLECTION_GENRES,toggleCollectionSelection,CollectionDependencyVersions,CollectionMetadataVersions,CollectionRatingRequest,CollectionRecoveryOwner,emptyCollectionUi,collectionUiNext,collectionSpoilerText,progressRatingSpoilerText,COLLECTION_RECENT_AMOUNTS,validCollectionRecentAmount,collectionEmptyText}=require('./CollectionViewOwner');
 const {ConsumerReadFlight}=require('./ReadFlight');
 (async()=>{
  for(const size of [393,10000]){
@@ -25,6 +25,15 @@ const {ConsumerReadFlight}=require('./ReadFlight');
   assert.equal(collectionSpoilerText('a b',true,false),'• •');
   assert.equal(collectionSpoilerText('8.1',true,false,true),'•.•');
   assert.equal(collectionSpoilerText('8.1',true,true,true),'8.1');
+  assert.equal(progressRatingSpoilerText('rating',false,false,8.1,9,true,false),'•.•');
+  assert.equal(progressRatingSpoilerText('rating',false,false,8.1,9,true,true),'8.1');
+  assert.equal(progressRatingSpoilerText('rating',false,false,8.1,9,false,false),'8.1');
+  assert.equal(progressRatingSpoilerText('userRating',false,false,8.1,9,true,false),'9');
+  assert.equal(progressRatingSpoilerText('title',false,false,8.1,9,false,false),'');
+  assert.equal(progressRatingSpoilerText('rating',true,false,8.1,9,false,true),'');
+  assert.equal(progressRatingSpoilerText('rating',false,true,8.1,9,false,true),'');
+  assert.equal(progressRatingSpoilerText('rating',false,false,NaN,9,false,false),'');
+  assert.equal(progressRatingSpoilerText('userRating',false,false,8.1,undefined,false,false),'');
   const showRecovery=new CollectionRecoveryOwner(),movieRecovery=new CollectionRecoveryOwner();
   showRecovery.activate('A:show');movieRecovery.activate('A:movie');
   for(let i=0;i<100;i++){
@@ -278,3 +287,7 @@ fanart=(root/"data"/"CollectionFanart.ets").read_text()
 assert "signal,'fanart'" in fanart and "settings?.loadFanartUrls(item.id)" in fanart
 assert "await cachedPoster(dir,item,urls,signal,'fanart')" in fanart
 assert "this.collectionSpoilerDetails(row.media)" in page
+
+assert "if(!this.progressTapReveal){return;}" in (root/"pages/Index.ets").read_text()
+assert "JSON.stringify([this.currentProgressScope(),row.media.id,row.episode.id,field])" in (root/"pages/Index.ets").read_text()
+print("Progress rating visibility, masking, reveal and account-scoped reveal wiring passed")

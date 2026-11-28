@@ -204,3 +204,10 @@ export function collectionSpoilerText(value:string,hidden:boolean,revealed:boole
   if(!hidden||revealed||!value){return value;}
   return rating?'•.•':value.replace(/\S/g,'•');
 }
+// Same visibility policy as the progress row; reuse the collection spoiler mask.
+export function progressRatingSpoilerText(sort:string,fresh:boolean,upcoming:boolean,rating:number|undefined,userRating:number|undefined,hidden:boolean,revealed:boolean):string{
+  if(fresh||upcoming){return '';}
+  if(sort==='userRating'){return userRating===undefined?'':userRating.toString();}
+  if(sort!=='rating'||rating===undefined||!Number.isFinite(rating)){return '';}
+  return collectionSpoilerText(rating.toFixed(1),hidden,revealed,true);
+}

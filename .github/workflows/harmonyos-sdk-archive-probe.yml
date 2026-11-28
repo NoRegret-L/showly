@@ -53,7 +53,7 @@ jobs:
           fi
           printf '%s  %s\n' "$SDK_DIGEST" "$SDK_FILE" | sha256sum -c -
           tar -xzf "$SDK_FILE" -C "$HOME/ohos-sdk"
-          echo "archive_cache=${{ matrix.cache }} cache_hit=${{ steps.archive-cache.outputs.cache-hit }} elapsed_seconds=$(( $(date +%s)-$(cat "$RUNNER_TEMP/archive-start") ))"
+          echo "archive_cache=${{ matrix.cache }} cache_hit=${{ steps.archive-cache.outputs.cache-hit == 'true' }} elapsed_seconds=$(( $(date +%s)-$(cat "$RUNNER_TEMP/archive-start") ))"
           du -sh "$SDK_FILE"
           echo "$HOME/ohos-sdk/command-line-tools/bin" >> "$GITHUB_PATH"
           echo "$HOME/ohos-sdk/command-line-tools/tool/node/bin" >> "$GITHUB_PATH"
