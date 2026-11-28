@@ -30,7 +30,7 @@ function releaseVaultLock(_lease:number){locked=false;releases++;}
 function readBackgroundGrant(){return grant;}
 function validateObservation(s:CloudLibrary){if(!s||!s.activity)throw Error('invalid');}
 async function readSyncAccount(_session:TraktSession,permit:()=>boolean){if(!permit())throw Error('stopped');reads++;return {uuid:account};}
-async function readCloudLibraryIncremental(_session:TraktSession,prior:CloudLibrary|undefined,permit:()=>boolean){
+async function readCloudLibraryIncremental(_session:TraktSession,prior:CloudLibrary|undefined,permit:()=>boolean):Promise<CloudLibrary>{
  if(!permit())throw Error('stopped');reads++;previous=prior;if(failRead)throw Error('offline');if(stopAfterRead)stopped=true;
  return {generation:1,activity:'rev',observedAt:Date.now()};
 }

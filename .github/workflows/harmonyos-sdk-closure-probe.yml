@@ -47,7 +47,7 @@ jobs:
           build=(hvigorw assembleHap --mode module -p module=entry@default -p product=default -p buildMode=debug --no-daemon --optimization-strategy=performance)
           parent="$RUNNER_TEMP/parent-source"
           mkdir "$parent"
-          baseline=db5bf5e99d03340a9cdfb6c8c7d5fa7b2590ea3e
+          baseline=bf16e9fb4ef673522166af369411e99fc26f0c2d
           git cat-file -e "$baseline^{commit}" 2>/dev/null || git fetch --no-tags --depth=1 origin "$baseline"
           git archive "$baseline" harmonyos | tar -xf - -C "$parent"
           echo "Closure parent=$(git rev-parse "$baseline") current=$(git rev-parse HEAD)" | tee -a "$GITHUB_STEP_SUMMARY"
@@ -210,14 +210,14 @@ jobs:
           mv "$RUNNER_TEMP/full.hap" "$RUNNER_TEMP/current-full.hap"
           rm "$RUNNER_TEMP/closure-sdk.tar.zst" "$RUNNER_TEMP/closure-sdk.sha256"
           date +%s%N > "$RUNNER_TEMP/cache-start"
-      - name: Restore exact Build 93 closure
+      - name: Restore exact Build 94 closure
         uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684
         with:
           path: |
             ${{ runner.temp }}/closure-sdk.tar.zst
             ${{ runner.temp }}/closure-sdk.sha256
             ${{ runner.temp }}/full.hap
-          key: closure-6.1.1.280-Linux-X64-db5bf5e99d03340a9cdfb6c8c7d5fa7b2590ea3e-46155879114-1
+          key: closure-6.1.1.280-Linux-X64-e8643547783d4843b51f268c18ac33a3654dceb0-46157173522-1
           fail-on-cache-miss: true
       - name: Test old closure; reject incompatible build and recover with full SDK
         env:
