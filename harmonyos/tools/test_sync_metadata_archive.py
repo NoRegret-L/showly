@@ -30,5 +30,5 @@ assert "link.pending.startsWith('meta:')" in lists and "this.settleMetadata" in 
 ratings=(root/"data/RatingsRepository.ets").read_text()
 assert "stageDeviceRatings" in ratings and "rating_migration" in ratings
 page=(root/"pages/Index.ets").read_text()
-assert "确认旧评分归属" in page and "await readHiddenArchive" in page
+assert "确认旧评分归属" in page and "await readArchiveObservation" in page
 print("Metadata receipt, archive import and explicit migration wiring passed; no live API calls")

@@ -1,4 +1,5 @@
 import { fileIo as fs } from '@kit.CoreFileKit';
+import { trySyncLease,releaseSyncLease } from './SyncLease';
 import { configureVaultLock, tryVaultLock, releaseVaultLock, readBackgroundGrant, BackgroundGrant } from './TokenVault';
 import { TraktSession } from './TraktAuth';
 import { readCloudLibraryIncremental, CloudLibrary } from './TraktLibrary';
@@ -48,6 +49,8 @@ export function readPreparedObservation(directory: string, uuid: string, clientI
 // Exclusive OAuth lease spans the full read. Stop cancels new requests and
 // publication; in-flight HTTP may drain before the lease is released.
 export async function runBackgroundObservation(directory: string, active: () => boolean): Promise<void> {
+  const operation=trySyncLease(directory);if(!operation){return;}
+  try {
   configureVaultLock(directory);
   const lease = tryVaultLock();
   if (!lease) { return; }
@@ -66,4 +69,5 @@ export async function runBackgroundObservation(directory: string, active: () => 
     validateObservation(snapshot);
     saveSnapshot(directory,grant,snapshot);
   } finally { releaseVaultLock(lease); }
+  }finally{releaseSyncLease(operation);}
 }

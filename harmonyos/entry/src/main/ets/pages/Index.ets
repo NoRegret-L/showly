@@ -3,8 +3,9 @@ import { SyncStatusPanel } from './SyncStatusPanel';
 import { syncDirections } from '../model/ManualSync';
 import { actualWatchTime } from '../model/ExportEvidence';
 import { openCustomLists } from '../data/CustomListsRepository';
-import { readCustomLists,readHiddenArchive } from '../data/TraktCustomLists';
-import { mergeHiddenArchive } from '../model/CollectionRules';
+import { readCustomLists,readArchiveObservation } from '../data/TraktCustomLists';
+import { openArchive } from '../data/ArchiveRepository';
+import { trySyncLease,releaseSyncLease } from '../data/SyncLease';
 import { lastScheduleWake } from '../data/SyncSchedule';
 import { executeEpisodeQueue } from '../data/EpisodeQueueExecutor';
 import { SyncCoordinator, syncService } from '../model/SyncCoordinator';
@@ -990,6 +991,8 @@ struct Index {
     const direction=syncDirections(this.manualImport,this.manualExport);
     if (!direction || this.syncPageBusy() || !this.ready || !this.episodeReady || !this.clientId) { return; }
     if (!this.signedIn) { this.beginSyncLogin(); return; }
+    const operation=trySyncLease(this.context().filesDir);
+    if(!operation){this.manualStatus='后台正在核对，请稍后重试同步。';return;}
     this.manualRunning=true;
     this.manualStatus='正在核对同步账户…';
     this.manualSignal.cancel(); this.manualSignal=new ReadCancel();
@@ -1023,9 +1026,10 @@ struct Index {
         await this.importCloud();
         if (!current() || this.cloudStatus.includes('失败')) { throw new Error('Title import incomplete'); }
         this.manualStatus='正在核对隐藏与归档…';
-        const hidden=await readHiddenArchive(session,account.uuid,signal);
+        const hidden=await readArchiveObservation(session,account.uuid,signal);
         if(!current()||!this.settings||this.currentProgressScope()!==scope){throw new Error('Archive scope changed');}
-        const previous=this.settings.loadCollectionState(scope),merged=mergeHiddenArchive(previous,hidden);
+        const previous=this.settings.loadCollectionState(scope),archive=await openArchive(this.context());
+        const merged=await archive.importObserved(scope,previous,hidden,current);
         if(merged!==previous){await this.settings.saveCollectionState(scope,merged);if(!current()){throw new Error('Archive scope changed');}this.collectionState=merged;this.collectionScope=scope;this.onCollectionStateChanged();this.resetCollection();}
         this.manualStatus='正在导入自定义列表…';
         const lists=await openCustomLists(this.context());
@@ -1074,13 +1078,17 @@ struct Index {
           }
         }
         if(!current()){throw new Error('Account changed');}
+        this.manualStatus='正在同步隐藏归档…';
+        if(!this.settings||this.currentProgressScope()!==scope||!current()){throw new Error('Archive scope changed');}
+        const archive=await openArchive(this.context()),archiveResult=await archive.export(scope,this.settings.loadCollectionState(scope),session,signal,current);
+        if(!current()){throw new Error('Account changed');}
         this.manualStatus='正在同步映射列表的缺失成员…';
         const lists=await openCustomLists(this.context()),listResult=await lists.exportAdditive(scope,session,signal,current);
         if(!current()){throw new Error('Account changed');}
         this.manualStatus='正在批量核对并导出个人评分…';
         const ratings=await openRatings(this.context());let ratingBlocked=0;
         for(const kind of ['show','movie','season','episode']){ratingBlocked+=await ratings.exportIntents(scope,kind,session,current);}
-        this.manualStatus=(direction.importEnabled?'四类导入已核对；':'')+'分集回读 '+completed+'/'+eligible.length+'，影视核对 '+titleChecked+'，列表新增 '+listResult.created+' 个、成员 '+listResult.added+' 项，列表待核对 '+listResult.blocked+'，评分待核对 '+ratingBlocked+'。未核对项目保留，非完整双向同步。';
+        this.manualStatus=(direction.importEnabled?'四类导入已核对；':'')+'分集回读 '+completed+'/'+eligible.length+'，影视核对 '+titleChecked+'，归档确认 '+archiveResult.confirmed+'，归档待核对 '+archiveResult.blocked+'，列表新增 '+listResult.created+' 个、成员 '+listResult.added+' 项，列表待核对 '+listResult.blocked+'，评分待核对 '+ratingBlocked+'。未核对项目保留，非完整双向同步。';
         this.observationPending=true;
       } else {
         this.manualStatus='观看进度、待看、隐藏归档、自定义列表与评分导入已核对。';
@@ -1088,6 +1096,7 @@ struct Index {
     } catch (error) {
       this.manualStatus='同步未全部完成；已有记录与保护凭证保留。请重试读取或查看高级管理。';
     } finally {
+      releaseSyncLease(operation);
       this.manualRunning=false;
       this.onRecoveryGateChanged();
     }
@@ -1271,8 +1280,10 @@ struct Index {
     if (!media || !binding || !consent || !session || !this.titleQuickActive() ||
         !this.pageVisible || this.syncBusy || this.saving || this.localBusy || this.cloudBusy ||
         this.authBusy || this.setupBusy || this.backupBusy) { return; }
+    const operation=this.manualRunning?undefined:trySyncLease(this.context().filesDir);
+    if(!this.manualRunning&&!operation){return;}
     const ticket = syncService.acquire(JSON.stringify([clientId,consent.uuid,'titles']));
-    if (!ticket) { return; }
+    if (!ticket) { if(operation){releaseSyncLease(operation);} return; }
     this.syncBusy = true;
     this.titleQuickStatus = '正在同步影视操作…';
     try {
@@ -1290,7 +1301,7 @@ struct Index {
     } catch (error) {
       this.titleQuickStatus = '快捷同步暂未完成，已保留操作。' + safeSyncError(error as Error);
       this.libraryNotice = '同步暂未完成，观看记录已保留。';
-    } finally { syncService.release(ticket); this.syncBusy = false; }
+    } finally { if(operation){releaseSyncLease(operation);} syncService.release(ticket); this.syncBusy = false; }
   }
 
   private requestMediaRecovery(): void {
@@ -1310,8 +1321,10 @@ struct Index {
         !traktAuth.isCurrent(clientId, account.generation)) { return; }
     const session = traktAuth.session(clientId);
     if (!session) { return; }
+    const operation=this.manualRunning?undefined:trySyncLease(this.context().filesDir);
+    if(!this.manualRunning&&!operation){return;}
     const ticket = syncService.acquire(JSON.stringify([clientId,account.uuid,'media']));
-    if (!ticket) { return; }
+    if (!ticket) { if(operation){releaseSyncLease(operation);} return; }
     this.syncBusy = true;
     try {
       if (!(await store.pendingTargets(account.uuid)).length) { return; }
@@ -1333,6 +1346,7 @@ struct Index {
           this.mediaLogs = await store.operationLogs(account.uuid);
         }
       } catch (error) {}
+      if(operation){releaseSyncLease(operation);}
       syncService.release(ticket);
       this.syncBusy = false;
     }
@@ -3087,8 +3101,10 @@ struct Index {
     const signal=this.manualRunning?this.manualSignal:undefined;
     const foreground=():boolean=>this.pageVisible&&(!signal||(!signal.cancelled()&&this.tab==='cloud'));
     if (!expected) { return; }
+    const operation=this.manualRunning?undefined:trySyncLease(this.context().filesDir);
+    if(!this.manualRunning&&!operation){return;}
     const ticket = syncService.acquire(JSON.stringify([clientId,expected,'episodes']));
-    if (!ticket) { return; }
+    if (!ticket) { if(operation){releaseSyncLease(operation);} return; }
     this.syncBusy = true;
     this.queueConfirm = false;
     this.autoStatus = '正在读取待同步队列…';
@@ -3106,6 +3122,7 @@ struct Index {
         this.autoStatus += '；本机队列或日志刷新失败：' + safeSyncError(error as Error);
       }
       this.syncPreview = undefined;
+      if(operation){releaseSyncLease(operation);}
       syncService.release(ticket);
       this.syncBusy = false;
     }
@@ -6256,6 +6273,10 @@ struct Index {
     this.progressPrefsBusy = true;
     try {
       const next = hideMedia(this.collectionState, media, hidden, Date.now());
+      if(scope.startsWith('account:')){
+        const archive=await openArchive(this.context());
+        await archive.stageLocal(scope,media.id,hidden,()=>scope===this.currentProgressScope()&&this.canEditLibrary()&&this.pageVisible&&!this.manualRunning);
+      }
       await settings.saveCollectionState(scope, next);
       if (scope !== this.currentProgressScope()) { return; }
       this.collectionState = next;
@@ -6266,7 +6287,7 @@ struct Index {
         await settings.saveProgressFlags(scope, flags);
         if (scope === this.currentProgressScope()) { this.progressFlags = flags; }
       }
-      this.collectionRuleStatus = hidden ? '已在本机隐藏；不会删除观看记录或写入 Trakt。' : '已取消本机隐藏；原记录保留。';
+      this.collectionRuleStatus = hidden ? '已在本机隐藏；手动导出时核对，不删除观看记录。' : '已取消本机隐藏；手动导出仅核对明确的云端隐藏记录。';
       this.nextPage = 1; this.movieProgressPage = 1; this.calendarPage = 1;
       this.resetCollection();
       this.onCollectionStateChanged();

@@ -15,7 +15,10 @@ let grant:BackgroundGrant|undefined;
 let locked=false, account='a', reads=0, stopAfterRead=false, stopped=false, failRead=false;
 let previous:CloudLibrary|undefined;
 let storage=new Map<string,string>(), pendingPath='';
-let releases=0;
+let releases=0,operationLocked=false;
+function trySyncLease(_directory:string){if(operationLocked)return undefined;operationLocked=true;return 2;}
+function releaseSyncLease(_lease:number){operationLocked=false;}
+export function setOperationLocked(value:boolean){operationLocked=value;}
 export function setup(uuid='a',expiry=Date.now()+100000,id='grant-a'){
  grant={uuid,clientId:'client',token:'access-secret',expiresAt:expiry,id};
  account=uuid; reads=0; stopAfterRead=false;stopped=false;failRead=false;previous=undefined;
@@ -69,6 +72,7 @@ const assert=require('node:assert/strict');const x=require('./Background');
   assert(!x.state().locked);assert.equal(x.state().stored[0],original);
  }
  x.setup('a',Date.now()-1);await x.runBackgroundObservation('/private',x.active);assert.equal(x.state().reads,0);
+ x.setup();x.setOperationLocked(true);await x.runBackgroundObservation('/private',x.active);assert.equal(x.state().reads,0);x.setOperationLocked(false);
  x.setup();x.setLocked(true);await x.runBackgroundObservation('/private',x.active);assert.equal(x.state().reads,0);x.setLocked(false);
  console.log('Background observation executor: 100 rounds account mismatch, cancellation, offline recovery, expired/contended grant, no secret in persisted snapshot and generation remap passed');
 })().catch(e=>{console.error(e);process.exit(1)});
