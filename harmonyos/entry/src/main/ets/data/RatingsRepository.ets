@@ -4,7 +4,7 @@ import { http } from '@kit.NetworkKit';
 import { TraktSession,traktAuth } from './TraktAuth';
 import { readActivity,readCollectionRatings,readPartRatings } from './TraktLibrary';
 import { readSyncAccount } from './TraktSyncPreview';
-import { RatingTarget,RatingRecord,RatingSnapshot,RatingState,RatingReceipt,validRatingTarget,validRatingRows,validRatingValue,ratingKind,ratingState,ratingDecision,receiptSatisfied,ratingBody,ratingDelta } from '../model/RatingRules';
+import { RatingTarget,RatingRecord,RatingSnapshot,RatingState,RatingReceipt,validRatingTarget,validRatingRows,validRatingValue,ratingKind,ratingState,ratingDecision,receiptSatisfied,ratingBody,ratingDelta,ratingBatchBody,ratingIntentDecision } from '../model/RatingRules';
 export class RatingsRepository{
   private db:relationalStore.RdbStore;
   private tail:Promise<void>=Promise.resolve();
@@ -24,14 +24,14 @@ export class RatingsRepository{
     if(!validRatingRows(rows)||(!known&&rows.length)){throw new Error('Invalid rating storage');}
     const snapshot:RatingSnapshot={known:known,activity:activity,rows:rows};this.cache.set(kind,snapshot);return snapshot;
   }
-  private async persist(scope:string,kind:string,old:RatingSnapshot,next:RatingSnapshot,current:()=>boolean,clearId:number=0):Promise<void>{
+  private async persist(scope:string,kind:string,old:RatingSnapshot,next:RatingSnapshot,current:()=>boolean,clearId:number=0,clearIds:number[]=[]):Promise<void>{
     if(!next.known||!validRatingRows(next.rows)){throw new Error('Invalid rating snapshot');}
     const delta=ratingDelta(old.rows,next.rows);this.db.beginTransaction();
     try{
       for(const r of delta.upserts){await this.db.executeSql('INSERT OR REPLACE INTO personal_rating(scope,kind,media_id,payload) VALUES(?,?,?,?)',[scope,kind,r.id,JSON.stringify(r)]);}
       for(const n of delta.removed){await this.db.executeSql('DELETE FROM personal_rating WHERE scope=? AND kind=? AND media_id=?',[scope,kind,n]);}
       await this.db.executeSql('INSERT OR REPLACE INTO rating_snapshot(scope,kind,activity) VALUES(?,?,?)',[scope,kind,next.activity]);
-      if(clearId){await this.db.executeSql('DELETE FROM rating_receipt WHERE scope=? AND kind=? AND media_id=?',[scope,kind,clearId]);await this.db.executeSql('DELETE FROM rating_intent WHERE scope=? AND kind=? AND media_id=?',[scope,kind,clearId]);}
+      for(const id of clearId?clearIds.concat([clearId]):clearIds){await this.db.executeSql('DELETE FROM rating_receipt WHERE scope=? AND kind=? AND media_id=?',[scope,kind,id]);await this.db.executeSql('DELETE FROM rating_intent WHERE scope=? AND kind=? AND media_id=?',[scope,kind,id]);}
       this.guard(scope,kind,current);this.db.commit();this.cache.set(kind,next);
     }catch(error){this.db.rollBack();throw new Error('Rating transaction failed');}
   }
@@ -46,11 +46,26 @@ export class RatingsRepository{
     const account=await readSyncAccount(session);if(account.uuid!==scope.substring(8)||!current()||!traktAuth.isCurrent(session.clientId,session.generation)){throw new Error('Rating account mismatch');}
   }
   private async remote(scope:string,kind:string,session:TraktSession,current:()=>boolean):Promise<RatingSnapshot>{
-    await this.verify(scope,session,current);const activity=await readActivity(session);let rows:RatingRecord[]=[];
+    await this.verify(scope,session,current);const activity=await readActivity(session);
+    const next=await this.readKind(kind,session,activity);
+    await this.verify(scope,session,current);if(await readActivity(session)!==activity){throw new Error('Rating observation changed');}
+    return next;
+  }
+  private async readKind(kind:string,session:TraktSession,activity:string):Promise<RatingSnapshot>{
+    let rows:RatingRecord[]=[];
     if(kind==='show'||kind==='movie'){const values=await readCollectionRatings(session,kind,activity);rows=values.map((r):RatingRecord=>({id:Number(r.id.substring(kind.length+1)),value:r.value,ratedAt:r.ratedAt}));}
     else{rows=await readPartRatings(session,kind==='season'?'seasons':'episodes',activity);}
-    await this.verify(scope,session,current);if(await readActivity(session)!==activity||!validRatingRows(rows)){throw new Error('Rating observation changed');}
+    if(!validRatingRows(rows)){throw new Error('Rating observation invalid');}
     return {known:true,activity:activity,rows:rows};
+  }
+  refreshAllVerified(scope:string,session:TraktSession,current:()=>boolean):Promise<void>{
+    return this.serial(async():Promise<void>=>{
+      const kinds=['show','movie','season','episode'];this.guard(scope,kinds[0],current);
+      await this.verify(scope,session,current);const activity=await readActivity(session);
+      const snapshots=await Promise.all(kinds.map((kind:string)=>this.readKind(kind,session,activity)));
+      await this.verify(scope,session,current);if(await readActivity(session)!==activity){throw new Error('Rating observation changed');}
+      for(let i=0;i<kinds.length;i++){this.guard(scope,kinds[i],current);await this.persist(scope,kinds[i],await this.disk(scope,kinds[i]),snapshots[i],current);}
+    });
   }
   // Explicit sync never mistakes a retained stale cache for a fresh import.
   refreshVerified(scope:string,kind:string,session:TraktSession,current:()=>boolean):Promise<RatingSnapshot>{
@@ -117,14 +132,21 @@ export class RatingsRepository{
     await this.db.executeSql('INSERT INTO rating_receipt(scope,kind,media_id,payload) VALUES(?,?,?,?)',[scope,t.kind,t.id,JSON.stringify(receipt)]);
     try{
       await this.verify(scope,session,current);if(await readActivity(session)!==fresh.activity){throw new Error('Rating activity changed before dispatch');}
-      this.guard(scope,t.kind,current);const req=http.createHttp();
-      try{await req.request('https://api.trakt.tv/sync/ratings'+(desired===0?'/remove':''),{method:http.RequestMethod.POST,
-        header:{'Content-Type':'application/json','trakt-api-version':'2','trakt-api-key':session.clientId,'Authorization':'Bearer '+session.token},
-        extraData:ratingBody(t,desired,at),expectDataType:http.HttpDataType.STRING});}finally{req.destroy();}
+      this.guard(scope,t.kind,current);
+      await this.sendRatings(session,ratingBody(t,desired,at),desired===0,current);
     }catch(error){/* uncertain result: read back only, never resend */}
     const confirmed=await this.remote(scope,t.kind,session,current),state=ratingState(confirmed,t.id,true,true),resolved=receiptSatisfied(receipt,state);
     await this.persist(scope,t.kind,old,confirmed,current,resolved?t.id:0);
     return ratingState(confirmed,t.id,!resolved,true);
+  }
+  private async sendRatings(session:TraktSession,body:string,remove:boolean,current:()=>boolean):Promise<void>{
+    const req=http.createHttp();
+    try{
+      if(!current()||!traktAuth.isCurrent(session.clientId,session.generation)){throw new Error('Rating session changed');}
+      await req.request('https://api.trakt.tv/sync/ratings'+(remove?'/remove':''),{method:http.RequestMethod.POST,
+        header:{'Content-Type':'application/json','trakt-api-version':'2','trakt-api-key':session.clientId,'Authorization':'Bearer '+session.token},
+        extraData:body,expectDataType:http.HttpDataType.STRING});
+    }finally{req.destroy();}
   }
   exportIntents(scope:string,kind:string,session:TraktSession,current:()=>boolean):Promise<number>{
     return this.serial(async():Promise<number>=>{
@@ -132,22 +154,71 @@ export class RatingsRepository{
       const rows=await this.db.querySql('SELECT payload FROM rating_intent WHERE scope=? AND kind=? ORDER BY media_id',[scope,kind]);
       const intents:RatingReceipt[]=[];
       try{while(rows.goToNextRow()){intents.push(JSON.parse(rows.getString(0)) as RatingReceipt);}}finally{rows.close();}
-      let blocked=0;
-      for(const intent of intents){
-        this.guard(scope,kind,current);
-        if(!validRatingTarget(intent.target)||intent.target.kind!==kind||!validRatingValue(intent.desired)){throw new Error('Invalid rating intent');}
-        try{
-          const old=await this.disk(scope,kind),fresh=await this.remote(scope,kind,session,current);
-          const pending=await this.receipt(scope,intent.target);
-          if(pending){
-            const state=ratingState(fresh,intent.target.id,true,true);
-            const resolved=receiptSatisfied(pending,state);
-            await this.persist(scope,kind,old,fresh,current,resolved?intent.target.id:0);
-            if(!resolved){blocked++;}
-          }else if((await this.dispatchIntent(scope,intent,session,current,old,fresh)).pending){blocked++;}
-        }catch(error){this.guard(scope,kind,current);blocked++;}
+      // Include pre-Build98 receipts, even when no separate intent exists. Never dispatch them.
+      const pendingRows=await this.db.querySql('SELECT payload FROM rating_receipt WHERE scope=? AND kind=? ORDER BY media_id',[scope,kind]);
+      const pending=new Map<number,RatingReceipt>();
+      try{while(pendingRows.goToNextRow()){
+        const i=JSON.parse(pendingRows.getString(0)) as RatingReceipt;
+        if(!validRatingTarget(i.target)||i.target.kind!==kind||!validRatingValue(i.desired)){throw new Error('Invalid rating receipt');}
+        pending.set(i.target.id,i);
+      }}finally{pendingRows.close();}
+      const byId=new Map<number,RatingReceipt>();
+      for(const i of intents){
+        if(!validRatingTarget(i.target)||i.target.kind!==kind||!validRatingValue(i.desired)){throw new Error('Invalid rating intent');}
+        byId.set(i.target.id,i);
       }
-      return blocked;
+      for(const i of pending.values()){byId.set(i.target.id,i);}
+      if(!byId.size){return 0;}
+      let old=await this.disk(scope,kind),fresh=await this.remote(scope,kind,session,current);
+      const blocked=new Set<number>(),resolved:number[]=[];
+      const adds:RatingReceipt[]=[],removes:RatingReceipt[]=[];
+      const index=new Map<number,RatingRecord>();for(const row of fresh.rows){index.set(row.id,row);}
+      for(const i of byId.values()){
+        const row=index.get(i.target.id);
+        const state:RatingState={known:fresh.known,value:row?.value??0,ratedAt:row?.ratedAt,pending:pending.has(i.target.id),fresh:true};
+        const decision=ratingIntentDecision(i,state,pending.has(i.target.id));
+        if(decision==='satisfied'){resolved.push(i.target.id);}
+        else if(decision==='blocked'){blocked.add(i.target.id);}
+        else if(i.desired===0){removes.push(i);}else{adds.push(i);}
+      }
+      await this.persist(scope,kind,old,fresh,current,0,resolved);old=fresh;
+      // Android TraktExportRatingsRunner uses 200 items per type per request.
+      for(const group of [adds,removes]){
+        for(let start=0;start<group.length;start+=200){
+          this.guard(scope,kind,current);
+          const indexNow=new Map<number,RatingRecord>();for(const row of fresh.rows){indexNow.set(row.id,row);}
+          const chunk:RatingReceipt[]=[],already:number[]=[];
+          for(const i of group.slice(start,start+200)){
+            const row=indexNow.get(i.target.id);
+            const state:RatingState={known:fresh.known,value:row?.value??0,ratedAt:row?.ratedAt,pending:false,fresh:true};
+            const decision=ratingIntentDecision(i,state,false);
+            if(decision==='satisfied'){already.push(i.target.id);}else if(decision==='send'){chunk.push(i);}else{blocked.add(i.target.id);}
+          }
+          if(already.length){await this.persist(scope,kind,old,fresh,current,0,already);old=fresh;}
+          if(!chunk.length){continue;}
+          const body=ratingBatchBody(kind,chunk,chunk[0].desired===0);
+          await this.verify(scope,session,current);if(await readActivity(session)!==fresh.activity){throw new Error('Rating activity changed');}
+          // All reservations are committed together BEFORE the single network call.
+          this.db.beginTransaction();
+          try{
+            for(const i of chunk){await this.db.executeSql('INSERT INTO rating_receipt(scope,kind,media_id,payload) VALUES(?,?,?,?)',[scope,kind,i.target.id,JSON.stringify(i)]);}
+            this.guard(scope,kind,current);this.db.commit();
+          }catch(error){this.db.rollBack();throw new Error('Rating reservation failed');}
+          try{
+            await this.verify(scope,session,current);if(await readActivity(session)!==fresh.activity){throw new Error('Rating activity changed before dispatch');}
+            await this.sendRatings(session,body,chunk[0].desired===0,current);
+          }catch(error){/* unknown result: only read back; never resend this chunk */}
+          fresh=await this.remote(scope,kind,session,current);
+          const readback=new Map<number,RatingRecord>();for(const row of fresh.rows){readback.set(row.id,row);}
+          const confirmed:number[]=[];
+          for(const i of chunk){
+            const row=readback.get(i.target.id);
+            if((row?.value??0)===i.desired){confirmed.push(i.target.id);}else{blocked.add(i.target.id);}
+          }
+          await this.persist(scope,kind,old,fresh,current,0,confirmed);old=fresh;
+        }
+      }
+      return blocked.size;
     });
   }
   release():void{this.cache.clear();this.resident='';}

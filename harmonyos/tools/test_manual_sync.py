@@ -22,7 +22,7 @@ run=page.split("  private async runManualSync(",1)[1].split("  private async cha
 assert run.index("bound!==account.uuid")<run.index("if (direction.importEnabled)")<run.index("if (direction.exportEnabled)")
 imp=run.split("if (direction.importEnabled)",1)[1].split("if (direction.exportEnabled)",1)[0]
 exp=run.split("if (direction.exportEnabled)",1)[1]
-assert all(s in imp for s in ("await this.confirmCloudImport()","await this.importCloud()","await lists.importRemote","await repo.refreshVerified"))
+assert all(s in imp for s in ("await this.confirmCloudImport()","await this.importCloud()","await lists.importMapped","await repo.refreshAllVerified"))
 assert all(s not in imp for s in ("resumeQueued","resumeTitleQuick","recoverMediaPending"))
 assert all(s in exp for s in ("resumeQueued(true)","resumeTitleQuick()","recoverMediaPending()"))
 assert "this.manualRunning || this.quickChanging" in page

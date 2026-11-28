@@ -9,6 +9,7 @@ import { readActivity } from './TraktLibrary';
 import { readSyncAccount } from './TraktSyncPreview';
 import { createPrivateList,appendListMembers } from './TraktListExport';
 import { missingMemberIds,membersSatisfied } from '../model/ExportEvidence';
+import { mergeMappedLists,SyncListLink } from '../model/ListSyncMerge';
 interface ListExportLink {remoteId:number;pending:string;}
 interface ListExportObservation {activity:string;rows:CustomList[];}
 export interface ListExportResult {created:number;added:number;blocked:number;}
@@ -24,13 +25,14 @@ export class CustomListsRepository{
     const task=this.tail.catch(()=>{}).then(body);this.tail=task.then(()=>{},()=>{});return task;
   }
   private check(scope:string,current:()=>boolean):void{if(!validScope(scope)||!current()){throw new Error('List scope changed');}}
-  private async apply(scope:string,delta:ListDelta,mark:boolean,current:()=>boolean):Promise<void>{
+  private async apply(scope:string,delta:ListDelta,mark:boolean,current:()=>boolean,links:SyncListLink[]=[]):Promise<void>{
     this.db.beginTransaction();
     try{
       for(const id of delta.removedLists){await this.db.executeSql('DELETE FROM list_member_v2 WHERE scope=? AND list_id=?',[scope,id]);await this.db.executeSql('DELETE FROM list_header_v2 WHERE scope=? AND list_id=?',[scope,id]);await this.db.executeSql('DELETE FROM list_preference_v2 WHERE scope=? AND list_id=?',[scope,id]);}
       for(const item of delta.lists){await this.db.executeSql('INSERT OR REPLACE INTO list_header_v2(scope,list_id,remote,position,payload) VALUES(?,?,?,?,?)',[scope,item.row.id,item.row.remote?1:0,item.position,JSON.stringify(item.row)]);}
       for(const item of delta.removedMembers){await this.db.executeSql('DELETE FROM list_member_v2 WHERE scope=? AND list_id=? AND media_id=?',[scope,item.listId,item.mediaId]);}
       for(const item of delta.members){await this.db.executeSql('INSERT OR REPLACE INTO list_member_v2(scope,list_id,media_id,position,payload) VALUES(?,?,?,?,?)',[scope,item.listId,item.member.media.id,item.position,JSON.stringify(item.member)]);}
+      for(const link of links){await this.db.executeSql('INSERT INTO list_export_link(scope,local_id,remote_id,pending) VALUES(?,?,?,?)',[scope,link.localId,link.remoteId,link.pending]);}
       // Marker commits only alongside all migrated rows. Legacy stays untouched.
       if(mark){await this.db.executeSql('INSERT OR REPLACE INTO list_scope_v2(scope,next_id) VALUES(?,?)',[scope,delta.nextId]);}
       this.check(scope,current);this.db.commit();
@@ -66,6 +68,18 @@ export class CustomListsRepository{
   importRemote(scope:string,rows:CustomList[],current:()=>boolean):Promise<ListDocument>{
     if(!scope.startsWith('account:')){return Promise.reject(new Error('Verified account required'));}
     return this.write(scope,current,(doc:ListDocument)=>replaceRemoteLists(doc,rows));
+  }
+  importMapped(scope:string,rows:CustomList[],current:()=>boolean):Promise<ListDocument>{
+    return this.serial(async():Promise<ListDocument>=>{
+      this.check(scope,current);if(!scope.startsWith('account:')){throw new Error('Verified account required');}
+      const old=await this.readBody(scope,current),data=await this.db.querySql('SELECT local_id,remote_id,pending FROM list_export_link WHERE scope=?',[scope]);
+      const links:SyncListLink[]=[];
+      try{while(data.goToNextRow()){links.push({localId:data.getString(0),remoteId:data.getLong(1),pending:data.getString(2)});}}finally{data.close();}
+      const next=mergeMappedLists(old,rows,links);
+      if(!validStorageDocument(next.doc)){throw new Error('Invalid merged list');}
+      await this.apply(scope,listDelta(old,next.doc),old.nextId!==next.doc.nextId,current,next.links);
+      this.docs.set(scope,next.doc);return next.doc;
+    });
   }
   restoreLocal(scope:string,backup:ListDocument,expected:ListDocument,current:()=>boolean):Promise<ListDocument>{
     return this.write(scope,current,(doc:ListDocument)=>{if(doc!==expected){throw new Error('Restore preview changed');}return mergeListBackup(doc,backup);});

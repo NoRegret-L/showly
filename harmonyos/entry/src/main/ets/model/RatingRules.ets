@@ -34,3 +34,23 @@ export function ratingBody(t:RatingTarget,value:number,at:number):string{
   const body:RatingBody={};if(t.kind==='show'){body.shows=[row];}else if(t.kind==='movie'){body.movies=[row];}else if(t.kind==='season'){body.seasons=[row];}else{body.episodes=[row];}
   return JSON.stringify(body);
 }
+
+export function ratingBatchBody(kind:string,intents:RatingReceipt[],remove:boolean):string{
+  if(!ratingKind(kind)||!intents.length){throw new Error('Invalid rating batch');}
+  const rows:RatingWire[]=[],seen=new Set<number>();
+  for(const i of intents){
+    if(!validRatingTarget(i.target)||i.target.kind!==kind||!validRatingValue(i.desired)||
+      (i.desired===0)!==remove||!Number.isFinite(i.createdAt)||i.createdAt<=0||i.createdAt>Date.now()||seen.has(i.target.id)){throw new Error('Invalid rating batch intent');}
+    seen.add(i.target.id);
+    rows.push(remove?{ids:{trakt:i.target.id}}:{ids:{trakt:i.target.id},rating:i.desired,rated_at:new Date(i.createdAt).toISOString()});
+  }
+  const body:RatingBody={};
+  if(kind==='show'){body.shows=rows;}else if(kind==='movie'){body.movies=rows;}else if(kind==='season'){body.seasons=rows;}else{body.episodes=rows;}
+  return JSON.stringify(body);
+}
+export function ratingIntentDecision(i:RatingReceipt,state:RatingState,pending:boolean):string{
+  if(!state.known||!state.fresh){return 'blocked';}
+  if(state.value===i.desired){return 'satisfied';}
+  if(pending||state.value!==i.before||state.ratedAt!==i.beforeAt){return 'blocked';}
+  return 'send';
+}

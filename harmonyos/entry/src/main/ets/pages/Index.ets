@@ -1025,13 +1025,10 @@ struct Index {
         const lists=await openCustomLists(this.context());
         const remoteLists=await readCustomLists(session,account.uuid,signal);
         if (!current()) { throw new Error('Account changed'); }
-        await lists.importRemote(scope,remoteLists,current);
+        await lists.importMapped(scope,remoteLists,current);
         this.manualStatus='正在导入个人评分…';
         const repo=await openRatings(this.context());
-        for (const kind of ['show','movie','season','episode']) {
-          if (!current()) { throw new Error('Account changed'); }
-          await repo.refreshVerified(scope,kind,session,current);
-        }
+        await repo.refreshAllVerified(scope,session,current);
         this.collectionRatingKey=''; this.movieRatingKey=''; this.showRatingRequest.reset(); this.movieRatingRequest.reset();
         this.projectionPending=true;
       }
@@ -1071,10 +1068,10 @@ struct Index {
           }
         }
         if(!current()){throw new Error('Account changed');}
-        this.manualStatus='正在导出自定义列表新增项…';
+        this.manualStatus='正在同步映射列表的缺失成员…';
         const lists=await openCustomLists(this.context()),listResult=await lists.exportAdditive(scope,session,signal,current);
         if(!current()){throw new Error('Account changed');}
-        this.manualStatus='正在核对个人评分意图…';
+        this.manualStatus='正在批量核对并导出个人评分…';
         const ratings=await openRatings(this.context());let ratingBlocked=0;
         for(const kind of ['show','movie','season','episode']){ratingBlocked+=await ratings.exportIntents(scope,kind,session,current);}
         this.manualStatus=(direction.importEnabled?'四类导入已核对；':'')+'分集回读 '+completed+'/'+eligible.length+'，影视核对 '+titleChecked+'，列表新增 '+listResult.created+' 个、成员 '+listResult.added+' 项，列表待核对 '+listResult.blocked+'，评分待核对 '+ratingBlocked+'。未核对项目保留，非完整双向同步。';

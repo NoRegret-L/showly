@@ -2,7 +2,7 @@ name: HarmonyOS preview CI and release
 
 on:
   push:
-    branches: [harmonyos-bootstrap, harmonyos-build98]
+    branches: [harmonyos-bootstrap, harmonyos-build99]
     paths:
       - '.github/workflows/harmonyos-bootstrap.yml'
       - 'harmonyos/**'
@@ -259,11 +259,12 @@ jobs:
           python3 harmonyos/tools/test_startup_read_state.py
           python3 harmonyos/tools/test_manual_sync.py
           python3 harmonyos/tools/test_export_evidence.py
+          python3 harmonyos/tools/test_sync_merge_batch.py
           echo '34 historical regressions and custom-list, statistics, list persistence, rating and people specialist gates passed' >> "$GITHUB_STEP_SUMMARY"
 
   publish-preview:
     needs: [verify, regressions]
-    if: ${{ github.event_name == 'push' && github.repository == 'NoRegret-L/showly' && (github.ref == 'refs/heads/harmonyos-bootstrap' || github.ref == 'refs/heads/harmonyos-build98') }}
+    if: ${{ github.event_name == 'push' && github.repository == 'NoRegret-L/showly' && (github.ref == 'refs/heads/harmonyos-bootstrap' || github.ref == 'refs/heads/harmonyos-build99') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -321,7 +322,7 @@ jobs:
             exit 1
           fi
           # A stale run must not create tags on an advanced branch tip.
-          [[ "$GITHUB_REF_NAME" == harmonyos-bootstrap || "$GITHUB_REF_NAME" == harmonyos-build98 ]]
+          [[ "$GITHUB_REF_NAME" == harmonyos-bootstrap || "$GITHUB_REF_NAME" == harmonyos-build99 ]]
           head="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/$GITHUB_REF_NAME" --jq '.object.sha')"
           [[ "$head" == "$GITHUB_SHA" ]] || { echo "::error::Branch advanced during verification; build the current tip."; exit 1; }
           echo "Release phase: inspect exact tag"
