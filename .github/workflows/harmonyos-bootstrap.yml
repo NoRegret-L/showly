@@ -71,6 +71,22 @@ jobs:
           set -euo pipefail
           start=$(date +%s)
           dpkg-query -W libgl1-mesa-dev libgl1 || true
+          # Patch exactly the pinned Linux extraction call; checksum and exports unchanged.
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('.ci-sdk-setup/setup.sh')
+          s=p.read_text()
+          old='        tar -xzf $FILENAME'
+          assert s.count(old)==1
+          p.write_text(s.replace(old,'''        if command -v pigz >/dev/null && (set -o pipefail; pigz -dc "$FILENAME" | tar -xf -); then
+              echo "SDK extraction: pigz"
+          else
+              echo "SDK extraction: traditional tar fallback"
+              # Never retain a partially extracted toolchain.
+              rm -rf command-line-tools
+              tar -xzf "$FILENAME"
+          fi'''))
+          PY
           bash .ci-sdk-setup/setup.sh -v '6.1.1.280'
           echo "SDK setup seconds=$(( $(date +%s)-start ))" | tee -a "$GITHUB_STEP_SUMMARY"
 

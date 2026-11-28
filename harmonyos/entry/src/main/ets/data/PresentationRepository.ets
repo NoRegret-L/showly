@@ -64,12 +64,12 @@ export class PresentationRepository {
       posterUrls:[],posterUri:row.posterUri,collection:row.collection};
   }
   async readDetailSection(item:Media,section:string,consumer:ReadCancel):Promise<string>{
-    if(!canReadDetails(item)||!['people-trakt','related-trakt'].includes(section)){return '';}
+    if(!canReadDetails(item)||!['people-trakt','related-trakt','seasons-trakt'].includes(section)){return '';}
     consumer.check();const rows=await this.db.querySql('SELECT payload FROM presentation_section WHERE id=? AND section=?',[item.id,section]);
     try{consumer.check();return rows.goToFirstRow()?rows.getString(0):'';}finally{rows.close();}
   }
   async saveDetailSection(item:Media,section:string,payload:string,consumer:ReadCancel):Promise<void>{
-    if(!canReadDetails(item)||!['people-trakt','related-trakt'].includes(section)){return;}
+    if(!canReadDetails(item)||!['people-trakt','related-trakt','seasons-trakt'].includes(section)){return;}
     consumer.check();await this.db.executeSql('INSERT OR REPLACE INTO presentation_section(id,section,payload) VALUES(?,?,?)',[item.id,section,payload]);
   }
   async readCachedDetail(item:Media,consumer:ReadCancel):Promise<MediaDetail|undefined>{

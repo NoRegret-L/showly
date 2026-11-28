@@ -1,3 +1,4 @@
+import { PartRating } from '../model/SeasonPresentation';
 import { http } from '@kit.NetworkKit';
 import { Media, CollectionDate, PersonalMovie, PersonalMovieSnapshot, validReleaseDate } from '../model/Media';
 import { ReadFlight } from '../model/ReadFlight';
@@ -25,7 +26,10 @@ interface Season {
   number: number;
   episodes: Episode[];
 }
+interface PartIdentity {ids:Ids;}
 interface SyncItem {
+  season?:PartIdentity;
+  episode?:PartIdentity;
   listed_at?: string;
   rating?: number;
   plays?: number;
@@ -216,6 +220,24 @@ async function readRatingsVerified(session: TraktSession, kind: string, activity
   if (await readActivity(session) !== activity) { throw new Error('Activity changed'); }
   ensureCurrent(session);
   return ratings;
+}
+const partRatingFlights=new ReadFlight<PartRating[]>();
+export async function readPartRatings(session:TraktSession,kind:string,activity:string):Promise<PartRating[]>{
+  ensureCurrent(session);
+  if(kind!=='seasons'&&kind!=='episodes'){throw new Error('Invalid part rating kind');}
+  const result=await partRatingFlights.run(JSON.stringify([session.clientId,session.generation,kind,activity]),async():Promise<PartRating[]>=>{
+    if(await readActivity(session)!==activity){throw new Error('Activity changed');}
+    const rows=await readAll(session,'sync/ratings/'+kind),seen=new Set<number>(),values:PartRating[]=[];
+    for(const row of rows){
+      const part=kind==='seasons'?row.season:row.episode;
+      const id=part?.ids?.trakt,value=row.rating;
+      if(id===undefined||!Number.isSafeInteger(id)||id<=0||seen.has(id)||value===undefined||!Number.isInteger(value)||value<1||value>10){throw new Error('Invalid part rating');}
+      seen.add(id);values.push({id:id,value:value});
+    }
+    if(await readActivity(session)!==activity){throw new Error('Activity changed');}
+    ensureCurrent(session);return values;
+  });
+  ensureCurrent(session);return result;
 }
 async function readObservationCollections(session: TraktSession): Promise<SyncItem[][]> {
   let failure: Error | undefined;

@@ -56,6 +56,8 @@ export class ClientSettings {
     if(!['show','movie'].includes(kind)||!['mine','queue','hidden','detail'].includes(section)){throw new Error('Invalid spoiler scope');}
     await this.storage.put('collection_spoilers:'+kind+':'+section,JSON.stringify(value));await this.storage.flush();
   }
+  loadSpecialSeasons():boolean{return this.storage.getSync('detail_special_seasons',false)===true;}
+  async saveSpecialSeasons(value:boolean):Promise<void>{await this.storage.put('detail_special_seasons',value);await this.storage.flush();}
   loadCollectionRecentAmount():number {
     const value=this.storage.getSync('collection_recent_amount',4);
     return typeof value==='number'&&validCollectionRecentAmount(value)?value:4;

@@ -12,7 +12,7 @@ with tempfile.TemporaryDirectory() as tmp:
     work=Path(tmp)
     for path in (root/"model").glob("*.ets"):
         shutil.copyfile(path,work/(path.stem+".ts"))
-    subprocess.run(["tsc","--strict","--target","ES2020","--module","commonjs","DetailSession.ts","EffectiveState.ts","DetailViewOwner.ts","DetailSections.ts","SeasonDetailOwner.ts"],cwd=work,check=True)
+    subprocess.run(["tsc","--strict","--target","ES2020","--module","commonjs","DetailSession.ts","EffectiveState.ts","DetailViewOwner.ts","DetailSections.ts","SeasonDetailOwner.ts","SeasonPresentation.ts"],cwd=work,check=True)
     (work/"test.cjs").write_text("""
 const assert=require('node:assert/strict'),{DetailSession,summarizeSeasons}=require('./DetailSession'),{resolveEpisodes}=require('./EffectiveState');
 const {DetailViewOwner}=require('./DetailViewOwner');
@@ -52,6 +52,19 @@ const seasonOwner=new SeasonDetailOwner(),verified=full.seasons.flatMap(s=>s.epi
 const first=seasonOwner.update('A',full,verified);assert.equal(first.seasons[0].number,20);assert.equal(seasonOwner.updates(),2000);
 const change=verified.map(e=>e.id===101?{...e,watched:true}:e);
 const second=seasonOwner.update('A',full,change);assert.equal(seasonOwner.updates(),2001);assert.equal(second.seasons.find(s=>s.number===2).completed,1);assert.strictEqual(first.seasons[0],second.seasons[0]);
+const nextChange=change.map(e=>e.id===102?{...e,watched:true}:e);
+assert(seasonOwner.reconcile('A',full,nextChange));assert.equal(seasonOwner.deltaUpdates(),1);
+assert.equal(seasonOwner.snapshot().seasons.find(s=>s.number===2).completed,2);
+assert(!seasonOwner.reconcile('B',full,nextChange));assert(!seasonOwner.reconcile('A',full,nextChange.slice(1)));
+seasonOwner.update('A',full,change);
+const {parseSeasonPresentation,SeasonPresentationOwner}=require('./SeasonPresentation');
+const publicRows=parseSeasonPresentation(JSON.stringify([{ids:{trakt:8},number:0,episodes:[{ids:{trakt:9},season:0,number:1,title:'Special',rating:8,images:{screenshot:['image']}}]},{ids:{trakt:10},number:1,rating:7,episodes:[{ids:{trakt:11},season:1,number:1,title:'Regular',runtime:42}]}]));
+assert.equal(publicRows[1].number,0);assert.equal(publicRows[1].episodes[0].rating,8);
+const publicOwner=new SeasonPresentationOwner();publicOwner.replace('A',publicRows);assert(publicOwner.setRatings('A','activity-A',[{id:10,value:9}],[{id:11,value:8}]));
+assert.equal(publicOwner.seasonRating(1,'activity-A'),9);assert.equal(publicOwner.episodeRating(11,'activity-B'),undefined);
+publicOwner.replace('B',publicRows);assert.equal(publicOwner.episodeRating(11,'activity-A'),undefined);
+assert.throws(()=>parseSeasonPresentation(JSON.stringify([{ids:{trakt:1},number:0,episodes:[{ids:{trakt:2},number:1,season:1}]}])));
+console.log('Season presentation: public special isolation, sparse watched delta, ratings scope and metadata identity passed');
 const fallback=new SeasonDetailOwner();assert.deepEqual(fallback.update('A',full,change).seasons,second.seasons);
 assert.equal(seasonOwner.delta(100).remove.length,1);assert.equal(seasonOwner.delta(102).add.length,101);
 const future={...full,seasons:[...full.seasons,{number:21,firstAired:'',episodes:[{id:3000,season:21,number:1,title:'Future',firstAired:''}]}]};
@@ -144,3 +157,7 @@ assert "LazyForEach(this.source" in (root/"pages/DetailRelatedSection.ets").read
 assert "DetailSeasons({" in page and "seasonDetailOwner.delta(id)" in page
 assert "fresh.remove.length" in page and "watchedAt);" in page
 assert "row.eligible!==false" in component
+
+assert "seasonDetailOwner.reconcile(" in page and "readPartRatings(session,'seasons'" in page
+assert "this.localSeason!==0" in page and "eligible:false" in page
+assert "seasons-trakt" in repo

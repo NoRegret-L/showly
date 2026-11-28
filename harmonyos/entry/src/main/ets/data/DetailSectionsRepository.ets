@@ -1,3 +1,4 @@
+import { parseSeasonPresentation } from '../model/SeasonPresentation';
 import { http } from '@kit.NetworkKit';
 import { Media } from '../model/Media';
 import { ReadCancel, ConsumerReadFlight } from '../model/ReadFlight';
@@ -11,18 +12,19 @@ interface WireCrew {directing?:WireCredit[];writing?:WireCredit[];sound?:WireCre
 interface WirePeople {cast?:WireCredit[];crew?:WireCrew;}
 const peopleFlights=new ConsumerReadFlight<PersonRow[]>();
 const relatedFlights=new ConsumerReadFlight<RelatedRow[]>();
+const seasonFlights=new ConsumerReadFlight<string>();
 function mapCredits(rows:WireCredit[]):CreditRow[]{
   return rows.filter((r:WireCredit)=>!!r.person?.ids).map((r:WireCredit):CreditRow=>({person:{id:r.person.ids.trakt,tmdb:r.person.ids.tmdb,name:r.person.name},character:r.character,characters:r.characters,job:r.job,jobs:r.jobs}));
 }
 async function fetchPublic(item:Media,client:string,section:string,scope:ReadCancel):Promise<string>{
-  if(!canReadDetails(item)||!client||!['people','related'].includes(section)){throw new Error('Invalid detail section');}
+  if(!canReadDetails(item)||!client||!['people','related','seasons'].includes(section)){throw new Error('Invalid detail section');}
   const service=traktPresentationService(client);checkPresentationService(service);scope.check();
   const request=http.createHttp();let closed=false;
   const close=():void=>{if(!closed){closed=true;request.destroy();}};
   scope.subscribe(close);
   try{
     scope.check();
-    const response=await request.request('https://api.trakt.tv/'+(item.kind==='show'?'shows/':'movies/')+item.id.substring(item.kind.length+1)+'/'+section+'?extended=full',{
+    const response=await request.request('https://api.trakt.tv/'+(item.kind==='show'?'shows/':'movies/')+item.id.substring(item.kind.length+1)+'/'+section+(section==='seasons'?'?extended=full,episodes':'?extended=full'),{
       method:http.RequestMethod.GET,header:{'Content-Type':'application/json','trakt-api-version':'2','trakt-api-key':client,'User-Agent':'Showly-HarmonyOS-Personal/0.7.0'},expectDataType:http.HttpDataType.STRING});
     scope.check();
     if(response.responseCode!==200||typeof response.result!=='string'){throw presentationHttpError(service,response.responseCode,JSON.stringify(response.header),true);}
@@ -41,5 +43,11 @@ export function readRelated(item:Media,client:string,consumer:ReadCancel):Promis
   return relatedFlights.run(JSON.stringify([client,item.id]),async(scope:ReadCancel):Promise<RelatedRow[]>=>{
     const rows=JSON.parse(await fetchPublic(item,client,'related',scope)) as RelatedWire[];
     if(!Array.isArray(rows)){throw new Error('Invalid related response');}return parseRelated(rows,item.kind);
+  },consumer);
+}
+
+export function readSeasonPresentation(item:Media,client:string,consumer:ReadCancel):Promise<string>{
+  return seasonFlights.run(JSON.stringify([client,item.id]),async(scope:ReadCancel):Promise<string>=>{
+    const raw=await fetchPublic(item,client,'seasons',scope);parseSeasonPresentation(raw);return raw;
   },consumer);
 }
