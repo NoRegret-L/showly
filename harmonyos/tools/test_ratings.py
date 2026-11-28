@@ -30,11 +30,17 @@ with tempfile.TemporaryDirectory() as tmp:
     for scope in ("device","account:A","account:B"):
         for kind in ("show","movie","season","episode"):
             db.execute("INSERT INTO personal_rating VALUES(?,?,?,?)",(scope,kind,42,scope+kind))
-    db.execute("INSERT INTO rating_receipt VALUES(?,?,?,?)",("account:A","show",42,"pending"));db.commit();db.close()
+    db.execute("INSERT INTO rating_receipt VALUES(?,?,?,?)",("account:A","show",42,"pending"))
+    db.execute("INSERT INTO rating_intent VALUES(?,?,?,?)",("account:A","show",42,"desired"))
+    db.execute("INSERT OR REPLACE INTO rating_intent VALUES(?,?,?,?)",("account:B","show",42,"unsent"))
+    db.commit();db.close()
     db=sqlite3.connect(path)
     assert db.execute("SELECT count(*) FROM personal_rating").fetchone()[0]==12
     assert db.execute("SELECT count(*) FROM rating_receipt WHERE scope='account:B'").fetchone()[0]==0
     db.execute("DELETE FROM rating_receipt WHERE scope='account:A'");db.rollback()
     assert db.execute("SELECT count(*) FROM rating_receipt").fetchone()[0]==1
+    assert db.execute("SELECT payload FROM rating_intent WHERE scope='account:A'").fetchone()==('desired',)
+    db.execute("DELETE FROM rating_intent WHERE scope='account:B'");db.commit()
+    assert db.execute("SELECT count(*) FROM rating_intent").fetchone()[0]==1
     db.close()
 print("Rating receipt durability, scope/type isolation, no retry, rollback host assertions passed")

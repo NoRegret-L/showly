@@ -1261,7 +1261,8 @@ struct Index {
     this.syncBusy = true;
     this.titleQuickStatus = '正在同步影视操作…';
     try {
-      const current = (): boolean => this.pageVisible && this.titleQuickActive() &&
+      const signal=this.manualRunning?this.manualSignal:undefined;
+      const current = (): boolean => this.pageVisible && (!signal||(!signal.cancelled()&&this.tab==='cloud')) && this.titleQuickActive() &&
         this.titleConsent?.epoch === consent.epoch && this.clientId === clientId &&
         traktAuth.isCurrent(clientId, session.generation);
       const result = await runTitleQuick(media, binding, session, consent, current);
@@ -3068,6 +3069,8 @@ struct Index {
         this.cloudBusy || this.authBusy || this.setupBusy || (!manual && !this.autoActive())) { return; }
     if (manual && (!this.syncAccount || !this.syncBound || !this.queueConfirm)) { return; }
     const expected = manual ? this.syncAccount?.uuid : consent?.uuid;
+    const signal=this.manualRunning?this.manualSignal:undefined;
+    const foreground=():boolean=>this.pageVisible&&(!signal||(!signal.cancelled()&&this.tab==='cloud'));
     if (!expected) { return; }
     const ticket = syncService.acquire(JSON.stringify([clientId,expected,'episodes']));
     if (!ticket) { return; }
@@ -3076,8 +3079,8 @@ struct Index {
     this.autoStatus = '正在读取待同步队列…';
     try {
       this.autoStatus = await executeEpisodeQueue(store, expected, clientId, manual,
-        ()=>this.clientId===clientId, ()=>this.pageVisible && (manual || (this.autoActive() && this.autoConsent?.uuid===expected)),
-        ()=>this.pageVisible, ()=>this.revokeAuto(),
+        ()=>this.clientId===clientId, ()=>foreground() && (manual || (this.autoActive() && this.autoConsent?.uuid===expected)),
+        foreground, ()=>this.revokeAuto(),
         (account: SyncAccount)=>{ this.syncAccount=account; this.syncBound=true; },
         ()=>{ this.queueRows=[]; }, (status: string)=>{ this.autoStatus=status; });
     } finally {
@@ -3116,7 +3119,7 @@ struct Index {
   }
 
   private toggleBatch(id: number): void {
-    if (this.syncBusy || this.batchConfirm) { return; }
+    if (this.syncBusy || this.batchConfirm || !this.syncPreview?.rows.some((row:SyncDifference)=>row.episodeId===id&&row.kind==='addition'&&!row.uploadBlocked&&!!actualWatchTime(row.watchedAt))) { return; }
     this.uploadSelectedId = 0;
     this.removeSelectedId = 0;
     this.importConfirm = false;
@@ -3155,7 +3158,7 @@ struct Index {
     this.uploadStatus = '正在复核批量新增…';
     try {
       const result = await uploadBatch(store, session, preview.account.uuid, ids,
-        actualWatchTime(preview.rows.find((row:SyncDifference)=>row.episodeId===ids[0])?.watchedAt), 'manual', preview);
+        actualWatchTime(preview.rows.find((row:SyncDifference)=>row.episodeId===ids[0])?.watchedAt), 'manual', preview,[],()=>this.pageVisible&&this.tab==='cloud'&&traktAuth.isCurrent(session.clientId,session.generation));
       this.uploadStatus = result.message;
       this.syncLogs = await store.syncLogs(preview.account.uuid);
     } catch (error) {

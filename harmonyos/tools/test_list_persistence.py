@@ -26,7 +26,9 @@ console.log('List storage: 10k delta add/remove/reorder, canonical ranks, backup
 repo=(root/"data/CustomListsRepository.ets").read_text()
 sql=re.findall(r"executeSql\('([^']+)'",repo)
 ddl=[x for x in sql if x.startswith("CREATE ")]
-assert len(ddl)==6
+expected={"list_document","list_scope_v2","list_header_v2","list_member_v2","list_preference_v2","list_export_link"}
+assert {re.match(r"CREATE TABLE IF NOT EXISTS (\w+)",q).group(1) for q in ddl if q.startswith("CREATE TABLE")}==expected
+assert any("list_member_reverse_v2" in q for q in ddl)
 with tempfile.TemporaryDirectory() as tmp:
     path=pathlib.Path(tmp)/"lists.db"
     db=sqlite3.connect(path)
@@ -42,7 +44,13 @@ with tempfile.TemporaryDirectory() as tmp:
         db.execute("INSERT INTO list_member_v2 VALUES(?,?,?,?,?)",(scope,"local:1","show:1",1,scope))
         db.execute("INSERT INTO list_scope_v2 VALUES(?,?)",(scope,2))
         db.commit()
+    db.execute("INSERT INTO list_export_link VALUES(?,?,?,?)",("account:A","local:1",0,"create"))
+    db.commit()
     db.close();db=sqlite3.connect(path)
+    assert db.execute("SELECT remote_id,pending FROM list_export_link WHERE scope=? AND local_id=?",("account:A","local:1")).fetchone()==(0,"create")
+    assert db.execute("SELECT count(*) FROM list_export_link WHERE scope='account:B'").fetchone()==(0,)
+    db.execute("UPDATE list_export_link SET remote_id=42,pending='' WHERE scope='account:A'");db.rollback()
+    assert db.execute("SELECT remote_id,pending FROM list_export_link").fetchone()==(0,"create")
     assert db.execute("SELECT payload FROM list_member_v2 WHERE scope=? AND list_id=? AND media_id=?",("account:A","local:1","show:1")).fetchone()[0]=="account:A"
     assert db.execute("SELECT payload FROM list_member_v2 WHERE scope=?",("device",)).fetchone() is None
     db.execute("BEGIN");db.execute("DELETE FROM list_member_v2 WHERE scope=? AND list_id=? AND media_id=?",("account:A","local:1","show:1"));db.rollback()

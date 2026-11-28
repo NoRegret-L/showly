@@ -38,6 +38,8 @@ assert lists.index("INSERT INTO list_export_link")<lists.index("await createPriv
 assert lists.index("JSON.stringify(missing)")<lists.index("await appendListMembers")
 assert "link.remoteId<=0" in lists and "membersSatisfied" in lists
 rating=(root/"data/RatingsRepository.ets").read_text()
-assert rating.index("INSERT INTO rating_intent")<rating.index("INSERT INTO rating_receipt")<rating.index("http.RequestMethod.POST")
+assert rating.index("INSERT OR REPLACE INTO rating_intent")<rating.index("INSERT INTO rating_receipt")<rating.index("http.RequestMethod.POST")
 assert "actual.ratedAt!==receipt.beforeAt" in rating and "if(pending)" in rating
+assert rating.index("if(pending){throw")<rating.index("INSERT OR REPLACE INTO rating_intent")
+assert "if(decision==='match'){if(scope!=='device'){await this.persist(scope,t.kind,old,fresh,current,t.id);}" in rating
 print("Timestamp, list create/member receipt, rating intent and account scope wiring passed; host only")

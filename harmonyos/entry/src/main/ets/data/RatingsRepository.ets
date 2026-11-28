@@ -89,7 +89,7 @@ export class RatingsRepository{
       if(!fresh){throw new Error('Verified account required');}
       const actual=ratingState(fresh,t.id,false,true),decision=ratingDecision(expected,actual,desired);
       if(decision==='conflict'||decision==='blocked'){throw new Error('Rating changed; reopen and review');}
-      if(decision==='match'){if(scope!=='device'){await this.persist(scope,t.kind,old,fresh,current);}return actual;}
+      if(decision==='match'){if(scope!=='device'){await this.persist(scope,t.kind,old,fresh,current,t.id);}return actual;}
       const at=Date.now();
       if(scope==='device'){
         const rows=fresh.rows.filter((r:RatingRecord)=>r.id!==t.id);if(desired){rows.push({id:t.id,value:desired,ratedAt:at});}
@@ -97,8 +97,10 @@ export class RatingsRepository{
       }
       if(!session){throw new Error('Verified account required');}
       const intent:RatingReceipt={target:t,desired:desired,before:actual.value,beforeAt:actual.ratedAt,createdAt:at};
+      // No pending receipt exists: a new explicitly reviewed choice supersedes an unsent intent.
       // Explicit intent is separate from cached remote ratings and survives interruption.
-      await this.db.executeSql('INSERT INTO rating_intent(scope,kind,media_id,payload) VALUES(?,?,?,?)',[scope,t.kind,t.id,JSON.stringify(intent)]);
+      this.guard(scope,t.kind,current);
+      await this.db.executeSql('INSERT OR REPLACE INTO rating_intent(scope,kind,media_id,payload) VALUES(?,?,?,?)',[scope,t.kind,t.id,JSON.stringify(intent)]);
       return this.dispatchIntent(scope,intent,session,current,old,fresh);
 
     });
