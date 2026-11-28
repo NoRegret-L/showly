@@ -36,8 +36,11 @@ console.log('Sync coordinator: 100 cycles, coalesced intents, scope reset and 10
 page=(root/"pages/Index.ets").read_text()
 assert "this.syncCoordinator.reset();" in page
 assert "this.requestSyncNow();" in page
-assert "sentIdentities.has(queueIdentity(entry.episodeId, entry.seq))" in page
-assert "await reconcileQueue(store, session, expected, attempted)" in page
+executor=(root/"data/EpisodeQueueExecutor.ets").read_text()
+assert "sentIdentities.has(queueIdentity(entry.episodeId, entry.seq))" in executor
+assert "await reconcileQueue(store, session, expected, attempted)" in executor
+assert "await executeEpisodeQueue(" in page
+assert "allowed() && clientCurrent() && traktAuth.isCurrent" in executor
 assert "if (this.autoActive()) { this.recoveryPending = true; }" in page
 assert "if (this.titleQuickActive()) { this.titleQuickPending = true; }" in page
 assert "this.syncCoordinator.next(" in page

@@ -20,10 +20,21 @@ export interface RemoteMovieObservation {
   plays: number;
   lastWatchedAt: string;
 }
+// Optional cache-only activity evidence. Missing or invalid domain stamps
+// always require a complete observation; they never grant write permission.
+export interface ObservationVersions { all: string; movies: string; shows: string; }
+export function observationReadMask(old: ObservationVersions | undefined, next: ObservationVersions): number {
+  if (!old || !old.all || !next.all || !old.movies || !old.shows || !next.movies || !next.shows) { return 3; }
+  if (old.all === next.all) { return old.movies === next.movies && old.shows === next.shows ? 0 : 3; }
+  const mask = (old.movies !== next.movies ? 1 : 0) | (old.shows !== next.shows ? 2 : 0);
+  return mask || 3; // unclassified global activity: conservative full read
+}
 export interface RemoteLibraryObservation {
   generation: number;
   activity: string;
   observedAt: number;
+  versions?: ObservationVersions;
+  verifiedAt?: number;
   watchlist: Media[];
   watchedMovies: Media[];
   shows: RemoteShowObservation[];
@@ -52,6 +63,9 @@ export function validateObservation(snapshot: RemoteLibraryObservation): void {
       !Array.isArray(snapshot.shows) || !Array.isArray(snapshot.moviePlays)) {
     throw new Error('Invalid cloud observation');
   }
+  if (snapshot.versions !== undefined && (snapshot.versions.all !== snapshot.activity ||
+      typeof snapshot.versions.movies !== 'string' || typeof snapshot.versions.shows !== 'string')) { throw new Error('Invalid observation versions'); }
+  if (snapshot.verifiedAt !== undefined && (!Number.isSafeInteger(snapshot.verifiedAt) || snapshot.verifiedAt <= 0)) { throw new Error('Invalid observation verification time'); }
   const queued: Set<string> = new Set<string>();
   const movies: Set<string> = new Set<string>();
   const shows: Set<string> = new Set<string>();

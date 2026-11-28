@@ -3,7 +3,7 @@ import { http } from '@kit.NetworkKit';
 import { Media, CollectionDate, PersonalMovie, PersonalMovieSnapshot, validReleaseDate } from '../model/Media';
 import { ReadFlight } from '../model/ReadFlight';
 import { TraktSession, traktAuth } from './TraktAuth';
-import { RemotePlayPosition, RemoteMovieObservation, RemoteLibraryObservation, RemoteShowObservation, validateObservation } from '../model/RemoteObservation';
+import { RemotePlayPosition, RemoteMovieObservation, RemoteLibraryObservation, RemoteShowObservation, validateObservation, ObservationVersions, observationReadMask } from '../model/RemoteObservation';
 export { PersonalMovie, PersonalMovieSnapshot, validReleaseDate } from '../model/Media';
 
 interface Ids {
@@ -40,8 +40,19 @@ interface SyncItem {
   show?: Title;
   seasons?: Season[];
 }
+interface ActivityDomain { watched_at?: string; watchlisted_at?: string; }
 interface Activity {
   all: string;
+  movies?: ActivityDomain;
+  shows?: ActivityDomain;
+  seasons?: ActivityDomain;
+  episodes?: ActivityDomain;
+}
+function activityStamp(value: string | undefined): string {
+  return typeof value === 'string' && Number.isFinite(Date.parse(value)) ? value : '';
+}
+function activityPair(first: string, second: string): string {
+  return first && second ? JSON.stringify([first,second]) : '';
 }
 interface Page {
   items: SyncItem[];
@@ -59,6 +70,9 @@ function ensureCurrent(session: TraktSession): void {
 }
 
 export async function readActivity(session: TraktSession): Promise<string> {
+  return (await readActivityVersions(session)).all;
+}
+export async function readActivityVersions(session: TraktSession): Promise<ObservationVersions> {
   ensureCurrent(session);
   const req = http.createHttp();
   try {
@@ -76,7 +90,10 @@ export async function readActivity(session: TraktSession): Promise<string> {
     if (typeof data.all !== 'string' || !data.all) {
       throw new Error('Missing activity revision');
     }
-    return data.all;
+    return {all:data.all,
+      movies:activityPair(activityStamp(data.movies?.watched_at),activityStamp(data.movies?.watchlisted_at)),
+      shows:activityPair(activityStamp(data.episodes?.watched_at),activityPair(activityStamp(data.shows?.watchlisted_at),
+        activityPair(activityStamp(data.seasons?.watchlisted_at),activityStamp(data.episodes?.watchlisted_at))))};
   } finally {
     req.destroy();
   }
@@ -241,7 +258,7 @@ export async function readPartRatings(session:TraktSession,kind:string,activity:
   });
   ensureCurrent(session);return result;
 }
-async function readObservationCollections(session: TraktSession): Promise<SyncItem[][]> {
+async function readObservationCollections(session: TraktSession, mask: number = 3): Promise<SyncItem[][]> {
   let failure: Error | undefined;
   const read = async (path: string): Promise<SyncItem[]> => {
     try { return await readAll(session,path,() => !failure); }
@@ -250,10 +267,10 @@ async function readObservationCollections(session: TraktSession): Promise<SyncIt
   // The four existing independent domains overlap their I/O; each still
   // paginates sequentially. On failure stop new pages and drain in-flight reads.
   const groups: SyncItem[][] = await Promise.all([
-    read('sync/watched/movies?extended=full'),
-    read('sync/watched/shows?extended=progress'),
-    read('sync/watchlist/movies?extended=full'),
-    read('sync/watchlist/shows')
+    (mask & 1) !== 0 ? read('sync/watched/movies?extended=full') : Promise.resolve<SyncItem[]>([]),
+    (mask & 2) !== 0 ? read('sync/watched/shows?extended=progress') : Promise.resolve<SyncItem[]>([]),
+    (mask & 1) !== 0 ? read('sync/watchlist/movies?extended=full') : Promise.resolve<SyncItem[]>([]),
+    (mask & 2) !== 0 ? read('sync/watchlist/shows') : Promise.resolve<SyncItem[]>([])
   ]);
   if (failure) { throw failure; }
   ensureCurrent(session);
@@ -264,6 +281,12 @@ export async function readCloudLibrary(session: TraktSession): Promise<CloudLibr
   // Four independent read-only collections under the same before/after activity fence.
   // Do not coalesce activity reads or write/receipt verification requests.
   const groups = await readObservationCollections(session);
+  const after = await readActivity(session);
+  ensureCurrent(session);
+  if (before !== after) { throw new Error('Trakt activity changed during import; retry'); }
+  return observationFromGroups(session, groups, after);
+}
+function observationFromGroups(session: TraktSession, groups: SyncItem[][], after: string): CloudLibrary {
   const movieRows = groups[0];
   const movies = uniqueTitles(movieRows, 'movie', true);
   const moviePlays = movieRows.map((row: SyncItem): RemoteMovieObservation => {
@@ -285,13 +308,43 @@ export async function readCloudLibrary(session: TraktSession): Promise<CloudLibr
       queueDates.push({ id: titleToMedia(row, row.movie ? 'movie' : 'show', false).id, at: at });
     }
   }
-  const after = await readActivity(session);
-  ensureCurrent(session);
-  if (before !== after) {
-    throw new Error('Trakt activity changed during import; retry');
-  }
   const snapshot: CloudLibrary = { generation: session.generation, activity: after, observedAt: Date.now(),
     watchlist: [...queuedMovies, ...queuedShows], watchedMovies: movies, shows: shows, moviePlays: moviePlays, queueDates: queueDates, movieDetails: Array.from(movieDetails.values()) };
+  validateObservation(snapshot);
+  return snapshot;
+}
+
+// Incremental READ observation only. Caller must supply an account-verified
+// prior snapshot; both activity fences and complete collection validation remain.
+export async function readCloudLibraryIncremental(session: TraktSession, prior?: CloudLibrary): Promise<CloudLibrary> {
+  const before = await readActivityVersions(session);
+  let mask = prior && prior.queueDates !== undefined && prior.movieDetails !== undefined ?
+    observationReadMask(prior.versions,before) : 3;
+  if (!prior || prior.generation !== session.generation) { mask = 3; }
+  const groups = await readObservationCollections(session,mask);
+  const after = await readActivityVersions(session);
+  ensureCurrent(session);
+  if (before.all !== after.all || before.movies !== after.movies || before.shows !== after.shows) {
+    throw new Error('Trakt activity changed during import; retry');
+  }
+  const snapshot = observationFromGroups(session,groups,after.all);
+  if (prior && mask !== 3) {
+    if ((mask & 1) === 0) {
+      snapshot.watchedMovies = prior.watchedMovies;
+      snapshot.moviePlays = prior.moviePlays;
+      snapshot.movieDetails = prior.movieDetails;
+    }
+    if ((mask & 2) === 0) { snapshot.shows = prior.shows; }
+    const oldQueue = prior.watchlist.filter((item: Media) => item.kind === 'movie' ? (mask & 1) === 0 : (mask & 2) === 0);
+    const queue = [...snapshot.watchlist,...oldQueue];
+    snapshot.watchlist = [...queue.filter((item: Media)=>item.kind==='movie'),...queue.filter((item: Media)=>item.kind==='show')];
+    const retained = new Set<string>(oldQueue.map((item: Media)=>item.id));
+    const oldDates = (prior.queueDates ?? []).filter((date: CollectionDate)=>retained.has(date.id));
+    const dates = [...(snapshot.queueDates ?? []),...oldDates];
+    snapshot.queueDates = [...dates.filter((date: CollectionDate)=>date.id.startsWith('movie:')),
+      ...dates.filter((date: CollectionDate)=>date.id.startsWith('show:'))];
+  }
+  snapshot.versions = after;
   validateObservation(snapshot);
   return snapshot;
 }

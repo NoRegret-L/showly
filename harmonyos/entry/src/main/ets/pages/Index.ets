@@ -1,4 +1,5 @@
-import { SyncCoordinator, queueIdentity } from '../model/SyncCoordinator';
+import { executeEpisodeQueue } from '../data/EpisodeQueueExecutor';
+import { SyncCoordinator } from '../model/SyncCoordinator';
 import { GalleryTarget } from '../model/GalleryRules';
 import { GalleryPage } from './GalleryPage';
 import { CommentTarget } from '../model/CommentRules';
@@ -80,7 +81,7 @@ import { TRAKT_APPS_URL, TRAKT_REDIRECT_URI } from '../config/TraktConfig';
 import { ClientSettings, validateClientId } from '../data/ClientSettings';
 import { pasteboard } from '@kit.BasicServicesKit';
 import { traktAuth } from '../data/TraktAuth';
-import { CloudLibrary, ShowProgress, readCloudLibrary, mergeNewTitles, readActivity } from '../data/TraktLibrary';
+import { CloudLibrary, ShowProgress, readCloudLibraryIncremental, mergeNewTitles, readActivity } from '../data/TraktLibrary';
 import { LibraryProjection, LibraryProjectionSession, projectDetail } from '../data/LibraryProjection';
 import { allowLocalScope } from '../model/EffectiveState';
 import { hasTrackingEvidence } from '../model/PersonalLibrary';
@@ -100,7 +101,6 @@ import { removeSelectedPlay } from '../data/TraktSyncRemove';
 import { uploadBatch } from '../data/TraktSyncBatch';
 import { connection } from '@kit.NetworkKit';
 import { BusinessError } from '@kit.BasicServicesKit';
-import { reconcileQueue } from '../data/TraktQueueReconcile';
 import { safeSyncError } from '../data/SyncDiagnostics';
 import { APP_VERSION, RELEASES_URL } from '../config/BuildInfo';
 import { UpdateInfo, UpstreamInfo, checkRelease, checkUpstream } from '../data/ReleaseUpdates';
@@ -2869,82 +2869,12 @@ struct Index {
     this.syncBusy = true;
     this.queueConfirm = false;
     this.autoStatus = '正在读取待同步队列…';
-    let stage = '读取本机队列';
-    let ids: number[] = [];
     try {
-      let pending = await store.queueEntries(expected);
-      ids = pending.map((entry: QueueEntry) => entry.episodeId);
-      if (!pending.length) {
-        this.queueRows = [];
-        this.autoStatus = '没有待同步新增。';
-        return;
-      }
-      stage = '恢复登录';
-      await traktAuth.restore(clientId, true);
-      const session = traktAuth.session(clientId);
-      if (!session) { throw new Error('Offline or sign-in required'); }
-      stage = '核对账户';
-      const account = await readSyncAccount(session);
-      if (account.uuid !== expected || this.clientId !== clientId || await store.boundAccount() !== expected) {
-        if (!manual) { await this.revokeAuto(); }
-        throw new Error('Account mismatch');
-      }
-      this.syncAccount = account;
-      this.syncBound = true;
-      const canSend = (): boolean => {
-        return this.pageVisible && this.clientId === clientId &&
-          traktAuth.isCurrent(clientId, session.generation) &&
-          (manual || (this.autoActive() && this.autoConsent?.uuid === expected));
-      };
-      let reconciled = 0;
-      if (pending.some((entry: QueueEntry) => entry.blocked)) {
-        stage = '只读核对受保护队列';
-        this.autoStatus = '正在只读核对已有凭证，不会重复上传…';
-        const checked = await reconcileQueue(store, session, expected, pending);
-        reconciled += checked.completed.length;
-        pending = checked.remaining;
-        if (checked.completed.length) {
-          await store.logSync(expected, 'reconcile', checked.completed,
-            '只读核对确认云端存在 ' + checked.completed.length + ' 集，已清理队列；未重发。');
-        }
-      }
-      const eligible = pending.filter((entry: QueueEntry) => !entry.blocked);
-      if (!eligible.length) {
-        this.autoStatus = '只读核对完成：已清理 ' + reconciled + ' 集；剩余 ' + pending.length +
-          ' 集受保护或目录异常，未发送新增请求。';
-        return;
-      }
-      stage = '上传未发送的新增分集';
-      if (!canSend()) { throw new Error('Foreground ended'); }
-      this.autoStatus = '正在校验并处理 ' + eligible.length + ' 集未发送记录…';
-      const result = await uploadBatch(store, session, expected,
-        eligible.map((entry: QueueEntry) => entry.episodeId), new Date().toISOString(),
-        'queue', undefined, eligible, canSend);
-      stage = '保存已完成队列';
-      const completed = new Set<number>(result.completedIds);
-      for (const entry of eligible) {
-        if (completed.has(entry.episodeId)) { await store.finishQueue(expected, entry); }
-      }
-      this.autoStatus = result.message;
-      // Only one additional fresh READ, never a second POST. If the app exits
-      // or this read fails, the next foreground/network event can reconcile.
-      const remaining = await store.queueEntries(expected);
-      const sentIdentities = new Set<string>();
-      for (const old of eligible) { sentIdentities.add(queueIdentity(old.episodeId, old.seq)); }
-      const attempted = remaining.filter((entry: QueueEntry) => entry.blocked &&
-        sentIdentities.has(queueIdentity(entry.episodeId, entry.seq)));
-      if (attempted.length > 0 && this.pageVisible) {
-        stage = '上传后补充只读核对';
-        const checked = await reconcileQueue(store, session, expected, attempted);
-        reconciled += checked.completed.length;
-        await store.logSync(expected, 'reconcile', checked.completed,
-          '上传后只读核对：确认 ' + checked.completed.length + ' 集，未重发；剩余队列 ' + checked.remaining.length + ' 集。');
-      }
-      if (reconciled) { this.autoStatus += ' 只读补充核对清理 ' + reconciled + ' 集。'; }
-    } catch (error) {
-      this.autoStatus = '队列未完成 · 阶段：' + stage + ' · ' + safeSyncError(error as Error) +
-        '。本机记录保留，受保护项不会重发。';
-      try { await store.logSync(expected, 'queue', ids, this.autoStatus); } catch (failure) {}
+      this.autoStatus = await executeEpisodeQueue(store, expected, clientId, manual,
+        ()=>this.clientId===clientId, ()=>this.pageVisible && (manual || (this.autoActive() && this.autoConsent?.uuid===expected)),
+        ()=>this.pageVisible, ()=>this.revokeAuto(),
+        (account: SyncAccount)=>{ this.syncAccount=account; this.syncBound=true; },
+        ()=>{ this.queueRows=[]; }, (status: string)=>{ this.autoStatus=status; });
     } finally {
       try {
         await this.reloadQueue();
@@ -3611,7 +3541,7 @@ struct Index {
       if (cached) {
         const restored: CloudLibrary = { generation: session.generation, activity: cached.activity,
           observedAt: cached.observedAt, watchlist: cached.watchlist, watchedMovies: cached.watchedMovies,
-          shows: cached.shows, moviePlays: cached.moviePlays, queueDates: cached.queueDates, movieDetails: cached.movieDetails };
+          shows: cached.shows, moviePlays: cached.moviePlays, queueDates: cached.queueDates, movieDetails: cached.movieDetails, versions: cached.versions, verifiedAt: cached.verifiedAt };
         this.cloud = restored;
         this.cloudUuid = account.uuid;
         this.publishMovieSource(restored);
@@ -3642,16 +3572,19 @@ struct Index {
       let snapshot = this.cloud;
       try {
         const revision = await readActivity(session);
-        const changed = !snapshot || snapshot.activity !== revision || snapshot.queueDates === undefined || snapshot.movieDetails === undefined;
-        if (changed) { snapshot = await readCloudLibrary(session); }
+        const changed = !snapshot || snapshot.activity !== revision || snapshot.queueDates === undefined || snapshot.movieDetails === undefined || snapshot.versions === undefined;
+        if (changed) { snapshot = await readCloudLibraryIncremental(session,snapshot); }
         if (!snapshot) { throw new Error('Observation unavailable'); }
         const verified = await readSyncAccount(session);
         if (!current() || verified.uuid !== account.uuid || await readActivity(session) !== snapshot.activity) {
           throw new Error('Account or activity changed');
         }
         if (!current()) { throw new Error('Session changed'); }
-        if (changed) { await store.saveRemoteObservation(account.uuid, snapshot); }
+        const verifiedAt = Date.now();
+        // Persist only after account/activity fences. Cache metadata is not a receipt.
+        await store.saveRemoteObservation(account.uuid, { ...snapshot, verifiedAt: verifiedAt });
         if (!current()) { throw new Error('Session changed'); }
+        snapshot.verifiedAt = verifiedAt;
         this.cloud = snapshot;
         this.cloudUuid = account.uuid;
         this.publishMovieSource(snapshot);
@@ -7126,6 +7059,9 @@ struct Index {
           this.cloud ? '显示上次缓存，尚未确认最新版本' : '尚未核对云端版本').fontSize(12).width('100%')
         if (this.syncBound && this.syncAccount && traktAuth.isCurrent(this.clientId, this.syncAccount.generation)) {
           Text('分集待处理：' + this.queueRows.length + ' 条（含需只读核对）').fontSize(13).width('100%')
+        }
+        if (this.cloud && this.cloud.verifiedAt) {
+          Text('上次成功核对云端：' + new Date(this.cloud.verifiedAt).toLocaleString()).fontSize(12).width('100%')
         }
         if (this.autoStatus) { Text(this.autoStatus).fontSize(12).width('100%') }
         if (this.mediaSyncStatus) { Text(this.mediaSyncStatus).fontSize(12).width('100%') }
