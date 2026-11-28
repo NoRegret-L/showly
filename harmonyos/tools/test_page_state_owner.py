@@ -73,3 +73,8 @@ assert "this.showRows.work.publishSummary(" in page
 assert "await store.saveReadCheckpoints(account.uuid, result.matches)" in page
 assert "await readSyncAccount(session)" in page and "await readActivity(session)" in page
 print("Page state ownership integration and sync guards passed")
+
+# ArkTS requires a common nominal type across the owner and observed state.
+assert "interface DisplaySummary" not in page
+assert page.count("Summary: PageSummary =")==4
+assert page.count("const summary: PageSummary =")==4

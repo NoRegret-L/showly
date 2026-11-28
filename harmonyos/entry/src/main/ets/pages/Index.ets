@@ -1,5 +1,5 @@
 import { StableDisplayOrder, StableOrderChange } from '../model/StableDisplayOrder';
-import { PageStateOwner, PageWork, PageWorkSet, PageSortJobs } from '../model/PageStateOwner';
+import { PageStateOwner, PageWork, PageWorkSet, PageSortJobs, PageSummary } from '../model/PageStateOwner';
 import { ProgressTitleOrder } from '../model/ProgressTitleOrder';
 import { PresentationQueues, FramePublication } from '../model/PresentationQueue';
 import { ArtworkImage } from './ArtworkImage';
@@ -78,7 +78,6 @@ import { safeSyncError } from '../data/SyncDiagnostics';
 import { APP_VERSION, RELEASES_URL } from '../config/BuildInfo';
 import { UpdateInfo, UpstreamInfo, checkRelease, checkUpstream } from '../data/ReleaseUpdates';
 
-interface DisplaySummary { key: string; total: number; page: number; pages: number; }
 interface CollectionIndexes {
   times: Map<string,number>;
   recent: Map<string,number>;
@@ -159,9 +158,9 @@ struct Index {
   private mediaInput: MediaInputVersion=new MediaInputVersion();
   private displayRevisions: DisplayRevisions = new DisplayRevisions();
   @State sortedViewRevision: number = 0;
-  @State showSummary: DisplaySummary = {key:'',total:0,page:1,pages:1};
-  @State movieSummary: DisplaySummary = {key:'',total:0,page:1,pages:1};
-  @State collectionSummary: DisplaySummary = {key:'',total:0,page:1,pages:1};
+  @State showSummary: PageSummary = {key:'',total:0,page:1,pages:1};
+  @State movieSummary: PageSummary = {key:'',total:0,page:1,pages:1};
+  @State collectionSummary: PageSummary = {key:'',total:0,page:1,pages:1};
   private showTitleRevision: number = 0;
   private movieTitleRevision: number = 0;
   private showMetaRevision: number = 0;
@@ -303,7 +302,7 @@ struct Index {
   @State calendarStatus: string = '';
   @State calendarSourceVersion: number = 0;
   @State calendarViewRevision: number = 0;
-  @State calendarSummary: DisplaySummary = {key:'',total:0,page:1,pages:1};
+  @State calendarSummary: PageSummary = {key:'',total:0,page:1,pages:1};
   private calendarSourceScope: string = '';
   private calendarSources: CalendarSource[] = [];
   private calendarRepairTargets: Media[] = [];
@@ -1769,7 +1768,7 @@ struct Index {
         const prepared = this.prepareCalendar();
         if (!prepared) { return; }
         const pages = Math.max(1,Math.ceil(prepared.length/this.collectionPageSize));
-        const summary: DisplaySummary = {key:this.calendarDisplayKey(),total:prepared.length,page:Math.min(this.calendarPage,pages),pages:pages};
+        const summary: PageSummary = {key:this.calendarDisplayKey(),total:prepared.length,page:Math.min(this.calendarPage,pages),pages:pages};
         const rows = prepared;
         const committed = await this.calendarRows.submit(rows,rows.map((row: CalendarEntry) => row.key),rows.map((row: CalendarEntry) => this.calendarRowKey(row)),differ,current);
         if (committed && current() && this.calendarRows.work.publishSummary(summary,this.calendarSummary)) { this.calendarSummary = summary; }
@@ -1781,7 +1780,7 @@ struct Index {
       if (this.collectionOptions.sort === 'userRating') { this.loadCollectionRatings(); }
       const prepared = this.collectionItems(true);
       if (this.sortJobs.pending('collection')) { return; }
-      const summary: DisplaySummary = {key:this.collectionDisplayKey(),total:prepared.length,page:this.collectionPage,pages:Math.max(1,Math.ceil(prepared.length/this.collectionPageSize))};
+      const summary: PageSummary = {key:this.collectionDisplayKey(),total:prepared.length,page:this.collectionPage,pages:Math.max(1,Math.ceil(prepared.length/this.collectionPageSize))};
       const rows: CollectionGroup[] = [];
       if (!this.signedIn || this.activeCloud()) {
         for (const group of this.collectionPageGroups()) {
@@ -1804,7 +1803,7 @@ struct Index {
       if (this.movieProgressQuery && this.presentationLanguage === 'zh') { this.movieProgressRows('',false,true); }
       if (this.sortJobs.pending(this.movieProgressQuery ? 'movie-query' : 'movie-all')) { return; }
       const rows = prepared;
-      const summary: DisplaySummary = {key:this.movieDisplayKey(),total:prepared.length,page:this.movieProgressPage,pages:Math.max(1,Math.ceil(prepared.length/this.collectionPageSize))};
+      const summary: PageSummary = {key:this.movieDisplayKey(),total:prepared.length,page:this.movieProgressPage,pages:Math.max(1,Math.ceil(prepared.length/this.collectionPageSize))};
       const committed = await this.movieRowsSource.submit(rows, rows.map((row: PersonalLibraryRow) => row.media.id),
         rows.map((row: PersonalLibraryRow) => this.movieRowKey(row)),differ,current);
       if (committed && current() && this.movieRowsSource.work.publishSummary(summary,this.movieSummary)) { this.movieSummary = summary; }
@@ -1816,7 +1815,7 @@ struct Index {
       if (this.sortJobs.pending('show-candidates') || this.sortJobs.pending(this.nextQuery ? 'show-query' : 'show-all')) { return; }
       const rows = this.nextSlice();
       const pages = this.nextPages();
-      const summary: DisplaySummary = {key:this.showDisplayKey(),total:this.nextFiltered().length,page:Math.min(this.nextPage,pages),pages:pages};
+      const summary: PageSummary = {key:this.showDisplayKey(),total:this.nextFiltered().length,page:Math.min(this.nextPage,pages),pages:pages};
       const committed = await this.showRows.submit(rows, rows.map((entry: ProgressEntry) => entry.key),
         rows.map((entry: ProgressEntry) => this.showRowKey(entry)),differ,current);
       if (committed && current() && this.showRows.work.publishSummary(summary,this.showSummary)) { this.showSummary = summary; }
