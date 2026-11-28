@@ -34,7 +34,7 @@ export struct MovieSeriesSection{
   try{const repo=await openAvailability(this.getUIContext().getHostContext() as common.UIAbilityContext),r=await repo.series(this.item,this.client,refresh,s);if(this.visible&&this.owner.current(t)){this.owner.publish(t,r.rows,false,r.stale?'旧缓存 · 更新失败':'',true);this.publish();}}
   catch(error){if(this.visible&&this.owner.current(t)){this.owner.publish(t,this.view.rows,false,'电影系列读取失败，可重试',this.view.loaded);this.publish();}}
  }
- private visibility(v:boolean):void{this.visible=v;if(!v){this.owner.publish(this.owner.begin(),this.view.rows,false,this.view.status,this.view.loaded);this.publish();}else if(!this.view.loaded){this.load(false);}}
+ private updateSectionVisibility(v:boolean):void{this.visible=v;if(!v){this.owner.publish(this.owner.begin(),this.view.rows,false,this.view.status,this.view.loaded);this.publish();}else if(!this.view.loaded){this.load(false);}}
  private async openSeries(row:Series,refresh:boolean=false):Promise<void>{
   this.signal.cancel();this.signal=new ReadCancel();const signal=this.signal;this.selected=row;this.sheet=true;this.busy=true;this.status='';if(!refresh){this.source.replace([],[],[]);}
   try{const repo=await openAvailability(this.getUIContext().getHostContext() as common.UIAbilityContext),r=await repo.movies(row,this.item.id,this.client,refresh,signal);
@@ -61,6 +61,6 @@ export struct MovieSeriesSection{
   if(this.view.loaded&&!this.view.rows.length){Text('没有公开官方系列').fontSize(12)}
   ForEach(this.view.rows,(row:Series)=>{Row({space:8}){Column({space:4}){Text(row.name).fontSize(16).maxLines(2);Text(row.count+' 部作品').fontSize(12)}.layoutWeight(1).alignItems(HorizontalAlign.Start);Text('›')}.width('100%').padding(8).onClick(()=>{this.openSeries(row);})},(row:Series)=>row.id.toString())
   Button('刷新电影系列').fontSize(12).enabled(!this.view.busy).onClick(()=>{this.load(true);})
- }.width('100%').padding(10).backgroundColor($r('app.color.showly_surface')).borderRadius(10).onVisibleAreaChange([0],(v:boolean,r:number)=>{this.visibility(v&&r>0);}).bindSheet($$this.sheet,this.content(),{height:SheetSize.LARGE,showClose:true})
+ }.width('100%').padding(10).backgroundColor($r('app.color.showly_surface')).borderRadius(10).onVisibleAreaChange([0],(v:boolean,r:number)=>{this.updateSectionVisibility(v&&r>0);}).bindSheet($$this.sheet,this.content(),{height:SheetSize.LARGE,showClose:true})
  }
 }

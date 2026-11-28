@@ -2,7 +2,7 @@ name: HarmonyOS Hvigor cold performance pair
 on:
   push:
     branches: [harmonyos-bootstrap]
-    paths: ['.github/workflows/harmonyos-hvigor-performance-probe.yml']
+    paths: ['.github/workflows/harmonyos-hvigor-performance-probe.yml'] # rerun after native visibility fix
   workflow_dispatch:
 permissions:
   contents: read

@@ -34,3 +34,13 @@ print("Custom lists Refresh single-child branch assertion passed")
 assert ".bindSheet($$this.ratingSheetOpen,this.ratingSheet()" in p
 assert ".bindSheet($this.ratingSheetOpen" not in p
 print("Rating sheet native binding preflight passed")
+
+# Avoid collision with ArkUI CommonAttribute.visibility in custom components.
+from pathlib import Path
+availability_pages=Path(__file__).resolve().parents[1]/"entry/src/main/ets/pages"
+for component in ("StreamingSection","MovieSeriesSection"):
+    source=(availability_pages/(component+".ets")).read_text()
+    assert "private visibility(" not in source
+    assert "private updateSectionVisibility(" in source
+    assert "this.updateSectionVisibility(v&&r>0)" in source
+print("Availability native visibility method preflight passed")

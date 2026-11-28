@@ -21,7 +21,7 @@ export struct StreamingSection{
   try{const repo=await openAvailability(this.getUIContext().getHostContext() as common.UIAbilityContext),r=await repo.providers(item,this.client,region,refresh,s);if(current()){this.owner.publish(t,r.rows,false,r.stale?'旧缓存 · 更新失败':r.cached?'本地缓存':'',true);this.publish();}}
   catch(error){if(current()){this.owner.publish(t,this.view.rows,false,tmdbConfigured()?'平台资料读取失败，可重试':'未配置 TMDB 或无可用缓存',this.view.loaded);this.publish();}}
  }
- private visibility(v:boolean):void{this.visible=v;if(!v){this.owner.publish(this.owner.begin(),this.view.rows,false,this.view.status,this.view.loaded);this.publish();}else if(!this.view.loaded){this.load(false);}}
+ private updateSectionVisibility(v:boolean):void{this.visible=v;if(!v){this.owner.publish(this.owner.begin(),this.view.rows,false,this.view.status,this.view.loaded);this.publish();}else if(!this.view.loaded){this.load(false);}}
  private async open(row:Provider):Promise<void>{const link=safeProviderLink(row.link);if(!link){return;}try{await (this.getUIContext().getHostContext() as common.UIAbilityContext).startAbility({action:'ohos.want.action.viewData',uri:link});}catch(error){}}
  build(){
  Column({space:8}){
@@ -32,6 +32,6 @@ export struct StreamingSection{
   if(this.view.rows.length){List({space:8}){ForEach(this.view.rows,(p:Provider)=>{ListItem(){Column({space:4}){if(p.logo){Image(p.logo).width(48).height(48).borderRadius(6).syncLoad(false)}else{Text(p.name.substring(0,1)).width(48).height(48).textAlign(TextAlign.Center)}Text(p.name).fontSize(12).maxLines(2).width(104);Text(p.options.join(' · ')).fontSize(11).maxLines(2).width(104)}.width(108).onClick(()=>{this.open(p);})}},(p:Provider)=>p.key)}.width('100%').height(126).listDirection(Axis.Horizontal)}
   Text('观看数据：TMDB / JustWatch').fontSize(11).width('100%')
   Button('刷新观看平台').fontSize(12).enabled(!this.view.busy).onClick(()=>{this.load(true);})
- }.width('100%').padding(10).backgroundColor($r('app.color.showly_surface')).borderRadius(10).onVisibleAreaChange([0],(v:boolean,r:number)=>{this.visibility(v&&r>0);})
+ }.width('100%').padding(10).backgroundColor($r('app.color.showly_surface')).borderRadius(10).onVisibleAreaChange([0],(v:boolean,r:number)=>{this.updateSectionVisibility(v&&r>0);})
  }
 }
