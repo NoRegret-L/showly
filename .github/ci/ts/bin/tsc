@@ -1,0 +1,71 @@
+#!/usr/bin/env python3
+"""Experimental per-run identical-input compiler result sharing.
+
+Only standalone flat temporary TypeScript projects with exact known options
+qualify. A new key is always compiled by the real pinned compiler. Every
+test script and every Node assertion runs; failures never become cache hits.
+Do not enable on the release workflow until independently benchmarked.
+"""
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+
+real=os.environ["SHOWLY_REAL_TSC"]
+cache=Path(os.environ["SHOWLY_TSC_CACHE"])
+args=sys.argv[1:]
+cwd=Path.cwd()
+def compile_real():
+    return subprocess.call([real,*args])
+def main():
+    prefix=["--strict","--target","ES2020","--module","commonjs"]
+    roots=args[len(prefix):]
+    if args[:len(prefix)]!=prefix or not roots or not all(re.fullmatch(r"[A-Za-z0-9_.-]+\.ts",r) for r in roots):
+        return compile_real()
+    if cwd.parent!=Path(tempfile.gettempdir()) or any(p.is_dir() for p in cwd.iterdir()) or any(cwd.glob("*.js")):
+        return compile_real()
+    sources=sorted(cwd.glob("*.ts"))
+    if not sources or any(not (cwd/r).is_file() for r in roots):
+        return compile_real()
+    # Restrict to flat local imports. External modules / explicit references
+    # or tsconfig files must always invoke the full compiler independently.
+    for p in sources:
+        src=p.read_text()
+        if re.search(r"///\s*<reference|require\s*\(|\b(?:from|import)\s*['\"](?:[^.']|\.\./)",src):
+            return compile_real()
+    if (cwd/"tsconfig.json").exists():
+        return compile_real()
+    key=hashlib.sha256()
+    key.update(json.dumps([real,args],separators=(",",":")).encode())
+    for p in sources:
+        key.update(p.name.encode()+b"\0"+hashlib.sha256(p.read_bytes()).digest())
+    digest=key.hexdigest()
+    cache.mkdir(parents=True,exist_ok=True)
+    target=cache/digest
+    with (cache/(digest+".lock")).open("a") as lock:
+        fcntl.flock(lock,fcntl.LOCK_EX)
+        if target.is_dir():
+            for out in target.glob("*.js"):
+                shutil.copyfile(out,cwd/out.name)
+            print("TSC_IDENTICAL_CACHE_HIT",digest,flush=True)
+            return 0
+        result=compile_real()
+        if result!=0:
+            return result
+        emitted=sorted(cwd.glob("*.js"))
+        if emitted:
+            with tempfile.TemporaryDirectory(dir=cache) as temp:
+                folder=Path(temp)/"result";folder.mkdir()
+                for out in emitted:
+                    shutil.copyfile(out,folder/out.name)
+                folder.rename(target)
+            print("TSC_IDENTICAL_CACHE_MISS",digest,flush=True)
+        return result
+if __name__=="__main__":
+    sys.exit(main())

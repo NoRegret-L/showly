@@ -1,0 +1,49 @@
+name: HarmonyOS regression compiler and lockfile cache probe
+on:
+  push:
+    branches: [harmonyos-bootstrap]
+    paths:
+      - '.github/workflows/harmonyos-regression-speed-probe.yml'
+      - '.github/ci/ts/**'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [baseline, identical, identical-cache]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Restore npm download cache keyed by lockfile
+        if: matrix.mode == 'identical-cache'
+        id: npm-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm/_cacache
+          key: showly-ts-npm-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.github/ci/ts/package-lock.json') }}
+      - name: Install locked compiler
+        run: |
+          set -euo pipefail
+          start=$(date +%s)
+          npm ci --ignore-scripts --no-audit --no-fund --prefix .github/ci/ts
+          echo "compiler_install_seconds=$(( $(date +%s)-start )) cache_hit=${{ steps.npm-cache.outputs.cache-hit == 'true' }}" | tee -a "$GITHUB_STEP_SUMMARY"
+          .github/ci/ts/node_modules/.bin/tsc --version
+      - name: Run unchanged full historical suite
+        run: |
+          set -euo pipefail
+          export SHOWLY_REAL_TSC="$GITHUB_WORKSPACE/.github/ci/ts/node_modules/.bin/tsc"
+          export PATH="$GITHUB_WORKSPACE/.github/ci/ts/node_modules/.bin:$PATH"
+          export SHOWLY_TSC_CACHE="$RUNNER_TEMP/identical-tsc"
+          if [[ "${{ matrix.mode }}" != baseline ]]; then
+            export PATH="$GITHUB_WORKSPACE/.github/ci/ts/bin:$PATH"
+          fi
+          python3 harmonyos/tools/preflight_detail.py
+          python3 harmonyos/tools/run_regressions.py | tee "$RUNNER_TEMP/regressions.log"
+          echo "mode=${{ matrix.mode }} shared_hits=$(grep -c '^TSC_IDENTICAL_CACHE_HIT' "$RUNNER_TEMP/regressions.log" || true) shared_misses=$(grep -c '^TSC_IDENTICAL_CACHE_MISS' "$RUNNER_TEMP/regressions.log" || true)" | tee -a "$GITHUB_STEP_SUMMARY"
+          tail -n 1 "$RUNNER_TEMP/regressions.log" >> "$GITHUB_STEP_SUMMARY"
