@@ -100,7 +100,11 @@ for operation in ("accessSync","statSync","openSync","closeSync","renameSync","u
     assert "fileIo."+operation not in detail
 assert "await fileIo.rename(temp, path)" in detail and "await validPosterFile(temp,scope)" in detail
 assert "await source.getImageInfo()" in detail and "await source.release()" in detail
-assert "cryptoFramework.createMd('SHA256')" in detail and "artworkIdentity('trakt','poster',item.id,url)" in detail
+assert "cryptoFramework.createMd('SHA256')" in detail
+assert "const source=tmdbArtworkUrl(url)?'tmdb':'trakt';" in detail
+assert "artworkIdentity(source,'poster',item.id,url)" in detail and "artworkIdentity(source,'fanart',item.id,url)" in detail
+assert "artworkIdentity(tmdbArtworkUrl(selected)?'tmdb':'trakt',type,item.id,selected)" in detail
+assert "if(tmdbArtworkUrl(url)){continue;}" in detail
 assert "await cachedPoster(this.dir,item,urls,scope)" in repo and "expectedPosterUri:uri" in repo
 assert "this.repair.clear()" in repo and "this.repair.allowed(item.id)" in repo
 assert ".sourceSize({width:this.targetWidth,height:this.targetHeight})" in component

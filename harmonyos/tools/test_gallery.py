@@ -4,7 +4,10 @@ with tempfile.TemporaryDirectory() as tmp:
     work=pathlib.Path(tmp)
     for name in ("GalleryRules","Media","ReadFlight","ArtworkRules"):
         shutil.copyfile(root/"model"/(name+".ets"),work/(name+".ts"))
-    subprocess.run(["tsc","--strict","--target","ES2020","--module","commonjs","GalleryRules.ts","ReadFlight.ts","ArtworkRules.ts"],cwd=work,check=True)
+    detail=(root/"data/TraktDetails.ets").read_text()
+    actual=detail.split("function normalizePoster(",1)[1].split("// Show only an authority",1)[0]
+    (work/"UrlHarness.ts").write_text("import { tmdbArtworkUrl } from './GalleryRules';\nexport function normalizePoster("+actual)
+    subprocess.run(["tsc","--strict","--target","ES2020","--module","commonjs","GalleryRules.ts","ReadFlight.ts","ArtworkRules.ts","UrlHarness.ts"],cwd=work,check=True)
     (work/"test.js").write_text("""
 const a=require('node:assert/strict'),g=require('./GalleryRules'),{ConsumerReadFlight,ReadCancel}=require('./ReadFlight'),{artworkIdentity}=require('./ArtworkRules');
 const t={item:{id:'movie:1',kind:'movie',title:'M',year:0,watched:false},type:'poster',hints:[],initialUri:''};
@@ -14,6 +17,11 @@ for(let i=0;i<100;i++){let result=g.galleryRows(t,rows[i],rows,[]);a.equal(resul
 const person={...t,item:{...t.item,id:'person:1',kind:'person'},type:'profile'};a.equal(g.galleryRows(person,undefined,rows,[]).length,10000);a.notEqual(g.galleryKey(t),g.galleryKey(person));a.throws(()=>g.galleryKey({...person,type:'poster'}));
 a.equal(g.tmdbArtworkUrl('https://image.tmdb.org.evil.test/t/p/original/a.jpg'),'');a.equal(g.tmdbArtworkUrl('https://image.tmdb.org/t/p/original/../x.jpg'),'');a.equal(g.galleryTraktUrl('https://evil.test/a.jpg'),'');
 a.notEqual(artworkIdentity('tmdb','poster','movie:1',rows[0].url),artworkIdentity('trakt','poster','movie:1',rows[0].url));
+const {normalizePoster}=require('./UrlHarness');
+a.equal(normalizePoster(rows[0].url),rows[0].url);
+a.equal(normalizePoster('//media.trakt.tv/images/a/poster.jpg'),'https://media.trakt.tv/images/a/poster.jpg');
+for(const url of ['https://image.tmdb.org.evil.test/t/p/original/a.jpg','https://image.tmdb.org/t/p/original/../x.jpg','http://image.tmdb.org/t/p/original/a.jpg','https://image.tmdb.org/t/p/original/a.jpg?secret=1','https://media.trakt.tv.evil.test/images/a.jpg','https://media.trakt.tv/images/../a.jpg','https://user@image.tmdb.org/t/p/original/a.jpg'])a.equal(normalizePoster(url),'');
+console.log('Gallery actual production URL normalization: source allowlist and unsafe path rejection passed');
 (async()=>{let n=0;const f=new ConsumerReadFlight();await Promise.all(Array.from({length:100},()=>f.run('movie:1:poster',async()=>{n++;return 'ok';},new ReadCancel())));a.equal(n,1);console.log('Gallery: 10k candidates x100 cycles, upstream cap/order, identity/URL isolation, selection restoration and 100 shared reads passed');})().catch(e=>{console.error(e);process.exitCode=1;});
 """)
     subprocess.run(["node","test.js"],cwd=work,check=True)
