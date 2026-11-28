@@ -94,6 +94,12 @@ export class PresentationRepository {
     const row:PublicDetailRow={id:item.id,summary:summary};
     await this.db.executeSql('INSERT OR REPLACE INTO presentation_detail(id,payload) VALUES(?,?)',[item.id,JSON.stringify(row)]);
   }
+  async listTitle(item:Media,client:string,language:string,consumer:ReadCancel):Promise<TitlePresentation>{
+    const version=this.residency;await this.artwork(item,client,true,[],true,consumer);
+    consumer.check();try{await this.translation(item,client,language,consumer);}catch(error){consumer.check();}
+    consumer.check();if(version!==this.residency){throw new Error('Presentation cache evicted');}
+    return this.readTitle(item.id,version);
+  }
   overview(id: string): string { return this.titles.get(id)?.text.overview ?? ''; }
   releaseTransient(): void {
     this.residency++;

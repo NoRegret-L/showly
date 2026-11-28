@@ -1,15 +1,5 @@
 name: HarmonyOS compatible TypeScript graph probe
 on:
-  push:
-    branches: [harmonyos-bootstrap]
-    paths:
-      - '.github/workflows/harmonyos-compiler-graph-probe.yml'
-      - '.github/ci/ts/graph-bin/**'
-      - '.github/ci/ts/compare_graph.py'
-      - '.github/ci/ts/graph-replay-bin/**'
-      - '.github/ci/ts/graph_identity.py'
-      - '.github/ci/ts/compare_test_runs.py'
-      - 'harmonyos/entry/src/main/ets/config/BuildInfo.ets'
   workflow_dispatch:
 permissions:
   contents: read

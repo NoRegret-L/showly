@@ -1,10 +1,5 @@
 name: HarmonyOS regression compiler and lockfile cache probe
 on:
-  push:
-    branches: [harmonyos-bootstrap]
-    paths:
-      - '.github/workflows/harmonyos-regression-speed-probe.yml'
-      - '.github/ci/ts/**'
   workflow_dispatch:
 permissions:
   contents: read

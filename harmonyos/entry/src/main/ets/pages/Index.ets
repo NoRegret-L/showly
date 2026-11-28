@@ -1,6 +1,6 @@
+import { CustomListsPage } from './CustomListsPage';
+import { SeasonExtrasCoordinator } from '../data/SeasonExtrasCoordinator';
 import { SearchController, SearchSnapshot } from '../model/SearchController';
-import { SeasonPresentationOwner, parseSeasonPresentation, SeasonInfo } from '../model/SeasonPresentation';
-import { readSeasonPresentation } from '../data/DetailSectionsRepository';
 import { SeasonDetailOwner, SeasonDetailSnapshot, emptySeasonDetail, VerifiedEpisode, DetailEpisodeEntry, DetailSeasonRow } from '../model/SeasonDetailOwner';
 import { DetailSeasons } from './DetailSeasons';
 import { DetailSummarySection } from './DetailSummarySection';
@@ -56,7 +56,7 @@ import { MovieProgressOptions, MovieProgressSource, defaultMovieProgress, validM
 import { ProgressSource, ProgressPreferences, ProgressFlag, ProgressRow, defaultProgress, validProgress, toggleProgressFlag, selectProgress, sortProgressCandidates, ProgressEntry, progressSections, progressEntries, progressPage, effectiveProgressFilter, validWatchTime, releaseWatchTime, ProgressWatchSelection } from '../model/ProgressRules';
 import { CalendarSource, CalendarInput, CalendarEntry, CalendarIndex, CalendarText, CalendarJobInput, calendarClockKey, calendarExpiry, calendarPageRows, calendarTitleHidden } from '../model/CalendarRules';
 import { calendarDisplay } from '../data/CalendarTask';
-import { PersonalMovie, PersonalMovieSnapshot, readPersonalMovieDate, CollectionRating, readCollectionRatings, readPartRatings } from '../data/TraktLibrary';
+import { PersonalMovie, PersonalMovieSnapshot, readPersonalMovieDate, CollectionRating, readCollectionRatings } from '../data/TraktLibrary';
 import { MovieCalendarItem, filterMovies, moviePage } from '../data/MovieCalendar';
 import { SearchRecord, SearchCandidate, SearchInput, SearchOptions, SearchGeneration, defaultSearch, publicSearchRecord, searchScope, validSearchRecord, SearchCandidateTitles } from '../model/SearchRules';
 import { SearchRead } from '../model/SearchRead';
@@ -252,19 +252,14 @@ struct Index {
   private episodeRowOwner=new EpisodeRowsOwner();
   private seasonDetailOwner:SeasonDetailOwner=new SeasonDetailOwner();
   @State seasonDetail:SeasonDetailSnapshot=emptySeasonDetail();
-  private seasonPresentation:SeasonPresentationOwner=new SeasonPresentationOwner();
-  private seasonPublicStatus:string='';
-  private seasonRatingStatus:string='';
-  private seasonPublicBusy:boolean=false;
-  private seasonRatingBusy:boolean=false;
-  private seasonMetadataGeneration:number=0;
-  private clearSeasonDetail():void{this.seasonMetadataGeneration++;this.seasonPresentation.clear();this.seasonPublicStatus='';this.seasonRatingStatus='';this.seasonPublicBusy=false;this.seasonRatingBusy=false;this.seasonDetailOwner.clear();this.seasonDetail=this.seasonDetailOwner.snapshot();this.episodeRowOwner.clear();}
+  private seasonExtras:SeasonExtrasCoordinator=new SeasonExtrasCoordinator();
+  private clearSeasonDetail():void{this.seasonExtras.clear();this.seasonDetailOwner.clear();this.seasonDetail=this.seasonDetailOwner.snapshot();this.episodeRowOwner.clear();}
   private seasonScope(item:Media):string{return JSON.stringify([this.currentSearchAccount(),item.id]);}
   private partRatingScope():string{return JSON.stringify([this.currentProgressScope(),this.activeCloud()?.generation??-1,this.activeCloud()?.activity??'',this.cloudFresh]);}
   private publishSeasonPresentation():void{this.seasonDetail=this.seasonDetailOwner.touch();this.updateEpisodePageRows();}
   private displaySeasonRows():DetailSeasonRow[]{
     const rows=this.seasonDetail.seasons;
-    const special=this.seasonPresentation.season(0);
+    const special=this.seasonExtras.presentation.season(0);
     if(!this.settings?.loadSpecialSeasons()||!special){return rows;}
     const extra:DetailSeasonRow={number:0,count:0,completed:0,total:special.episodes.length};return rows.concat([extra]);
   }
@@ -273,33 +268,10 @@ struct Index {
   }
   private async loadSeasonExtras(item:Media,refresh:boolean=false):Promise<void>{
     if(item.kind!=='show'||!this.pageVisible||this.selectedMedia?.id!==item.id){return;}
-    const generation=this.seasonMetadataGeneration,revision=this.detailRevision,scope=this.seasonScope(item),client=this.clientId,consumer=this.detailConsumer;
-    const current=():boolean=>this.pageVisible&&this.selectedMedia?.id===item.id&&generation===this.seasonMetadataGeneration&&revision===this.detailRevision&&scope===this.seasonScope(item)&&client===this.clientId&&!consumer.cancelled();
-    if(!this.seasonPublicBusy){
-      this.seasonPublicBusy=true;this.seasonPublicStatus='正在读取季集资料…';this.publishSeasonPresentation();
-      try{
-        const raw=await this.presentation?.readDetailSection(item,'seasons-trakt',consumer);
-        if(!current()){return;}
-        if(raw){try{this.seasonPresentation.replace(scope,parseSeasonPresentation(raw));this.seasonPublicStatus='本地季集资料';this.publishSeasonPresentation();}catch(error){}}
-        if(client&&(!raw||refresh)){
-          const network=await readSeasonPresentation(item,client,consumer);if(!current()){return;}
-          this.seasonPresentation.replace(scope,parseSeasonPresentation(network));this.seasonPublicStatus='';this.publishSeasonPresentation();
-          try{await this.presentation?.saveDetailSection(item,'seasons-trakt',network,consumer);}catch(error){}
-        }else if(!raw){this.seasonPublicStatus='离线季集资料不可用';}
-      }catch(error){if(current()){this.seasonPublicStatus='季集资料读取失败，可重试';}}
-      finally{if(current()){this.seasonPublicBusy=false;this.publishSeasonPresentation();}}
-    }
-    if(!current()||this.seasonRatingBusy){return;}
-    const session=traktAuth.session(client),source=this.activeCloud(),ratingScope=this.partRatingScope();
-    if(!source||!session||!this.cloudFresh||!this.currentProgressScope()){this.seasonPresentation.clearRatings();this.seasonRatingStatus='个人评分需验证账户';this.publishSeasonPresentation();return;}
-    this.seasonRatingBusy=true;this.seasonPresentation.clearRatings();this.seasonRatingStatus='正在读取个人评分…';this.publishSeasonPresentation();
-    try{
-      const seasons=await readPartRatings(session,'seasons',source.activity),episodes=await readPartRatings(session,'episodes',source.activity);
-      if(current()&&ratingScope===this.partRatingScope()&&source===this.activeCloud()&&traktAuth.isCurrent(session.clientId,session.generation)){
-        this.seasonPresentation.setRatings(scope,ratingScope,seasons,episodes);this.seasonRatingStatus='';
-      }
-    }catch(error){if(current()){this.seasonRatingStatus='个人评分读取失败，可重试';}}
-    finally{if(current()){this.seasonRatingBusy=false;this.publishSeasonPresentation();}}
+    const revision=this.detailRevision,scope=this.seasonScope(item),client=this.clientId,consumer=this.detailConsumer;
+    await this.seasonExtras.load(item,client,scope,consumer,this.presentation,refresh,()=>this.activeCloud(),()=>this.partRatingScope(),
+      ()=>this.cloudFresh&&!!this.currentProgressScope(),()=>this.pageVisible&&this.selectedMedia?.id===item.id&&revision===this.detailRevision&&scope===this.seasonScope(item)&&client===this.clientId,
+      ()=>{this.publishSeasonPresentation();});
   }
   private presentationReaders: Map<string, ReadCancel>=new Map<string, ReadCancel>();
   private presentationReaderTasks: Map<string, PresentationTask>=new Map<string, PresentationTask>();
@@ -1294,7 +1266,7 @@ struct Index {
 
   @Builder
   localEpisodesView(item: Media) {
-    DetailSeasons({rows:this.displaySeasonRows(),item:item,cacheDir:this.context().cacheDir,presentation:this.seasonPresentation,metadataRevision:this.seasonDetail.revision,special:this.settings?.loadSpecialSeasons()??false,publicStatus:this.seasonPublicStatus,ratingStatus:this.seasonRatingStatus,ratingScope:this.partRatingScope(),hideRating:this.progressRatingHidden,tapReveal:this.progressTapReveal,onSpecial:()=>{this.toggleSpecialSeasons();},onMetadata:()=>{this.loadSeasonExtras(item,true);},ready:this.episodeReady,busy:this.localBusy,editable:this.effectiveEditable,
+    DetailSeasons({rows:this.displaySeasonRows(),item:item,cacheDir:this.context().cacheDir,presentation:this.seasonExtras.presentation,metadataRevision:this.seasonDetail.revision,special:this.settings?.loadSpecialSeasons()??false,publicStatus:this.seasonExtras.publicStatus,ratingStatus:this.seasonExtras.ratingStatus,ratingScope:this.partRatingScope(),hideRating:this.progressRatingHidden,tapReveal:this.progressTapReveal,onSpecial:()=>{this.toggleSpecialSeasons();},onMetadata:()=>{this.loadSeasonExtras(item,true);},ready:this.episodeReady,busy:this.localBusy,editable:this.effectiveEditable,
       verify:this.localCatalogNeedsVerification,refreshable:!this.cloudBusy&&!this.syncBusy&&!!this.clientId,
       status:this.episodeReady?this.localStatus:this.episodeInitStatus,completed:this.localSeries?.completed??0,count:this.localSeries?.catalog.episodes.length??0,next:this.localSeries?.next??'',
       onRefresh:()=>{this.loadLocalEpisodes(item,true);},onOpen:(season:number)=>{this.openSeasonPage(season);}})
@@ -1306,12 +1278,12 @@ struct Index {
   private updateEpisodePageRows(): void {
     if (!this.episodePage || !this.selectedMedia) { this.episodeRowOwner.clear(); this.seasonDetail=this.seasonDetailOwner.count(0); return; }
     const item=this.selectedMedia;
-    const entries:DetailEpisodeEntry[]=this.localSeason===0?(this.seasonPresentation.season(0)?.episodes??[]).map((e):DetailEpisodeEntry=>({id:e.id,season:0,number:e.number,title:e.title,watched:false,eligible:false,firstAired:e.firstAired})):this.seasonDetailOwner.season(this.localSeason);
+    const entries:DetailEpisodeEntry[]=this.localSeason===0?(this.seasonExtras.presentation.season(0)?.episodes??[]).map((e):DetailEpisodeEntry=>({id:e.id,season:0,number:e.number,title:e.title,watched:false,eligible:false,firstAired:e.firstAired})):this.seasonDetailOwner.season(this.localSeason);
     const rows=entries.map((entry:DetailEpisodeEntry):EpisodeDisplayRow=>{
-      const meta=this.seasonPresentation.episode(entry.id);
+      const meta=this.seasonExtras.presentation.episode(entry.id);
       const exact=meta&&meta.season===entry.season&&meta.number===entry.number?meta:undefined;
       return {id:entry.id,number:entry.number,watched:entry.watched,originalTitle:entry.title,eligible:entry.eligible,firstAired:entry.firstAired,
-        title:this.displayEpisode(item,entry.season,entry.id,entry.title),rating:exact?.rating,myRating:this.seasonPresentation.episodeRating(entry.id,this.partRatingScope()),runtime:exact?.runtime,overview:exact?.overview,images:exact?.images};
+        title:this.displayEpisode(item,entry.season,entry.id,entry.title),rating:exact?.rating,myRating:this.seasonExtras.presentation.episodeRating(entry.id,this.partRatingScope()),runtime:exact?.runtime,overview:exact?.overview,images:exact?.images};
     });
     this.episodeRowOwner.replace(this.episodeRowsScope(),rows);this.seasonDetail=this.seasonDetailOwner.count(rows.length);
   }
@@ -6377,8 +6349,7 @@ struct Index {
         }
       }.width('100%')
       if (this.collectionFilter === 'lists') {
-        Text('自定义列表尚未实现。')
-          .fontSize(14).width('100%')
+        Text('请返回列表总览。').fontSize(12).width('100%')
       } else {
       if(this.collectionSearchOpen || this.collectionQuery.length>0){
       TextInput({ placeholder: this.mediaMode === 'show' ? '搜索收藏剧集' : '搜索收藏电影', text: this.collectionQuery })
@@ -6956,7 +6927,13 @@ struct Index {
         onBack:()=>{if(this.backFromDetail()){return;}this.closeDetail();if((this.tab==='library'||(this.tab==='progress'&&this.progressMode==='next'))&&!this.nextShows.length){this.loadNextShows();}},
         onPosterFailure:(uri:string)=>{this.artworkFailed(item,uri);},
         onFanartFailure:(uri:string)=>{if(this.detailFanart.failed(item.id,uri)){this.detailOwner.artwork(this.detailOwner.token(),'',false,'背景图读取失败');this.publishDetail();}}})
-      if(isTraktMedia(item)){this.mediaStateView(item)}
+      if(isTraktMedia(item)){
+        this.mediaStateView(item)
+        ForEach([JSON.stringify([this.currentProgressScope(),item.id,this.detailRevision])],(_key:string)=>{
+          CustomListsPage({scope:this.currentProgressScope(),client:this.clientId,language:this.presentationLanguage,manage:true,selectedItem:item,
+            current:()=>this.pageVisible&&this.selectedMedia?.id===item.id&&JSON.stringify([this.currentProgressScope(),item.id,this.detailRevision])===_key})
+        },(key:string)=>key)
+      }
       if(item.kind==='show'){this.localEpisodesView(item)}
       DetailSummarySection({summary:this.detailUi.summary,kind:item.kind,overview:this.displayOverview(item,this.detailUi.summary?.overview??''),chinese:this.presentationLanguage==='zh',
         spoilers:this.detailUi.spoilers,ratingRevealed:this.detailUi.ratingRevealed,descriptionRevealed:this.detailUi.descriptionRevealed,
@@ -7167,7 +7144,13 @@ struct Index {
           if (this.mediaMode === 'movie') { this.movieProgressView() }
           else { this.nextShowsView() }
         } else if (!this.selectedMedia && this.tab === 'library') {
-          this.collectionView()
+          if(this.collectionFilter==='lists'){
+            ForEach([this.currentProgressScope()],(scope:string)=>{
+              CustomListsPage({scope:scope,client:this.clientId,language:this.presentationLanguage,presentation:this.presentation,
+                current:()=>this.pageVisible&&this.currentProgressScope()===scope&&this.tab==='library'&&this.collectionFilter==='lists'&&!this.selectedMedia,
+                onBack:()=>{this.chooseCollection('mine');},onOpen:(item:Media)=>{this.openDetail(item);}})
+            },(scope:string)=>scope)
+          }else{this.collectionView()}
         } else if (!this.selectedMedia && this.tab === 'discover') {
           this.discoverView()
         } else if (!this.selectedMedia && this.tab === 'search') {

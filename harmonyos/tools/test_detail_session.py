@@ -158,6 +158,9 @@ assert "DetailSeasons({" in page and "seasonDetailOwner.delta(id)" in page
 assert "fresh.remove.length" in page and "watchedAt);" in page
 assert "row.eligible!==false" in component
 
-assert "seasonDetailOwner.reconcile(" in page and "readPartRatings(session,'seasons'" in page
+season_coordinator=(root/"data/SeasonExtrasCoordinator.ets").read_text()
+assert "seasonDetailOwner.reconcile(" in page and "this.seasonExtras.load(" in page
+assert "readPartRatings(session,'seasons'" in season_coordinator and "readPartRatings(session,'episodes'" in season_coordinator
+assert "generation===this.generation&&allowed()&&!consumer.cancelled()" in season_coordinator and "rating===ratingScope()&&snapshot===source()" in season_coordinator
 assert "this.localSeason!==0" in page and "eligible:false" in page
 assert "seasons-trakt" in repo

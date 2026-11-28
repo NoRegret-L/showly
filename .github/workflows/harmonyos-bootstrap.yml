@@ -6,6 +6,9 @@ on:
     paths:
       - '.github/workflows/harmonyos-bootstrap.yml'
       - 'harmonyos/**'
+      - '.github/ci/ts/onepass_graph.py'
+      - '.github/ci/ts/onepass-bin/**'
+      - '.github/ci/ts/project_outputs.cjs'
   workflow_dispatch:
     inputs:
       mode:
@@ -140,7 +143,9 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-          sparse-checkout: harmonyos
+          sparse-checkout: |
+            harmonyos
+            .github/ci/ts
 
       - name: Validate source release versions
         if: ${{ inputs.mode == 'build' || hashFiles('harmonyos/build-profile.json5') != '' }}
@@ -153,7 +158,14 @@ jobs:
         run: |
           set -euo pipefail
           python3 harmonyos/tools/preflight_detail.py
-          npm exec --yes --package=typescript@5.8.3 -- python3 harmonyos/tools/run_regressions.py
+          npm ci --ignore-scripts --no-audit --no-fund --prefix .github/ci/ts
+          export SHOWLY_REAL_TSC="$GITHUB_WORKSPACE/.github/ci/ts/node_modules/.bin/tsc"
+          export PATH="$GITHUB_WORKSPACE/.github/ci/ts/node_modules/.bin:$PATH"
+          export SHOWLY_ONEPASS_QUEUE="$RUNNER_TEMP/onepass"
+          # Same 34 historical fixtures; per-project independent compiler fallback.
+          python3 .github/ci/ts/onepass_graph.py | tee "$RUNNER_TEMP/onepass.log"
+          python3 harmonyos/tools/test_custom_lists.py
+          echo '34 historical regressions and custom-list specialist gate passed' >> "$GITHUB_STEP_SUMMARY"
 
   publish-preview:
     needs: [verify, regressions]
