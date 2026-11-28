@@ -6,7 +6,9 @@ export interface CreditCrew { directing?:CreditRow[]; writing?:CreditRow[]; soun
 export interface CreditResponse { cast?:CreditRow[]; crew?:CreditCrew; }
 export interface PersonRow { key:string; personId:number; tmdb?:number; name:string; department:string; roles:string[]; }
 export interface RelatedRow { media:Media; votes:number; rating?:number; posters:string[]; }
-export interface RelatedWire { ids:{trakt:number}; title:string; year?:number; votes?:number; rating?:number; images?:{poster?:string[]}; }
+interface RelatedIds { trakt:number; }
+interface RelatedImages { poster?:string[]; }
+export interface RelatedWire { ids:RelatedIds; title:string; year?:number; votes?:number; rating?:number; images?:RelatedImages; }
 function distinct(values:string[]):string[]{return Array.from(new Set<string>(values.filter((v:string)=>typeof v==='string'&&!!v.trim())));}
 function credits(rows:CreditRow[],department:string):PersonRow[]{
   const result:Map<number,PersonRow>=new Map<number,PersonRow>();

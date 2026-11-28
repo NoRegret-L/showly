@@ -15,3 +15,10 @@ assert "this.detailOwner.current(token,scope,item.id)" in p
 assert "this.detailSession.read(scope,item.id,readRevision)" in p
 assert "consumer=this.detailConsumer" in p and "readDetails(item,clientId,reload,consumer)" in p
 print("Source versions, Python syntax, detail lifecycle and historical dialog assertions passed")
+
+sections=(root/"entry/src/main/ets/model/DetailSections.ets").read_text()
+assert "ids:{trakt:" not in sections and "images?:{" not in sections
+for name in ("DetailPeopleSection","DetailRelatedSection"):
+    code=(root/"entry/src/main/ets/pages"/(name+".ets")).read_text()
+    assert "private visibility(" not in code and "this.updateSectionVisibility(visible&&ratio>0)" in code
+print("Detail section ArkTS named types and component visibility assertions passed")

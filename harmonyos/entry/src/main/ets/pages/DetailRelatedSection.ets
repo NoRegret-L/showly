@@ -76,7 +76,7 @@ export struct DetailRelatedSection {
       try{await this.repository?.saveDetailSection(item,'related-trakt',JSON.stringify(rows),signal);}catch(error){}
     }catch(error){if(current()){this.owner.publish(token,this.view.rows,false,'相关影视读取失败，可重试',this.view.loaded);this.publish();}}
   }
-  private visibility(visible:boolean):void{
+  private updateSectionVisibility(visible:boolean):void{
     this.visible=visible;
     if(!visible){this.owner.publish(this.owner.begin(),this.view.rows,false,this.view.status,this.view.loaded);this.publish();return;}
     if(!this.view.loaded&&!this.view.busy){this.load();}
@@ -92,6 +92,6 @@ export struct DetailRelatedSection {
       }.listDirection(Axis.Horizontal).height(212).width('100%')
       if(!this.view.busy){Button('刷新相关影视').fontSize(12).onClick(()=>{this.load();})}
     }.width('100%').padding(10).backgroundColor($r('app.color.showly_surface')).borderRadius(10)
-     .onVisibleAreaChange([0],(visible:boolean,ratio:number)=>{this.visibility(visible&&ratio>0);})
+     .onVisibleAreaChange([0],(visible:boolean,ratio:number)=>{this.updateSectionVisibility(visible&&ratio>0);})
   }
 }
