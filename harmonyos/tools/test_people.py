@@ -15,6 +15,18 @@ const rows=p.parsePersonCredits(raw,'show',true);a.equal(rows.length,3);a.deepEq
 const big=Array.from({length:10000},(_,i)=>({media:{id:'movie:'+(i+1),kind:'movie',title:'M'+i,year:2025,watched:false},release:'2025-01-01',upcoming:false,roles:[]}));
 for(let i=0;i<100;i++){const r=p.projectPersonCredits(big,'movie',true,new Set(['movie:'+(i+1)]));a.equal(r.length,2);a.equal(r[1].key,'movie:'+(i+1));a.equal(p.projectPersonCredits(big,'show',false,new Set()).length,0);}
 console.log('People: exact identities, full credits, role dedup, upcoming ordering, 10k x100 filters passed');
+const {ConsumerReadFlight,ReadCancel}=require('./ReadFlight');
+(async()=>{
+ const f=new ConsumerReadFlight();let starts=0,finish;
+ const job=()=>{starts++;return new Promise(resolve=>{finish=resolve;});};
+ const signals=Array.from({length:100},()=>new ReadCancel());
+ const jobs=signals.map(s=>f.run('client:trakt:42:profile',job,s).catch(e=>e.message));
+ await Promise.resolve();a.equal(starts,1);signals[0].cancel();a.equal(await jobs[0],'Read cancelled');finish('profile');
+ a((await Promise.all(jobs.slice(1))).every(x=>x==='profile'));
+ const keys=['client:trakt:42:profile','client:trakt:43:profile','client:trakt:42:show:cast','other:trakt:42:profile'];
+ let distinct=0;await Promise.all(keys.map(k=>f.run(k,async()=>{distinct++;return k;},new ReadCancel())));a.equal(distinct,4);
+ console.log('People shared read: 100 consumers, one flight, independent cancellation and client/person/lane isolation passed');
+})().catch(e=>{console.error(e);process.exitCode=1});
 """)
     subprocess.run(["node","test.js"],cwd=work,check=True)
 repo=(root/"data/PeopleRepository.ets").read_text()

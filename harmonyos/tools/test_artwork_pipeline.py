@@ -13,9 +13,12 @@ with tempfile.TemporaryDirectory() as tmp:
         shutil.copyfile(root/"model"/(name+".ets"),work/(name+".ts"))
     # Compile the actual cache-validation function against a native API
     # adapter. It injects decoding failures; native decoder runs on device.
-    actual=detail.split("async function validPosterFile(",1)[1].split("export async function cachedPoster(",1)[0]
+    actual=detail.split("async function validPosterFile(",1)[1].split("function canReadArtwork(",1)[0]
+    guard=detail.split("function canReadArtwork(",1)[1].split("export async function cachedPoster(",1)[0]
+    media_guard=detail.split("export function canReadDetails(",1)[1].split("export async function readDetails(",1)[0]
     (work/"CacheHarness.ts").write_text("""
 import {ReadCancel} from './ReadFlight';
+import {Media} from './Media';
 interface Fixture {size:number; valid:boolean; width:number; height:number; }
 export const files=new Map<string,Fixture>();
 export const rejectedPosterUris=new Set<string>();
@@ -33,7 +36,7 @@ const image={createImageSource:(fd:string)=>({
  getImageInfo:async()=>{const f=files.get(fd)!;cancelAtInfo?.cancel();if(!f.valid)throw Error('bad decoder');return {size:{width:f.width,height:f.height}}},
  release:async()=>{counts.release++}
 })};
-export async function validPosterFile("""+actual,encoding="utf-8")
+export async function validPosterFile("""+actual+"\nexport function canReadDetails("+media_guard+"\nexport function canReadArtwork("+guard,encoding="utf-8")
     subprocess.run(["tsc","--strict","--target","ES2020","--module","commonjs","ArtworkRules.ts","ViewportTasks.ts","ReadFlight.ts","CacheHarness.ts"],cwd=work,check=True)
     (work/"test.cjs").write_text("""
 const assert=require('node:assert/strict');
@@ -67,6 +70,9 @@ const img=(path,language,average,votes,type='poster',source='tmdb')=>({path,lang
  assert.deepEqual(a.decodeSize(180,270),{width:180,height:270});
  assert.deepEqual(a.decodeSize(157.2,235.8),{width:158,height:236});
  assert.deepEqual(a.decodeSize(NaN,0),{width:0,height:0});
+ const person={id:'person:1',title:'P',kind:'person',year:0,watched:false};
+ assert(c.canReadArtwork(person,'fanart'));assert(!c.canReadArtwork(person,'poster'));assert(!c.canReadDetails(person));assert(!c.canReadArtwork({...person,id:'show:1'},'fanart'));assert(!c.canReadArtwork({...person,id:'person:0'},'fanart'));assert(c.canReadArtwork(media(1),'poster'));
+ assert.notEqual(a.artworkIdentity('trakt','fanart','person:1',url),a.artworkIdentity('trakt','fanart','show:1',url));
  const repair=new a.ArtworkRecovery();
  assert(repair.reject('show:1','uri'));assert(!repair.reject('show:1','uri'));assert(!repair.allowed('show:1'));assert(repair.allowed('show:2'));repair.clear();assert(repair.allowed('show:1'));
  c.files.set('good',{size:128,valid:true,width:100,height:150});c.files.set('bad',{size:128,valid:false,width:0,height:0});c.files.set('empty',{size:0,valid:true,width:100,height:150});
