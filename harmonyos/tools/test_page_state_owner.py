@@ -210,6 +210,12 @@ assert "this.posterImage(row.media,80,120)" in page
 assert "this.collectionDependencies.observe(" in page
 assert "this.collectionMetadata.changed(row.id,prior?.collection,row.collection)" in page
 assert "this.collectionMetadataKey()" in page
-assert "this.collectionFilterSheet()" in page and ".bindSheet($$this.collectionOptionsOpen" in page
+# Runtime safety: never bind an overlay to a recyclable collection header.
+controls=page.split("  collectionRuleControls() {",1)[1].split("  collectionFilterPanel(){",1)[0]
+assert "if(this.collectionOptionsOpen){this.collectionFilterPanel()}" in controls
+assert ".bindSheet(" not in controls
+assert "this.collectionOptionsOpen = !this.collectionOptionsOpen;" in controls
+assert "this.tab === 'library' && value !== 'library'" in page
+assert "this.collectionOptionsOpen=false;" in page
 assert "this.settings.loadCollectionRecentAmount()" in page
 assert "this.showRatingRequest.finish(ticket)" in page and "this.movieRatingRequest.finish(ticket)" in page

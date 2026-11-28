@@ -87,13 +87,6 @@ jobs:
         working-directory: harmonyos
         run: ohpm install --all
 
-      # Pure model regressions must pass before a preview can be released.
-      - name: Test personal library and observation models
-        if: ${{ inputs.mode == 'build' || hashFiles('harmonyos/build-profile.json5') != '' }}
-        run: |
-          set -euo pipefail
-          npm exec --yes --package=typescript@5.8.3 -- sh -c 'python3 harmonyos/tools/test_personal_library.py && python3 harmonyos/tools/test_library_index.py && python3 harmonyos/tools/test_show_catalog.py && python3 harmonyos/tools/test_remote_observation.py && python3 harmonyos/tools/test_effective_state.py && python3 harmonyos/tools/test_feature_first.py && python3 harmonyos/tools/test_title_quick.py && python3 harmonyos/tools/test_navigation.py && python3 harmonyos/tools/test_progress_rules.py && python3 harmonyos/tools/test_presentation.py && python3 harmonyos/tools/test_movie_progress.py && python3 harmonyos/tools/test_startup_performance.py && python3 harmonyos/tools/test_persistent_projection.py && python3 harmonyos/tools/test_collection_rules.py && python3 harmonyos/tools/test_batch_projection.py && python3 harmonyos/tools/test_shared_reads.py && python3 harmonyos/tools/test_rendering_performance.py && python3 harmonyos/tools/test_indexed_projection.py && python3 harmonyos/tools/test_display_isolation.py && python3 harmonyos/tools/test_discover_cache.py && python3 harmonyos/tools/test_calendar_local.py && python3 harmonyos/tools/test_presentation_policy.py && python3 harmonyos/tools/test_search_local.py && python3 harmonyos/tools/test_progress_candidates.py && python3 harmonyos/tools/test_cache_lifecycle.py && python3 harmonyos/tools/test_consumer_lifecycle.py && python3 harmonyos/tools/test_scroll_anchor.py && python3 harmonyos/tools/test_viewport_scheduler.py && python3 harmonyos/tools/test_detail_session.py && python3 harmonyos/tools/test_commit_delta.py && python3 harmonyos/tools/test_artwork_pipeline.py && python3 harmonyos/tools/test_projection_delta.py && python3 harmonyos/tools/test_presentation_queue.py && python3 harmonyos/tools/test_page_state_owner.py'
-
       - name: Build native HAP
         if: ${{ inputs.mode == 'build' || hashFiles('harmonyos/build-profile.json5') != '' }}
         working-directory: harmonyos
@@ -116,8 +109,31 @@ jobs:
           path: upstream-revision.txt
           if-no-files-found: error
 
+  # Host-only regressions do not depend on HarmonyOS SDK or HAP output.
+  # Run alongside native compilation; release requires both exact-SHA jobs.
+  regressions:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Validate source release versions
+        if: ${{ inputs.mode == 'build' || hashFiles('harmonyos/build-profile.json5') != '' }}
+        run: |
+          python3 -c 'import sys; from pathlib import Path; sys.path.insert(0, "harmonyos/tools"); from prepare_preview_release import validate_source; validate_source(Path("harmonyos")); print("Source release version checks passed")'
+
+      # Pure model regressions must pass before a preview can be released.
+      - name: Test personal library and observation models
+        if: ${{ inputs.mode == 'build' || hashFiles('harmonyos/build-profile.json5') != '' }}
+        run: |
+          set -euo pipefail
+          npm exec --yes --package=typescript@5.8.3 -- sh -c 'python3 harmonyos/tools/test_personal_library.py && python3 harmonyos/tools/test_library_index.py && python3 harmonyos/tools/test_show_catalog.py && python3 harmonyos/tools/test_remote_observation.py && python3 harmonyos/tools/test_effective_state.py && python3 harmonyos/tools/test_feature_first.py && python3 harmonyos/tools/test_title_quick.py && python3 harmonyos/tools/test_navigation.py && python3 harmonyos/tools/test_progress_rules.py && python3 harmonyos/tools/test_presentation.py && python3 harmonyos/tools/test_movie_progress.py && python3 harmonyos/tools/test_startup_performance.py && python3 harmonyos/tools/test_persistent_projection.py && python3 harmonyos/tools/test_collection_rules.py && python3 harmonyos/tools/test_batch_projection.py && python3 harmonyos/tools/test_shared_reads.py && python3 harmonyos/tools/test_rendering_performance.py && python3 harmonyos/tools/test_indexed_projection.py && python3 harmonyos/tools/test_display_isolation.py && python3 harmonyos/tools/test_discover_cache.py && python3 harmonyos/tools/test_calendar_local.py && python3 harmonyos/tools/test_presentation_policy.py && python3 harmonyos/tools/test_search_local.py && python3 harmonyos/tools/test_progress_candidates.py && python3 harmonyos/tools/test_cache_lifecycle.py && python3 harmonyos/tools/test_consumer_lifecycle.py && python3 harmonyos/tools/test_scroll_anchor.py && python3 harmonyos/tools/test_viewport_scheduler.py && python3 harmonyos/tools/test_detail_session.py && python3 harmonyos/tools/test_commit_delta.py && python3 harmonyos/tools/test_artwork_pipeline.py && python3 harmonyos/tools/test_projection_delta.py && python3 harmonyos/tools/test_presentation_queue.py && python3 harmonyos/tools/test_page_state_owner.py'
+
   publish-preview:
-    needs: verify
+    needs: [verify, regressions]
     if: ${{ github.event_name == 'push' && github.repository == 'NoRegret-L/showly' && github.ref == 'refs/heads/harmonyos-bootstrap' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15

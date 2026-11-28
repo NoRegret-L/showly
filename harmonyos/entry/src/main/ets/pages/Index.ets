@@ -6242,14 +6242,18 @@ struct Index {
 
   @Builder
   collectionRuleControls() {
-    Button('排序与筛选').fontSize(12)
-      .onClick(() => { this.collectionOptionsOpen = true; this.requestPresentation(); })
-      .bindSheet($$this.collectionOptionsOpen,this.collectionFilterSheet(),{height:SheetSize.LARGE,showClose:true})
+    Button(this.collectionOptionsOpen?'收起排序与筛选':'排序与筛选').fontSize(12)
+      .onClick(() => {
+        this.collectionOptionsOpen = !this.collectionOptionsOpen;
+        if(this.collectionOptionsOpen){this.requestPresentation();}
+      })
+    // A lazy-list header can be detached and recycled; do not attach an
+    // overlay lifecycle to it. Mount ordinary controls only after user action.
+    if(this.collectionOptionsOpen){this.collectionFilterPanel()}
   }
 
   @Builder
-  collectionFilterSheet(){
-    Scroll(){
+  collectionFilterPanel(){
     Column({space:12}){
       Text('排序与筛选').fontSize(20).fontWeight(FontWeight.Medium).width('100%')
       if(this.collectionFilter==='mine'){
@@ -6314,8 +6318,7 @@ struct Index {
       }
       Text('未知添加时间、评分和分类不会被猜测；资料未齐时筛选结果可能不完整。').fontSize(12).width('100%')
       Button('完成').width('100%').onClick(()=>{this.collectionOptionsOpen=false;})
-    }.width('100%').padding(16)
-    }.width('100%')
+    }.width('100%').padding(12).borderRadius(12).backgroundColor($r('app.color.showly_surface'))
   }
 
   @Builder
@@ -6616,7 +6619,10 @@ struct Index {
     if (this.tab === 'progress' || this.tab === 'discover' || this.tab === 'library') { this.returnTab = this.tab; }
     this.closeDetail();
     if (this.tab === 'discover' && value !== 'discover') { this.cancelDiscoverRead(); this.discoverBusy = false; }
-    if (this.tab === 'library' && value !== 'library' && this.collectionBusy) { this.resetCollection(); }
+    if (this.tab === 'library' && value !== 'library') {
+      this.collectionOptionsOpen=false;
+      if(this.collectionBusy){this.resetCollection();}
+    }
     this.tab = value === 'cloud' ? 'account' : value;
     if (value === 'cloud') { this.advancedSync = true; }
     if (value === 'progress') { this.chooseProgressMode(this.progressMode); }
