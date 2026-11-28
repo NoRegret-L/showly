@@ -35,7 +35,7 @@ export struct StatisticsPage {
     if(this.busy||!this.current()||!this.scope){return;}
     this.signal.cancel();this.signal=new ReadCancel();const signal=this.signal;
     this.busy=true;this.status='正在读取统计资料…';this.ratingStatus='';this.ratings=[];
-    const rows=this.inputs();this.view=this.owner.update(this.scope+':'+this.kind,rows);
+    const rows=this.inputs(); // Publish only after cached enrichment, avoiding partial/full recomputation on every refresh.
     try{
       for(const row of rows){
         if(!this.allowed(signal)){return;}
@@ -66,7 +66,7 @@ export struct StatisticsPage {
       List({space:10}){
         ListItem(){this.metric('累计观看时长',Math.floor(this.view.minutes/60)+' 小时 '+this.view.minutes%60+' 分钟')}
         ListItem(){this.metric(this.kind==='movie'?'已观看电影':'已观看分集',this.kind==='movie'?this.view.titles+' 部':this.view.episodes+' 集 · '+this.view.watchedShows+' 部剧集')}
-        if(this.status||this.busy){ListItem(){Column({space:5}){Text(this.status).fontSize(13);if(this.view.missing){Text('缺少时长或分集证据：'+this.view.missing).fontSize(12)}if(this.view.unknownGenres){Text('缺少类型资料：'+this.view.unknownGenres+' 部').fontSize(12)}Button('重新读取本地数据').fontSize(12).enabled(!this.busy).onClick(()=>this.load(false))}.width('100%')}}
+        if(this.status||this.busy||this.ratingStatus){ListItem(){Column({space:5}){Text(this.status).fontSize(13);if(this.view.missing){Text('缺少时长或分集证据：'+this.view.missing).fontSize(12)}if(this.view.unknownGenres){Text('缺少类型资料：'+this.view.unknownGenres+' 部').fontSize(12)}Button('重新读取本地数据').fontSize(12).enabled(!this.busy).onClick(()=>this.load(false))}.width('100%')}}
         ListItem(){Column({space:8}){Text('常看类型').fontSize(18).fontWeight(FontWeight.Bold);if(!this.view.genres.length){Text('暂无已知类型').fontSize(13)}ForEach(this.view.genres,(g:StatisticsGenre)=>{Row(){Text(g.name).layoutWeight(1);Text(g.count+' 部')}.width('100%')},(g:StatisticsGenre)=>g.name+':'+g.count)}.width('100%').padding(14).borderRadius(12).backgroundColor($r('app.color.showly_surface'))}
         ListItem(){Text('个人评分').fontSize(18).fontWeight(FontWeight.Bold).width('100%')}
         if(this.ratingStatus){ListItem(){Text(this.ratingStatus).fontSize(13)}}else if(!this.ratings.length){ListItem(){Text('暂无可用个人评分').fontSize(13)}}

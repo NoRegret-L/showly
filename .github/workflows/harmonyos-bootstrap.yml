@@ -82,6 +82,9 @@ jobs:
           s=p.read_text()
           old='        tar -xzf $FILENAME'
           assert s.count(old)==1
+          s=s.replace('    gh release download $VERSION -p "$FILENAME.*" -R ErBWs/ohos-sdk','    phase_start=$(date +%s)\n    gh release download $VERSION -p "$FILENAME.*" -R ErBWs/ohos-sdk\n    echo "SDK download seconds=$(( $(date +%s)-phase_start ))" | tee -a "$GITHUB_STEP_SUMMARY"\n    phase_start=$(date +%s)')
+          s=s.replace('    echo Extracting...','    echo "SDK assemble and checksum seconds=$(( $(date +%s)-phase_start ))" | tee -a "$GITHUB_STEP_SUMMARY"\n    phase_start=$(date +%s)\n    echo Extracting...')
+          s=s.replace('    rm $FILENAME.*','    echo "SDK extract seconds=$(( $(date +%s)-phase_start ))" | tee -a "$GITHUB_STEP_SUMMARY"\n    rm $FILENAME.*')
           p.write_text(s.replace(old,'''        if command -v pigz >/dev/null && (set -o pipefail; pigz -dc "$FILENAME" | tar -xf -); then
               echo "SDK extraction: pigz"
           else
@@ -169,7 +172,8 @@ jobs:
           python3 .github/ci/ts/onepass_graph.py | tee "$RUNNER_TEMP/onepass.log"
           python3 harmonyos/tools/test_custom_lists.py
           python3 harmonyos/tools/test_statistics.py
-          echo '34 historical regressions and custom-list and statistics specialist gates passed' >> "$GITHUB_STEP_SUMMARY"
+          python3 harmonyos/tools/test_list_persistence.py
+          echo '34 historical regressions and custom-list, statistics and list persistence specialist gates passed' >> "$GITHUB_STEP_SUMMARY"
 
   publish-preview:
     needs: [verify, regressions]

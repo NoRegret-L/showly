@@ -89,7 +89,7 @@ export function validateBackup(data: BackupData): BackupData {
   return { schema: 1, createdAt: data.createdAt, titles: titles, shows: shows };
 }
 
-async function sha256(value: string): Promise<string> {
+export async function sha256(value: string): Promise<string> {
   const md = cryptoFramework.createMd('SHA256');
   await md.update({ data: new Uint8Array(buffer.from(value, 'utf-8').buffer) });
   const digest = await md.digest();
@@ -127,7 +127,7 @@ async function decodeBackup(raw: string): Promise<BackupData> {
   return validateBackup(JSON.parse(envelope.payload) as BackupData);
 }
 
-async function readFile(uri: string): Promise<string> {
+export async function readFile(uri: string): Promise<string> {
   const file = fileIo.openSync(uri, fileIo.OpenMode.READ_ONLY);
   try {
     const stat = fileIo.statSync(file.fd);

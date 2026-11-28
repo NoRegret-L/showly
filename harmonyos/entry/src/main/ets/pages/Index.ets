@@ -5932,6 +5932,13 @@ struct Index {
       result.push({media:media,mine:mineIds.has(media.id),source:next?.source,sourceKey:next?.sourceStateKey&&next?.sourceCatalogKey?JSON.stringify([next.sourceStateKey,next.sourceCatalogKey]):'',observed:next?.completed??0,meta:meta??(movie?.runtime!==undefined?{genres:[],network:'',release:movie.released,runtime:movie.runtime}:undefined),runtimes:[]});}
     return result;
   }
+  private async customListRatings(scope:string):Promise<CollectionRating[]>{
+    const session=traktAuth.session(this.clientId),source=this.activeCloud();
+    if(!session||!source||!this.cloudFresh||scope!==this.currentProgressScope()){return [];}
+    const rows=await Promise.all([readCollectionRatings(session,'show',source.activity),readCollectionRatings(session,'movie',source.activity)]);
+    if(scope!==this.currentProgressScope()||source!==this.activeCloud()||!traktAuth.isCurrent(session.clientId,session.generation)){throw new Error('List rating scope changed');}
+    return rows[0].concat(rows[1]);
+  }
   private async statisticsRatings(kind:string,scope:string):Promise<StatisticsRating[]>{
     const session=traktAuth.session(this.clientId),source=this.activeCloud();
     if(!session||!source||!this.cloudFresh||scope!==this.currentProgressScope()){throw new Error('Verified account required');}
@@ -7170,7 +7177,7 @@ struct Index {
           if(this.collectionFilter==='lists'){
             Column(){
               ForEach([this.currentProgressScope()],(scope:string)=>{
-                CustomListsPage({scope:scope,client:this.clientId,language:this.presentationLanguage,presentation:this.presentation,
+                CustomListsPage({scope:scope,client:this.clientId,language:this.presentationLanguage,presentation:this.presentation,readRatings:()=>this.customListRatings(scope),
                   current:()=>this.pageVisible&&this.currentProgressScope()===scope&&this.tab==='library'&&this.collectionFilter==='lists'&&!this.selectedMedia,
                   onBack:()=>{this.chooseCollection('mine');},onOpen:(item:Media)=>{this.openDetail(item);}})
               },(scope:string)=>scope)

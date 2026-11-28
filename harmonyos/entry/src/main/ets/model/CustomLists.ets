@@ -3,7 +3,7 @@ import { stableProgressRandom } from './ProgressRules';
 export interface ListMember {media:Media;rank:number;listedAt:number;rating?:number;userRating?:number;date?:string;localized?:string;}
 export interface CustomList {id:string;name:string;description:string;createdAt:number;updatedAt:number;remote:boolean;members:ListMember[];unsupported:number;}
 export interface ListDocument {nextId:number;local:CustomList[];remote:CustomList[];}
-export interface ListCommand {kind:string;id?:string;name?:string;description?:string;media?:Media;mediaId?:string;direction?:number;}
+export interface ListCommand {kind:string;id?:string;name?:string;description?:string;media?:Media;mediaId?:string;direction?:number;targetId?:string;}
 export interface ListSnapshot {revision:number;rows:CustomList[];busy:boolean;status:string;loaded:boolean;}
 export function emptyListDocument():ListDocument{return {nextId:1,local:[],remote:[]};}
 export function emptyListSnapshot():ListSnapshot{return {revision:0,rows:[],busy:false,status:'',loaded:false};}
@@ -22,7 +22,7 @@ export function validateListDocument(doc:ListDocument):boolean{
   return doc.local.every((r:CustomList)=>!r.remote&&Number(r.id.substring(6))<doc.nextId)&&doc.remote.every((r:CustomList)=>r.remote);
 }
 export function publicListMedia(item:Media):Media{return {id:item.id,kind:item.kind,title:item.title,year:item.year,watched:false};}
-function normalizeRanks(rows:ListMember[]):ListMember[]{return rows.map((m:ListMember,i:number):ListMember=>({media:m.media,rank:i+1,listedAt:m.listedAt,rating:m.rating,userRating:m.userRating,date:m.date,localized:m.localized}));}
+function normalizeRanks(rows:ListMember[]):ListMember[]{return rows.map((m:ListMember,i:number):ListMember=>m.rank===i+1?m:{media:m.media,rank:i+1,listedAt:m.listedAt,rating:m.rating,userRating:m.userRating,date:m.date,localized:m.localized});}
 export function applyListCommand(doc:ListDocument,command:ListCommand,now:number):ListDocument{
   if(!validTime(now)){throw new Error('Invalid timestamp');}
   if(command.kind==='create'){
@@ -50,6 +50,11 @@ export function applyListCommand(doc:ListDocument,command:ListCommand,now:number
     const i=members.findIndex((m:ListMember)=>m.media.id===command.mediaId),d=command.direction??0,j=i+d;
     if(i<0||(d!==1&&d!==-1)||j<0||j>=members.length){return doc;}
     const temp=members[i];members[i]=members[j];members[j]=temp;members=normalizeRanks(members);
+  }else if(command.kind==='reorder'){
+    members=[...members].sort((a:ListMember,b:ListMember)=>a.rank-b.rank);
+    const i=members.findIndex((m:ListMember)=>m.media.id===command.mediaId),j=members.findIndex((m:ListMember)=>m.media.id===command.targetId);
+    if(i<0||j<0||i===j){return doc;}
+    const moved=members.splice(i,1)[0];members.splice(j,0,moved);members=normalizeRanks(members);
   }else{throw new Error('Unknown local list command');}
   const local=[...doc.local];local[at]={id:old.id,name:name,description:description,createdAt:old.createdAt,updatedAt:Math.max(now,old.updatedAt),remote:false,members:members,unsupported:0};
   return {nextId:doc.nextId,local:local,remote:doc.remote};

@@ -35,7 +35,8 @@ console.log('Custom lists: mixed identity, local CRUD, atomic member document, r
     subprocess.run(["node","test.js"],cwd=work,check=True)
 repo=(root/"data/CustomListsRepository.ets").read_text()
 assert "CREATE TABLE IF NOT EXISTS list_document (scope TEXT PRIMARY KEY,payload TEXT NOT NULL)" in repo
-assert "INSERT OR REPLACE INTO list_document(scope,payload) VALUES(?,?)" in repo
+assert "INSERT OR REPLACE INTO list_member_v2(scope,list_id,media_id,position,payload) VALUES(?,?,?,?,?)" in repo
+assert "this.db.beginTransaction()" in repo and "this.db.rollBack()" in repo and "this.db.commit()" in repo
 with tempfile.TemporaryDirectory() as tmp:
     db=pathlib.Path(tmp)/"lists.db"
     con=sqlite3.connect(db);con.execute("CREATE TABLE IF NOT EXISTS list_document (scope TEXT PRIMARY KEY,payload TEXT NOT NULL)")

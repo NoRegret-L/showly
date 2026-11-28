@@ -94,6 +94,7 @@ export class PresentationRepository {
     const row:PublicDetailRow={id:item.id,summary:summary};
     await this.db.executeSql('INSERT OR REPLACE INTO presentation_detail(id,payload) VALUES(?,?)',[item.id,JSON.stringify(row)]);
   }
+  async cachedListTitle(item:Media,consumer:ReadCancel):Promise<TitlePresentation>{consumer.check();const row=await this.readTitle(item.id,this.residency);consumer.check();return row;}
   async listTitle(item:Media,client:string,language:string,consumer:ReadCancel):Promise<TitlePresentation>{
     const version=this.residency;await this.artwork(item,client,true,[],true,consumer);
     consumer.check();try{await this.translation(item,client,language,consumer);}catch(error){consumer.check();}
