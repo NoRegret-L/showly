@@ -1,0 +1,71 @@
+name: HarmonyOS release artifact transfer critical-path probe
+on:
+  push:
+    branches: [harmonyos-bootstrap]
+    paths: ['.github/workflows/harmonyos-release-transfer-probe.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  compare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        order: [cli-first, action-first]
+    env:
+      SOURCE_RUN: '46138557887'
+      SOURCE_SHA: '1253556561f60c7533e11499523d73ba0ba76dba'
+      ARTIFACT: 'experimental-hap-1253556561f60c7533e11499523d73ba0ba76dba'
+    steps:
+      - name: Verify exact successful source run and artifact identity
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN" | jq -e --arg sha "$SOURCE_SHA" '.head_sha==$sha and .conclusion=="success"'
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN/artifacts" | jq -e --arg name "$ARTIFACT" '[.artifacts[] | select(.name==$name and .expired==false)] | length==1'
+      - name: CLI download first
+        if: matrix.order == 'cli-first'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          start=$(date +%s%N)
+          gh run download "$SOURCE_RUN" --repo "$GITHUB_REPOSITORY" --name "$ARTIFACT" --dir "$RUNNER_TEMP/cli"
+          echo "$(( $(date +%s%N)-start ))" > "$RUNNER_TEMP/cli.ns"
+      - name: Start action transfer timer
+        run: date +%s%N > "$RUNNER_TEMP/action.start"
+      - name: Pinned artifact download action
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: ${{ env.ARTIFACT }}
+          path: ${{ runner.temp }}/action
+          github-token: ${{ github.token }}
+          run-id: ${{ env.SOURCE_RUN }}
+      - name: Stop action transfer timer
+        run: echo "$(( $(date +%s%N)-$(cat "$RUNNER_TEMP/action.start") ))" > "$RUNNER_TEMP/action.ns"
+      - name: CLI download second
+        if: matrix.order == 'action-first'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          start=$(date +%s%N)
+          gh run download "$SOURCE_RUN" --repo "$GITHUB_REPOSITORY" --name "$ARTIFACT" --dir "$RUNNER_TEMP/cli"
+          echo "$(( $(date +%s%N)-start ))" > "$RUNNER_TEMP/cli.ns"
+      - name: Compare every downloaded file
+        run: |
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import hashlib,os,pathlib
+          root=pathlib.Path(os.environ["RUNNER_TEMP"])
+          def files(d):
+              return {str(p.relative_to(d)):hashlib.sha256(p.read_bytes()).hexdigest() for p in d.rglob("*") if p.is_file()}
+          a,b=files(root/"cli"),files(root/"action")
+          assert a==b and any(n.endswith(".hap") for n in a) and any(n.endswith("upstream-revision.txt") for n in a)
+          for mode in ("cli","action"):print(f"release_transfer mode={mode} seconds={int((root/(mode+".ns")).read_text())/1e9:.3f}")
+          print(f"Exact artifact payload equality: {len(a)} files; no release write permissions.")
+          print("Action preparation occurs before measured steps; total job overhead must also be considered.")
+          PY

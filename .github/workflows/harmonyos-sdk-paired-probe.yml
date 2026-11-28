@@ -1,0 +1,75 @@
+name: HarmonyOS paired verified SDK extraction probe
+on:
+  push:
+    branches: [harmonyos-bootstrap]
+    paths: ['.github/workflows/harmonyos-sdk-paired-probe.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  compare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      matrix:
+        order: [direct-first, pigz-first]
+    env:
+      SDK_VERSION: '6.1.1.280'
+      SDK_FILE: ohos-sdk-linux-amd64.tar.gz
+    steps:
+      - name: Download one official verified archive per runner
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/sdk-pair"
+          cd "$RUNNER_TEMP/sdk-pair"
+          start=$(date +%s)
+          gh release download "$SDK_VERSION" --repo ErBWs/ohos-sdk --pattern "$SDK_FILE.a?" --pattern "$SDK_FILE.sha256"
+          echo "pair_download_seconds=$(( $(date +%s)-start ))" | tee -a "$GITHUB_STEP_SUMMARY"
+          start=$(date +%s)
+          cat "$SDK_FILE.aa" "$SDK_FILE.ab" > "$SDK_FILE"
+          digest="$(awk 'NR==1 {print $1}' "$SDK_FILE.sha256")"
+          [[ "$digest" =~ ^[a-fA-F0-9]{64}$ ]]
+          printf '%s  %s\n' "$digest" "$SDK_FILE" | sha256sum -c -
+          echo "pair_assemble_verify_seconds=$(( $(date +%s)-start ))" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Counterbalanced same-runner extraction timing
+        env:
+          ORDER: ${{ matrix.order }}
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/sdk-pair"
+          command -v pigz
+          if [[ "$ORDER" == direct-first ]]; then modes=(direct pigz); else modes=(pigz direct); fi
+          for mode in "${modes[@]}"; do
+            dir="$RUNNER_TEMP/sdk-pair/extracted"
+            mkdir "$dir"
+            start=$(date +%s%N)
+            if [[ "$mode" == pigz ]]; then
+              pigz -dc "$SDK_FILE" | tar -xf - -C "$dir"
+            else
+              tar -xzf "$SDK_FILE" -C "$dir"
+            fi
+            end=$(date +%s%N)
+            python3 - "$mode" "$start" "$end" <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import sys
+          print(f"paired_extract mode={sys.argv[1]} seconds={(int(sys.argv[3])-int(sys.argv[2]))/1e9:.3f}")
+          PY
+            # Verification is deliberately outside the extraction timer.
+            python3 - "$dir" > "$mode.manifest" <<'PY'
+          import hashlib,os,pathlib,stat,sys
+          root=pathlib.Path(sys.argv[1])
+          for p in sorted(root.rglob("*")):
+              s=p.lstat(); name=str(p.relative_to(root))
+              if p.is_symlink(): value=os.readlink(p)
+              elif p.is_file():
+                  with p.open("rb") as f:value=hashlib.file_digest(f,"sha256").hexdigest()
+              else: value=""
+              print(name,stat.S_IFMT(s.st_mode),stat.S_IMODE(s.st_mode),value,sep="\t")
+          PY
+            rm -rf "$dir"
+          done
+          cmp direct.manifest pigz.manifest
+          echo "Paired extraction file hashes, symlinks and modes identical" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "Extraction-only experiment; existing native HAP and release gates unchanged." >> "$GITHUB_STEP_SUMMARY"
