@@ -218,16 +218,26 @@ jobs:
           mv "$RUNNER_TEMP/full.hap" "$RUNNER_TEMP/current-full.hap"
           rm "$RUNNER_TEMP/closure-sdk.tar.zst" "$RUNNER_TEMP/closure-sdk.sha256"
           date +%s%N > "$RUNNER_TEMP/cache-start"
-      - name: Restore previous Build 100 closure (branch-scoped candidate)
-        uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684
-        with:
-          path: |
-            ${{ runner.temp }}/closure-sdk.tar.zst
-            ${{ runner.temp }}/closure-sdk.sha256
-            ${{ runner.temp }}/full.hap
-          key: closure-6.1.1.280-Linux-X64-de94604d5cd3015ddedcda3d2f4da49c194c0d7f-46165771584-1
-          fail-on-cache-miss: false
-      - name: Test old closure; reject incompatible build and recover with full SDK
+      - name: Restore independently pinned cross-branch portable SDK
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mapfile -t pin < harmonyos/ci/sdk-closure-pin.txt
+          key="${pin[0]}"
+          digest="${pin[1]}"
+          [[ "$key" =~ ^closure-6\.1\.1\.280-Linux-X64-([a-f0-9]{40})-([0-9]+)-([0-9]+)$ ]]
+          source=${BASH_REMATCH[1]}; run=${BASH_REMATCH[2]}; attempt=${BASH_REMATCH[3]}
+          [[ "$digest" =~ ^[a-f0-9]{64}$ ]]
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run" | jq -e --arg sha "$source" --arg repo "$GITHUB_REPOSITORY" --argjson attempt "$attempt" '.conclusion=="success" and .head_sha==$sha and .head_repository.full_name==$repo and .run_attempt==$attempt and .path==".github/workflows/harmonyos-sdk-closure-probe.yml"' >/dev/null
+          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "sdk-closure-proof-$GITHUB_SHA" --dir "$RUNNER_TEMP/current-proof"
+          cd "$RUNNER_TEMP"
+          [[ "$(cat current-proof/source)" == "$GITHUB_SHA" ]]
+          printf '%s  %s\n' "$(cat current-proof/hap-sha256)" current-full.hap | sha256sum -c -
+          gh run download "$run" --repo "$GITHUB_REPOSITORY" --name "sdk-portable-$source-$attempt" --dir "$RUNNER_TEMP"
+          printf '%s  %s\n' "$digest" closure-sdk.tar.zst > closure-sdk.sha256
+          sha256sum -c closure-sdk.sha256
+      - name: Require portable SDK native build and HAP entry equivalence
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -286,5 +296,6 @@ jobs:
             cat "$file.aa" "$file.ab" | pigz -dc | tar -xf -
             echo "Full fallback SDK ready nanoseconds=$(( $(date +%s%N)-start ))" | tee -a "$GITHUB_STEP_SUMMARY"
             build_sdk "$RUNNER_TEMP/full-sdk"
-            echo "Full SDK fallback succeeded; HAP entries equivalent" | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "Full SDK fallback succeeded; HAP entries equivalent, but portable SDK failed" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 1
           fi
