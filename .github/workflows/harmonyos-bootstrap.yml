@@ -55,8 +55,13 @@ jobs:
 
       - name: Install Linux dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libgl1-mesa-dev
+          set -euo pipefail
+          if dpkg-query -W -f='${Status}' libgl1-mesa-dev 2>/dev/null | grep -qx 'install ok installed'; then
+            echo 'libgl1-mesa-dev already installed; skipping apt network work'
+          else
+            sudo apt-get update
+            sudo apt-get install -y libgl1-mesa-dev
+          fi
 
       # Third-party SDK distribution. No signing or API secrets in this job.
       - name: Set up HarmonyOS CLI

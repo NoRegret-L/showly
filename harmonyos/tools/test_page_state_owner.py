@@ -16,10 +16,25 @@ interface IDataSource { totalCount():number; getData(i:number):unknown; register
 const assert=require('node:assert/strict');
 const {PageStateOwner,PageWorkSet,PageSortJobs}=require('./PageStateOwner');
 const {planListDiff}=require('./ListDiff');
-const {CollectionViewOwner,COLLECTION_NETWORK_GROUPS,COLLECTION_GENRES,toggleCollectionSelection,CollectionDependencyVersions,CollectionMetadataVersions,CollectionRatingRequest,COLLECTION_RECENT_AMOUNTS,validCollectionRecentAmount,collectionEmptyText}=require('./CollectionViewOwner');
+const {CollectionViewOwner,COLLECTION_NETWORK_GROUPS,COLLECTION_GENRES,toggleCollectionSelection,CollectionDependencyVersions,CollectionMetadataVersions,CollectionRatingRequest,CollectionRecoveryOwner,COLLECTION_RECENT_AMOUNTS,validCollectionRecentAmount,collectionEmptyText}=require('./CollectionViewOwner');
 const {ConsumerReadFlight}=require('./ReadFlight');
 (async()=>{
  for(const size of [393,10000]){
+  const showRecovery=new CollectionRecoveryOwner(),movieRecovery=new CollectionRecoveryOwner();
+  showRecovery.activate('A:show');movieRecovery.activate('A:movie');
+  for(let i=0;i<100;i++){
+    showRecovery.fail('key'+i,'failure');
+    assert(showRecovery.blocked('key'+i));assert(!movieRecovery.blocked('key'+i));
+    const ticket=showRecovery.beginRetry('A:show');assert(ticket);
+    assert.equal(showRecovery.beginRetry('A:show'),0);
+    assert(showRecovery.requestFull('A:show',ticket));assert(showRecovery.needsFull());
+    assert(showRecovery.finishRetry('A:show',ticket));showRecovery.published();
+    assert(!showRecovery.needsFull());assert.equal(movieRecovery.snapshot().revision,1);
+  }
+  const stale=showRecovery.beginRetry('A:show');showRecovery.activate('B:show');
+  assert(!showRecovery.requestFull('A:show',stale));assert(!showRecovery.finishRetry('A:show',stale));
+  const snapshot=showRecovery.snapshot();snapshot.error='external';assert.equal(showRecovery.snapshot().error,'');
+  console.log(size+' collection recovery: 100 isolated retries, stale account rejection, snapshot isolation passed');
   const deps=new CollectionDependencyVersions(),meta=new CollectionMetadataVersions();
   const options={sort:'title',descending:true,genres:[],networks:[],upcoming:'all'};
   const ratingOptions={...options,sort:'rating'},ratingKey=meta.key('show',ratingOptions,'mine');
@@ -230,13 +245,13 @@ assert "this.updateLazyRows().catch(" in page
 sort=page.split("  private async runCollectionSort(",1)[1].split("  private collectionEntries()",1)[0]
 assert "throw new Error" not in sort
 assert "this.reportCollectionFailure(key,'排序',error as Error)" in sort
-assert "this.collectionFailureKey!==key" in sort
+assert "!this.collectionRecovery().blocked(key)" in sort
 assert "this.retryCollectionDisplay();" in collection_view
 
 assert "private get collectionRowsSource" not in page
 assert "private get collectionItemsMemo" not in page
 assert "private async retryCollectionDisplay()" in page
-assert "this.collectionFullRetry=true" in page
+assert "owner.requestFull(scope,token)" in page
 assert "projectCollection(candidates,options,this.collectionFilter,this.collectionQuery,now)" in page
 assert "this.collectionStage='列表发布'" in page
 updates=(root/"data"/"ReleaseUpdates.ets").read_text()
@@ -244,3 +259,9 @@ assert "url: 'https://tvv.tw/' + hap.browser_download_url" in updates
 assert "directUrl:hap.browser_download_url" in updates
 assert "asset.browser_download_url === prefix + hapName" in updates
 assert "this.availableUpdate?.directUrl" in page
+
+assert "const recovery=this.collectionRecovery();recovery.activate(this.collectionRecoveryScope());" in page
+assert "this.collectionRecoveryScope()!==scope" in page
+assert "prepared.slice(i,i+step)" in page
+assert "this.collectionStatusLabel()" in page
+assert "LoadingProgress().width(24).height(24)" in page

@@ -135,3 +135,57 @@ export function collectionEmptyText(filtered:boolean,section:string):string{
   if(section==='hidden'){return '没有隐藏的影视';}
   return '此分类暂无影视';
 }
+
+// Derived runtime state is independently owned per media kind. Retry tickets
+// revoke publication rights across account/route changes, not sync writes.
+export interface CollectionRecoverySnapshot {
+  revision:number;scope:string;failureKey:string;error:string;fullRetry:boolean;retrying:boolean;headerKey:string;
+}
+export class CollectionRecoveryOwner {
+  private revision:number=0;
+  private scope:string='';
+  private failureKey:string='';
+  private error:string='';
+  private fullRetry:boolean=false;
+  private retrying:boolean=false;
+  private headerKey:string='';
+  private serial:number=0;
+  private ticket:number=0;
+  activate(scope:string):void{
+    if(this.scope===scope){return;}
+    this.clear();this.scope=scope;
+  }
+  clear():void{
+    this.scope='';this.failureKey='';this.error='';this.fullRetry=false;this.retrying=false;
+    this.headerKey='';this.ticket=0;this.revision++;
+  }
+  snapshot():CollectionRecoverySnapshot{
+    return {revision:this.revision,scope:this.scope,failureKey:this.failureKey,error:this.error,
+      fullRetry:this.fullRetry,retrying:this.retrying,headerKey:this.headerKey};
+  }
+  blocked(key:string):boolean{return !!this.failureKey&&this.failureKey===key;}
+  needsFull():boolean{return this.fullRetry;}
+  headerCurrent(key:string):boolean{return key===this.headerKey;}
+  publishHeader(key:string):void{if(this.headerKey!==key){this.headerKey=key;this.revision++;}}
+  fail(key:string,message:string):void{
+    if(this.failureKey===key&&this.error===message&&!this.fullRetry){return;}
+    this.failureKey=key;this.error=message;this.fullRetry=false;this.revision++;
+  }
+  beginRetry(scope:string):number{
+    if(this.scope!==scope||this.retrying){return 0;}
+    this.retrying=true;this.ticket=++this.serial;this.revision++;return this.ticket;
+  }
+  current(scope:string,ticket:number):boolean{return this.scope===scope&&ticket!==0&&this.ticket===ticket&&this.retrying;}
+  requestFull(scope:string,ticket:number):boolean{
+    if(!this.current(scope,ticket)){return false;}
+    this.failureKey='';this.error='';this.headerKey='';this.fullRetry=true;this.revision++;return true;
+  }
+  finishRetry(scope:string,ticket:number):boolean{
+    if(!this.current(scope,ticket)){return false;}
+    this.retrying=false;this.ticket=0;this.revision++;return true;
+  }
+  refresh():void{this.failureKey='';this.error='';this.headerKey='';this.fullRetry=false;this.revision++;}
+  published():void{
+    if(this.error||this.failureKey||this.fullRetry){this.error='';this.failureKey='';this.fullRetry=false;this.revision++;}
+  }
+}

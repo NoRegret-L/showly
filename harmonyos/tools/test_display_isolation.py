@@ -95,7 +95,7 @@ collection_sort=page.split("  private async runCollectionSort(",1)[1].split("  p
 assert "if (!(error instanceof ReadCancelled) && this.sortJobs.current(slot,token)" in collection_sort
 assert "epoch===this.presentationEpoch && key===this.collectionSortKey()" in collection_sort
 assert "this.reportCollectionFailure(key,'排序',error as Error)" in collection_sort
-assert "this.collectionFailureKey!==key" in collection_sort
+assert "!this.collectionRecovery().blocked(key)" in collection_sort
 assert page.count("epoch !== this.presentationEpoch")>=3
 assert "this.validateNextTarget(row)" in page
 assert "this.movieProgressRows('',true).find(" in page

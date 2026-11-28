@@ -1,4 +1,4 @@
-import { CollectionViewOwner, CollectionNetworkGroup, CollectionGenreOption, COLLECTION_NETWORK_GROUPS, COLLECTION_GENRES, toggleCollectionSelection, COLLECTION_RECENT_AMOUNTS, CollectionDependencyVersions, CollectionMetadataVersions, CollectionRatingRequest, collectionEmptyText } from '../model/CollectionViewOwner';
+import { CollectionViewOwner, CollectionNetworkGroup, CollectionGenreOption, COLLECTION_NETWORK_GROUPS, COLLECTION_GENRES, toggleCollectionSelection, COLLECTION_RECENT_AMOUNTS, CollectionDependencyVersions, CollectionMetadataVersions, CollectionRatingRequest, CollectionRecoveryOwner, collectionEmptyText } from '../model/CollectionViewOwner';
 import { StableDisplayOrder, StableOrderChange } from '../model/StableDisplayOrder';
 import { PageStateOwner, PageWork, PageWorkSet, PageSortJobs, PageSummary } from '../model/PageStateOwner';
 import { ProgressTitleOrder } from '../model/ProgressTitleOrder';
@@ -173,10 +173,11 @@ struct Index {
   @State collectionRecentRows:PersonalLibraryRow[]=[];
   @State collectionHasOther:boolean=false;
   @State collectionRenderError:string='';
-  private collectionFailureKey:string='';
-  private collectionRecentKey:string='';
+  private showCollectionRecovery:CollectionRecoveryOwner=new CollectionRecoveryOwner();
+  private movieCollectionRecovery:CollectionRecoveryOwner=new CollectionRecoveryOwner();
   private collectionStage:string='初始化';
-  private collectionFullRetry:boolean=false;
+  private collectionRecovery():CollectionRecoveryOwner{return this.mediaMode==='movie'?this.movieCollectionRecovery:this.showCollectionRecovery;}
+  private collectionRecoveryScope():string{return JSON.stringify([this.currentProgressScope(),this.viewScope()]);}
   @State collectionRetryBusy:boolean=false;
   private showTitleRevision: number = 0;
   private movieTitleRevision: number = 0;
@@ -483,40 +484,48 @@ struct Index {
   }
   private clearCollectionOwners():void{this.releaseCollectionOwner('show');this.releaseCollectionOwner('movie');this.clearCollectionHeader();}
   private clearCollectionHeader():void{
-    this.collectionRecentKey='';this.collectionFailureKey='';this.collectionFullRetry=false;
+    this.showCollectionRecovery.clear();this.movieCollectionRecovery.clear();
     if(this.collectionRecentRows.length){this.collectionRecentRows=[];}
     if(this.collectionHasOther){this.collectionHasOther=false;}
     if(this.collectionRenderError){this.collectionRenderError='';}
   }
   private publishCollectionHeader():void{
     const key=JSON.stringify([this.currentProgressScope(),this.mediaMode,this.collectionDependencies.source(this.mediaMode),this.collectionDependencies.business(this.mediaMode),this.collectionRecentAmount,this.collectionScope]);
-    if(key===this.collectionRecentKey){return;}
+    const owner=this.collectionRecovery();
+    if(owner.headerCurrent(key)){return;}
     const rows=this.personalLibrary();
     const recent=this.recentCollectionRows();
     const other=collectionRows(rows,this.mediaMode,'other').length>0;
-    this.collectionRecentKey=key;
+    owner.publishHeader(key);
     this.collectionRecentRows=recent;
     if(this.collectionHasOther!==other){this.collectionHasOther=other;}
   }
   private reportCollectionFailure(key:string,stage:string,error?:Error):void{
-    this.collectionFailureKey=key;
     const detail=error?.message??'';
-    this.collectionRenderError='收藏加载失败（'+stage+'）'+(detail?'：'+detail:'')+'；观看记录未修改。';
+    const message='收藏加载失败（'+stage+'）'+(detail?'：'+detail:'')+'；观看记录未修改。';
+    this.collectionRecovery().fail(key,message);
+    this.collectionRenderError=message;
   }
   private async retryCollectionDisplay():Promise<void>{
     if(this.collectionRetryBusy||this.tab!=='library'){return;}
+    const owner=this.collectionRecovery(),scope=this.collectionRecoveryScope();
+    owner.activate(scope);
+    const token=owner.beginRetry(scope);if(!token){return;}
     this.collectionRetryBusy=true;
     try{
       await Promise.resolve();
-      if(this.tab!=='library'||!this.pageVisible){return;}
+      if(this.tab!=='library'||!this.pageVisible||this.collectionRecovery()!==owner||
+        this.collectionRecoveryScope()!==scope||!owner.current(scope,token)){return;}
       this.collectionStage='重试缓存清理';
       this.collectionItemsMemo().clear();this.collectionTitleOrder().clear();this.recentCollectionMemo().clear();
-      this.collectionFailureKey='';this.collectionRenderError='';this.collectionRecentKey='';
-      this.collectionFullRetry=true;
+      if(!owner.requestFull(scope,token)){return;}
+      this.collectionRenderError='';
       this.requestPresentation();
     }catch(error){
-      this.reportCollectionFailure(this.collectionFailureKey,this.collectionStage,error as Error);
-    }finally{this.collectionRetryBusy=false;}
+      if(owner.current(scope,token)&&this.collectionRecovery()===owner&&this.collectionRecoveryScope()===scope){
+        this.reportCollectionFailure(this.collectionSortKey(),this.collectionStage,error as Error);
+      }
+    }finally{owner.finishRetry(scope,token);this.collectionRetryBusy=false;}
   }
   private searchHistoryGeneration: SearchGeneration = new SearchGeneration();
   @State libraryStatus: string = '';
@@ -1866,7 +1875,8 @@ struct Index {
       return;
     }
     if (this.tab === 'library') {
-      if(this.collectionFailureKey===this.collectionSortKey()){return;}
+      const recovery=this.collectionRecovery();recovery.activate(this.collectionRecoveryScope());
+      if(recovery.blocked(this.collectionSortKey())){return;}
       this.collectionStage='最近添加';this.publishCollectionHeader();
       this.collectionStage='评分读取';if (this.collectionOptions.sort === 'userRating') { this.loadCollectionRatings(); }
       this.collectionStage='收藏计算';
@@ -1875,18 +1885,17 @@ struct Index {
       const summary: PageSummary = {key:this.collectionDisplayKey(),total:prepared.length,page:this.collectionPage,pages:Math.max(1,Math.ceil(prepared.length/this.collectionPageSize))};
       const rows: CollectionGroup[] = [];
       if (!this.signedIn || this.activeCloud()) {
-        for (const group of this.collectionPageGroups()) {
-          const step = this.collectionGrid ? 2 : 1;
-          for (let i = 0; i < group.rows.length; i += step) {
-            rows.push({ key: group.key + ':' + group.rows[i].media.id, label: group.label, rows: group.rows.slice(i,i+step) });
-          }
+        const label=this.collectionFilter==='hidden'?'隐藏影视':this.collectionFilter==='queue'?'待看清单':'全部';
+        const step=this.collectionGrid?2:1;
+        for(let i=0;i<prepared.length;i+=step){
+          rows.push({key:this.collectionFilter+':'+prepared[i].media.id,label:label,rows:prepared.slice(i,i+step)});
         }
       }
       this.collectionStage='列表发布';
       const committed = await this.collectionRowsSource().submit(rows, rows.map((group: CollectionGroup) => group.key),
         rows.map((group: CollectionGroup) => this.collectionGroupKey(group)),differ,current);
       if (committed && current() && this.collectionRowsSource().work.publishSummary(summary,this.collectionSummary)) { this.collectionSummary = summary; }
-      if (committed && current()) { this.collectionFullRetry=false;this.collectionRenderError='';this.restoreScroll('library'); }
+      if (committed && current()) { recovery.published();this.collectionRenderError='';this.restoreScroll('library'); }
       return;
     }
     if (this.tab !== 'progress' || this.progressMode !== 'next') { return; }
@@ -5754,7 +5763,7 @@ struct Index {
 
   private async refreshPage(): Promise<void> {
     this.candidateFailureKey='';
-    if(this.tab==='library'){this.collectionFailureKey='';this.collectionRenderError='';this.collectionRecentKey='';}
+    if(this.tab==='library'){this.collectionRecovery().refresh();this.collectionRenderError='';}
     if (this.tab === 'library' || (this.tab==='progress' && this.mediaMode==='show' && this.progressPrefs.sort==='userRating')) { this.showRatingRequest.reset();this.collectionRatingStatus='';this.collectionRatingKey = ''; this.collectionRatings = []; }
     if (this.mediaMode === 'movie') {
       this.movieRatingRequest.reset();this.movieCollectionRatingStatus='';
@@ -6076,7 +6085,7 @@ struct Index {
     const cached = this.sortedViewRevision >= 0 ? this.collectionItemsMemo().get(key,now) : undefined;
     if (cached) { return cached; }
     if (!prepare || this.sortJobs.matches(this.collectionSortSlot(),JSON.stringify([this.presentationEpoch,key]))) { return []; }
-    if(this.collectionFullRetry){
+    if(this.collectionRecovery().needsFull()){
       const candidates=this.collectionCandidates(this.collectionSource(),this.collectionFilter);
       const rows=projectCollection(candidates,options,this.collectionFilter,this.collectionQuery,now).map((candidate:CollectionCandidate)=>candidate.row);
       let expiry=Number.MAX_SAFE_INTEGER;
@@ -6128,7 +6137,7 @@ struct Index {
       }
     }
     finally {
-      if (this.sortJobs.finish(slot,token) && this.pageVisible && this.collectionFailureKey!==key) { this.sortedViewRevision++; this.requestPresentation(); }
+      if (this.sortJobs.finish(slot,token) && this.pageVisible && !this.collectionRecovery().blocked(key)) { this.sortedViewRevision++; this.requestPresentation(); }
     }
   }
 
@@ -6212,7 +6221,7 @@ struct Index {
           if(!this.collectionSearchOpen){this.collectionQuery='';this.resetCollection();}
           this.captureCollectionView();
         })
-        Button('列表').fontSize(12).onClick(() => { this.chooseCollection('lists'); })
+        Button('列表').fontSize(12).height(32).backgroundColor($r('app.color.showly_muted_surface')).fontColor($r('app.color.showly_text')).onClick(() => { this.chooseCollection('lists'); })
       }.width('100%')
       this.librarySyncNotice()
       this.movieUndoView()
@@ -6230,17 +6239,6 @@ struct Index {
         Text('自定义列表尚未实现。')
           .fontSize(14).width('100%')
       } else {
-      if (this.mediaMode === 'show' && this.collectionFilter === 'mine') {
-        Row({ space: 4 }) {
-          this.collectionStatusButton('全部', 'all')
-          this.collectionStatusButton('正在追', 'watching')
-          this.collectionStatusButton('已完结', 'finished')
-        }.width('100%')
-        Row({ space: 4 }) {
-          this.collectionStatusButton('等待更新', 'upcoming')
-          this.collectionStatusButton('待核实', 'unclassified')
-        }.width('100%')
-      }
       if(this.collectionSearchOpen || this.collectionQuery.length>0){
       TextInput({ placeholder: this.mediaMode === 'show' ? '搜索收藏剧集' : '搜索收藏电影', text: this.collectionQuery })
         .onChange((value: string) => {
@@ -6270,13 +6268,13 @@ struct Index {
         }.width('100%')
       }
       if(this.collectionRenderError){
-        Row({space:8}){Text(this.collectionRenderError).fontSize(12).layoutWeight(1);Button(this.collectionRetryBusy?'重试中…':'重试').fontSize(12).enabled(!this.collectionRetryBusy).onClick(()=>{this.retryCollectionDisplay();})}.width('100%')
+        Row({space:8}){Text(this.collectionRenderError).fontSize(12).layoutWeight(1);Button(this.collectionRetryBusy?'重试中…':'重试').fontSize(12).height(32).backgroundColor($r('app.color.showly_accent')).fontColor($r('app.color.showly_on_accent')).enabled(!this.collectionRetryBusy).onClick(()=>{this.retryCollectionDisplay();})}.width('100%')
       } else if (this.collectionSummary.key === this.collectionDisplayKey()) {
         if (!this.collectionSummary.total && !this.cloudBusy && !this.localBusy) { Text(collectionEmptyText(this.collectionHasFilters(),this.collectionFilter)).fontSize(14).width('100%').textAlign(TextAlign.Center).padding(16) }
         Text('共 ' + this.collectionSummary.total + ' 部').fontSize(14)
-      } else { Text('正在更新列表…').fontSize(13).width('100%') }
+      } else { Row({space:8}){LoadingProgress().width(24).height(24).color($r('app.color.showly_accent'));Text('正在更新列表…').fontSize(13)}.width('100%').justifyContent(FlexAlign.Center) }
       Row({ space: 8 }) {
-        Button(this.collectionGrid ? '切换文字列表' : '切换海报网格').layoutWeight(1)
+        Button(this.collectionGrid ? '文字列表' : '海报网格').fontSize(12).height(32).backgroundColor($r('app.color.showly_muted_surface')).fontColor($r('app.color.showly_text'))
           .onClick(() => {
             this.collectionGrid = !this.collectionGrid;
             this.captureCollectionView();
@@ -6313,9 +6311,14 @@ struct Index {
       .onClick(() => { this.editCollectionOptions('sort',sort); })
   }
 
+  private collectionStatusLabel():string{
+    if(this.mediaMode!=='show'||this.collectionFilter!=='mine'){return '全部';}
+    switch(this.collectionStatusFilter){case 'watching':return '正在追';case 'finished':return '已完结';case 'upcoming':return '等待更新';case 'unclassified':return '待核实';default:return '全部';}
+  }
   @Builder
   collectionRuleControls() {
-    Button(this.collectionOptionsOpen?'收起排序与筛选':'排序与筛选').fontSize(12)
+    Button(this.collectionOptionsOpen?'收起筛选':'排序与筛选 · '+this.collectionStatusLabel()).fontSize(12).height(32)
+      .backgroundColor($r('app.color.showly_muted_surface')).fontColor($r('app.color.showly_text'))
       .onClick(() => {
         this.collectionOptionsOpen = !this.collectionOptionsOpen;
         if(this.collectionOptionsOpen){this.requestPresentation();}
@@ -6328,7 +6331,19 @@ struct Index {
   @Builder
   collectionFilterPanel(){
     Column({space:12}){
-      Text('排序与筛选').fontSize(20).fontWeight(FontWeight.Medium).width('100%')
+      Text('排序与筛选').fontSize(18).fontWeight(FontWeight.Medium).width('100%')
+      if(this.mediaMode==='show'&&this.collectionFilter==='mine'){
+        Text('剧集状态').fontSize(13).width('100%')
+        Row({space:4}){
+          this.collectionStatusButton('全部','all')
+          this.collectionStatusButton('正在追','watching')
+          this.collectionStatusButton('已完结','finished')
+        }.width('100%')
+        Row({space:4}){
+          this.collectionStatusButton('等待更新','upcoming')
+          this.collectionStatusButton('待核实','unclassified')
+        }.width('100%')
+      }
       if(this.collectionFilter==='mine'){
         Text('最近添加数量').fontSize(13).width('100%')
         Row({space:4}){

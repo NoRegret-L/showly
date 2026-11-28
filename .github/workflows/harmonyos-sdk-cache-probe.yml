@@ -1,0 +1,32 @@
+name: HarmonyOS SDK cache benchmark
+on:
+  push:
+    branches: [harmonyos-bootstrap]
+    paths: ['.github/workflows/harmonyos-sdk-cache-probe.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  sdk:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        cache: ['false','true']
+    steps:
+      - name: Start SDK timer
+        run: date +%s > "$RUNNER_TEMP/sdk-start"
+      - name: Set up pinned SDK
+        uses: ErBWs/setup-ohos@4dbb63025116eb6165ceac58a4bf47cbdc5ac721
+        with:
+          version: '6.1.1.280'
+          cache: ${{ matrix.cache }}
+      - name: Verify and report elapsed
+        run: |
+          set -euo pipefail
+          node --version
+          ohpm --version
+          hvigorw --version
+          echo "cache=${{ matrix.cache }} elapsed_seconds=$(( $(date +%s) - $(cat "$RUNNER_TEMP/sdk-start") ))"
+          du -sh "$HOME/ohos-sdk" || true
