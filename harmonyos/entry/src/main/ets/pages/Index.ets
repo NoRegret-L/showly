@@ -183,7 +183,6 @@ struct Index {
   private candidateExpiry: number = 0;
   private candidateRuns: number = 0;
   private cacheLifecycle: CacheLifecycle=new CacheLifecycle();
-  private searchConsumer: ReadCancel=new ReadCancel();
   private detailSession: DetailSession<FullEpisodeCatalog>=new DetailSession<FullEpisodeCatalog>();
   private detailConsumer: ReadCancel=this.detailSession.consumer();
   private detailResumePending: boolean=false;
@@ -193,12 +192,9 @@ struct Index {
   private episodeRowOwner=new EpisodeRowsOwner();
   @State episodeRowCount: number=0;
   @State seasonSummaries: SeasonSummary[]=[];
-  private discoverConsumer: ReadCancel=new ReadCancel();
-  private searchLocalConsumer: ReadCancel=new ReadCancel();
   private presentationReaders: Map<string, ReadCancel>=new Map<string, ReadCancel>();
   private presentationReaderTasks: Map<string, PresentationTask>=new Map<string, PresentationTask>();
   private businessPresentationTasks?: Map<string,PresentationTask>;
-  private calendarHydrateConsumer: ReadCancel=new ReadCancel();
   private memoryListener: ()=>void=()=>{ this.handleMemoryPressure(); };
   private memorySubscribed: boolean=false;
   private memoryPending: boolean=false;
@@ -364,7 +360,6 @@ struct Index {
   @State discoverPages: number = 0;
   @State discoverBusy: boolean = false;
   @State discoverStatus: string = '';
-  private discoverRevision: number = 0;
   @State @Watch('onPresentationChanged') selectedMedia?: Media = undefined;
   @State detail?: MediaDetail = undefined;
   @State detailBusy: boolean = false;
@@ -436,7 +431,6 @@ struct Index {
   private searchRoute: boolean = false;
   private searchLanguage: string = '';
   private searchRemote: SearchRecord[] = [];
-  private searchLocalVersion: number = 0;
   private searchLocalRunning: boolean = false;
   private searchCandidateSource?: SearchRecord[];
   private searchCandidateKey: string = '';
@@ -1626,13 +1620,13 @@ struct Index {
     this.updateSearchContext();
     const scope = this.viewScope();
     if (!this.progressCandidateActive()) { this.cancelCandidateWake(); }
-    if (scope !== this.viewportRouteKey) { this.viewport.clear(); this.sortJobs.clear(); this.viewportRouteKey = scope; }
+    if (scope !== this.viewportRouteKey) { this.viewport.clear(); this.viewportRouteKey = scope; }
     this.reloadCollectionOptions();
     const route = this.activePresentationRoute();
     if (route !== this.presentationRoute) {
       this.presentationRoute = route;
       this.cancelPresentationReads();
-      this.sortJobs.clear();
+      this.activePageWork()?.changePresentation(route);
       this.presentationEpoch++;
         this.presentationStatus = '';
     }
@@ -1644,10 +1638,10 @@ struct Index {
     const account=this.currentSearchAccount();
     if (this.scrollAccount!==account) { this.scrollAccount=account; this.scrollAnchors.clear(); this.scrollIndices.clear(); this.scrollScheduled=undefined; }
     if (!this.cacheLifecycle.transition(route,account)) { return; }
+    this.pageWorks.transition(this.scrollSlot(),route,account);
     this.cancelPresentationReads();
     this.businessPresentationTasks=undefined;
-    this.invalidateLazyWork();
-    if (!this.pageVisible || this.selectedMedia || this.tab!=='discover') { this.cancelDiscoverRead(); this.discoverBusy=false; }
+    if (!this.pageVisible || this.selectedMedia || this.tab!=='discover') { this.discoverBusy=false; }
     this.releaseInactiveCaches(false);
   }
   private handleMemoryPressure(): void {
@@ -1677,7 +1671,7 @@ struct Index {
       }).catch(()=>{});
     }
     if (!residency.search || pressure) {
-      this.invalidateSearchLocal();
+      if(pressure){this.invalidateSearchLocal();}
       this.searchCandidateSource=undefined; this.searchCandidateKey=''; this.searchCandidates=[]; this.searchTitleIndex.clear(); this.searchStoredIds.clear();
       if (!residency.search) { this.searchRows.replace([],[],[]); }
       else { this.refreshSearchLocal(); }
@@ -1944,8 +1938,7 @@ struct Index {
     this.presentationQueues.clear(); this.viewportFrame.clear(); this.presentationFrame.clear();
     for (const consumer of this.presentationReaders.values()) { consumer.cancel(); }
     this.presentationReaders.clear(); this.presentationReaderTasks.clear();
-    this.calendarHydrateConsumer.cancel(); this.calendarHydrateConsumer=new ReadCancel();
-    this.calendarHydrationKey='';
+    if(this.calendarHydrationKey){this.calendarRows.work.hydrate.cancel();this.calendarHydrationKey='';}
   }
   private updatePresentationQueues(): void {
     const visible=this.presentationTasks();
@@ -3967,7 +3960,7 @@ struct Index {
   private currentSearchAccount(): string { return searchScope(this.clientId,this.currentProgressScope()); }
   private searchActive(): boolean { return this.pageVisible && this.tab==='search' && !this.selectedMedia; }
   private cancelSearchRead(): void {
-    this.searchGeneration.cancel(); this.searchConsumer.cancel(); this.searchConsumer=new ReadCancel();
+    this.searchGeneration.cancel(); this.searchRows.work.remote.cancel();
   }
   private resetSearchAccount(): void {
     this.cancelSearchRead(); this.searchHistoryGeneration.cancel(); this.invalidateSearchLocal();
@@ -3981,7 +3974,8 @@ struct Index {
     const active=this.searchActive();
     const language=this.presentationLanguage;
     const changed=scope!==this.searchAccount;
-    const entered=active && !this.searchRoute;
+    const wasActive=this.searchRoute;
+    const entered=active && !wasActive;
     const langChanged=language!==this.searchLanguage;
     // Store the context first; @Watch callbacks may run during assignments.
     this.searchRoute=active; this.searchLanguage=language;
@@ -3996,7 +3990,7 @@ struct Index {
     }
     if (!active) {
       if (this.searching) { this.cancelSearchRead(); this.searching=false; this.searchStatus='搜索已停止，可重新提交。'; }
-      this.invalidateSearchLocal();
+      if(wasActive&&!changed){this.invalidateSearchLocal();}
       return;
     }
     if (changed || entered) { this.loadSearchHistory(); }
@@ -4051,11 +4045,11 @@ struct Index {
     this.searchLocalRunning=true;
     let processed=-1;
     try {
-      while (this.searchActive() && processed!==this.searchLocalVersion) {
-        processed=this.searchLocalVersion;
+      while (this.searchActive() && processed!==this.searchRows.work.local.version()) {
+        processed=this.searchRows.work.local.version();
         const scope=this.currentSearchAccount(), query=this.title.trim(), submitted=this.searchSubmitted;
         const options=this.searchOptions, language=this.presentationLanguage, version=processed;
-        const current=(): boolean=>this.searchActive() && version===this.searchLocalVersion &&
+        const current=(): boolean=>this.searchActive() && version===this.searchRows.work.local.version() &&
           scope===this.currentSearchAccount() && query===this.title.trim() && language===this.presentationLanguage;
         if (!query) { if (current() && this.results.length) { this.results=[]; } continue; }
         let stored: SearchRecord[]=[];
@@ -4083,12 +4077,15 @@ struct Index {
         const input: SearchInput={catalog:this.searchCandidates,remote:this.searchRemote.map(candidate),
           query:query,suggestions:!submitted,options:options};
         try {
-          const rows=await searchDisplay(input,this.searchLocalConsumer);
+          const local=this.searchRows.work.local;
+          const consumer=local.consumer();local.start(consumer,JSON.stringify([key,query,submitted,version]));
+          const rows=await searchDisplay(input,consumer);
+          local.finish(consumer);
           if (!current()) { continue; }
           this.results=rows;
           if (!submitted) { this.searchStatus=query.length<2 ? '输入至少2个字符查看本地建议。' : '本地建议 · '+rows.length+' 部'; }
           else if (this.searching) { this.searchStatus='本地结果 · '+rows.length+' 部，正在搜索网络…'; }
-        } catch (error) { if (current()) { this.searchStatus='本地搜索暂不可用。'; } }
+        } catch (error) { if (current()) { const local=this.searchRows.work.local;local.finish(local.consumer(),'local');this.searchStatus='本地搜索暂不可用。'; } }
       }
     } finally { this.searchLocalRunning=false; }
   }
@@ -4096,12 +4093,14 @@ struct Index {
     if (!this.searchActive() || this.setupBusy || !this.title.trim()) { return; }
     const query=this.title.trim(), client=this.clientId, scope=this.currentSearchAccount();
     this.cancelSearchRead();
-    const consumer=this.searchConsumer;
+    const lane=this.searchRows.work.remote;
+    const consumer=lane.consumer();
     const token=this.searchGeneration.begin();
-    const current=(): boolean=>this.searchGeneration.current(token) && this.searchActive() &&
+    const current=(): boolean=>this.searchGeneration.current(token) && lane.current(consumer) && this.searchActive() &&
       client===this.clientId && scope===this.currentSearchAccount() && query===this.title.trim();
     this.searchSubmitted=true; this.searchRemote=[]; this.searchOptions=defaultSearch();
     this.searching=!!client; this.searchStatus=client ? '读取本地结果…' : '本地搜索（未配置网络）';
+    if(client){lane.start(consumer,JSON.stringify([scope,client,query]));}
     this.refreshSearchLocal();
     try {
       const repo=await this.searchRepository();
@@ -4110,7 +4109,7 @@ struct Index {
       const rows=await repo.remote(client,query,consumer);
       if (!current()) { return; }
       this.searchRemote=rows;
-      this.searching=false;
+      lane.finish(consumer);this.searching=false;
       this.searchStatus='搜索完成 · 本地与网络结果';
       this.refreshSearchLocal();
       // Persist only public metadata under the captured verified scope.
@@ -4120,9 +4119,9 @@ struct Index {
         if (current()) { this.loadSearchHistory(); }
       }
     } catch (error) {
-      if (current()) { this.searching=false; this.searchStatus='网络搜索失败，保留本地结果。'; }
+      if (current()) { lane.finish(consumer,'network');this.searching=false; this.searchStatus='网络搜索失败，保留本地结果。'; }
     } finally {
-      if (current()) { this.searching=false; this.refreshSearchLocal(); }
+      if (current()) { if(lane.snapshot().loading){lane.finish(consumer);}this.searching=false; this.refreshSearchLocal(); }
     }
   }
   private async rememberSearchDiscovery(scope: string,rows: DiscoverItem[]): Promise<void> {
@@ -4134,12 +4133,10 @@ struct Index {
   }
 
   private cancelDiscoverRead(): number {
-    this.discoverConsumer.cancel(); this.discoverConsumer=new ReadCancel();
-    return ++this.discoverRevision;
+    return this.discoverRows.work.remote.cancel();
   }
   private invalidateSearchLocal(): void {
-    this.searchLocalConsumer.cancel(); this.searchLocalConsumer=new ReadCancel();
-    this.searchLocalVersion++;
+    this.searchRows.work.local.cancel();
   }
   private invalidateLazyWork(): void {
     this.pageWorks.reset();
@@ -4175,15 +4172,17 @@ struct Index {
   }
   private async loadDiscover(page: number = 1, force: boolean = false): Promise<void> {
     if (this.setupBusy || !this.clientId || page < 1 || !this.pageVisible || this.selectedMedia || this.tab !== 'discover') { return; }
-    const revision = this.cancelDiscoverRead();
-    const consumer=this.discoverConsumer;
+    const lane=this.discoverRows.work.remote;
     const account=this.currentSearchAccount();
     const clientId = this.clientId;
     const kind = this.mediaMode;
     const options = this.discoverOptions;
     const request = discoverRequest(kind,options,this.discoverCollectionSize());
     const key = discoverKey(clientId,request);
-    const current = (): boolean => revision === this.discoverRevision && clientId === this.clientId &&
+    const consumer=lane.begin(JSON.stringify([account,key,page]),force);
+    if(!consumer){return;}
+    const revision=lane.version();
+    const current = (): boolean => revision === lane.version() && lane.current(consumer) && clientId === this.clientId &&
       kind === this.mediaMode && this.pageVisible && !this.selectedMedia && this.tab === 'discover' && this.discoverOptions === options && account===this.currentSearchAccount();
     const publish = (feed: DiscoverFeed, fresh: boolean): void => {
       if (!current()) { return; }
@@ -4200,7 +4199,7 @@ struct Index {
       if (!force && discoverFresh(this.discoverFeed,Date.now())) {
         this.discoverPage = page;
         this.discoverStatus = '本地榜单已就绪';
-        this.discoverBusy = false;
+        lane.finish(consumer);this.discoverBusy = false;
         this.requestPresentation();
         return;
       }
@@ -4220,9 +4219,9 @@ struct Index {
       if (!current()) { return; }
       publish(feed,true);
     } catch (error) {
-      if (current()) { this.discoverStatus = this.discoverFeed ? '网络更新失败，保留本地榜单。' : '榜单不可用，请检查网络或 Trakt 权限后重试。'; }
+      if (current()) { lane.finish(consumer,'network');this.discoverStatus = this.discoverFeed ? '网络更新失败，保留本地榜单。' : '榜单不可用，请检查网络或 Trakt 权限后重试。'; }
     } finally {
-      if (current()) { this.discoverBusy = false; this.requestPresentation(); }
+      if (current()) { if(lane.snapshot().loading){lane.finish(consumer);}this.discoverBusy = false; this.requestPresentation(); }
     }
   }
   private async applyDiscover(options: DiscoverOptions): Promise<void> {
@@ -4826,7 +4825,7 @@ struct Index {
     this.calendarRepairTargets=[];
     this.calendarSourceVersion++;
     this.calendarMemo.clear();
-    this.calendarHydrationKey='';
+    this.calendarRows.work.hydrate.cancel();this.calendarHydrationKey='';
     this.calendarRows.replace([],[],[]);
     this.calendarSummary={key:'',total:0,page:1,pages:1};
     if (resetIndex) { this.calendarIndex.clear(); }
@@ -4909,22 +4908,23 @@ struct Index {
     if (!repo || !this.calendarQuery.trim() || this.presentationLanguage!=='zh' || !this.calendarCurrent()) { return; }
     const key=JSON.stringify([this.calendarSourceScope,this.calendarSourceVersion]);
     if (key===this.calendarHydrationKey) { return; }
-    this.calendarHydrateConsumer.cancel(); this.calendarHydrateConsumer=new ReadCancel();
-    const consumer=this.calendarHydrateConsumer;
+    const lane=this.calendarRows.work.hydrate;
+    const consumer=lane.begin(key);
+    if(!consumer){return;}
     this.calendarHydrationKey=key;
     try {
       for (const source of this.calendarSources) {
         for (const season of source.full?.seasons ?? []) {
           if (!this.pageVisible || this.tab!=='progress' || this.progressMode!=='calendar' || this.mediaMode!=='show' ||
               !this.calendarQuery.trim() || key!==JSON.stringify([this.calendarSourceScope,this.calendarSourceVersion])) {
-            if (this.calendarHydrationKey===key) { this.calendarHydrationKey=''; }
+            if (lane.current(consumer)&&this.calendarHydrationKey===key) { this.calendarHydrationKey=''; }
             return;
           }
           await repo.hydrateSeason(source.media,season.number,consumer);
         }
       }
-    } catch (error) { if (this.calendarHydrateConsumer===consumer && this.calendarHydrationKey===key) { this.calendarHydrationKey=''; } }
-    finally { if (this.calendarHydrateConsumer===consumer && !consumer.cancelled()) { this.publishPresentation(); } }
+    } catch (error) { if (lane.current(consumer) && this.calendarHydrationKey===key) { lane.finish(consumer,'hydrate');this.calendarHydrationKey=''; } }
+    finally { if (lane.current(consumer)) { if(lane.snapshot().loading){lane.finish(consumer);}this.publishPresentation(); } }
   }
   private async loadCalendar(): Promise<void> {
     if (this.calendarBusy || this.authBusy || this.setupBusy || this.syncBusy) { return; }

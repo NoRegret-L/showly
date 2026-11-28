@@ -6,6 +6,42 @@ import { RevisionMemo } from './ReadModelCache';
 export interface PageSummary { key:string; total:number; page:number; pages:number; }
 export interface PageTicket { revision:number; consumer:ReadCancel; }
 export interface PageWorkSnapshot { revision:number; dependencyVersion:number; starts:number; summaries:number; }
+export interface PageReadSnapshot { revision:number; key:string; loading:boolean; error:string; starts:number; joins:number; publications:number; }
+// One consumer lane per kind of page work; the repository remains the
+// transport owner. Returned snapshots contain scalar copies only.
+export class PageReadLane {
+  private signal:ReadCancel=new ReadCancel();
+  private serial:number=0;
+  private key:string='';
+  private loading:boolean=false;
+  private error:string='';
+  private starts:number=0;
+  private joins:number=0;
+  private publications:number=0;
+  version():number{return this.serial;}
+  consumer():ReadCancel{return this.signal;}
+  current(consumer:ReadCancel):boolean{return consumer===this.signal&&!consumer.cancelled();}
+  snapshot():PageReadSnapshot{return {revision:this.serial,key:this.key,loading:this.loading,error:this.error,
+    starts:this.starts,joins:this.joins,publications:this.publications};}
+  cancel():number{
+    this.signal.cancel();this.signal=new ReadCancel();this.serial++;
+    if(this.loading||this.key||this.error){this.publications++;}
+    this.loading=false;this.key='';this.error='';return this.serial;
+  }
+  begin(key:string,force:boolean=false):ReadCancel|undefined{
+    if(!force&&this.loading&&this.key===key&&!this.signal.cancelled()){this.joins++;return undefined;}
+    this.cancel();this.key=key;this.loading=true;this.starts++;this.publications++;return this.signal;
+  }
+  start(consumer:ReadCancel,key:string):void{
+    if(!this.current(consumer)){return;}
+    if(!this.loading||this.key!==key||this.error){this.key=key;this.loading=true;this.error='';this.starts++;this.publications++;}
+  }
+  finish(consumer:ReadCancel,error:string=''):boolean{
+    if(!this.current(consumer)){return false;}
+    if(this.loading||this.error!==error){this.loading=false;this.error=error;this.publications++;}
+    return true;
+  }
+}
 export function samePageSummary(a:PageSummary,b:PageSummary):boolean{
   return a.key===b.key&&a.total===b.total&&a.page===b.page&&a.pages===b.pages;
 }
@@ -13,6 +49,10 @@ export function samePageSummary(a:PageSummary,b:PageSummary):boolean{
 // authoritative commit and synchronization fences before accepting results.
 export class PageWork {
   readonly jobs:LatestDisplayJobs=new LatestDisplayJobs();
+  readonly remote:PageReadLane=new PageReadLane();
+  readonly local:PageReadLane=new PageReadLane();
+  readonly hydrate:PageReadLane=new PageReadLane();
+  private presentationKey:string='';
   private revision:number=0;
   private dependencies:number=0;
   private starts:number=0;
@@ -27,7 +67,12 @@ export class PageWork {
     if(this.commitKey===key){return;}
     this.commitKey=key;this.dependencies++;this.invalidate();this.jobs.clear();
   }
-  reset():void{this.commitKey='';this.summary=undefined;this.invalidate();this.jobs.clear();}
+  deactivate():void{this.invalidate();this.jobs.clear();this.remote.cancel();this.local.cancel();this.hydrate.cancel();}
+  changePresentation(key:string):void{
+    if(this.presentationKey===key){return;}
+    this.presentationKey=key;this.invalidate();this.jobs.clear();
+  }
+  reset():void{this.commitKey='';this.presentationKey='';this.summary=undefined;this.deactivate();}
   snapshot():PageWorkSnapshot{return {revision:this.revision,dependencyVersion:this.dependencies,starts:this.starts,summaries:this.summaries};}
   readSummary():PageSummary|undefined{
     const value=this.summary;
@@ -56,6 +101,15 @@ export function pageAffected(page:string,ids:string[],full:boolean):boolean{
 }
 export class PageWorkSet{
   private owners:Map<string,PageWork>=new Map<string,PageWork>();
+  private account:string='';private route:string='';private active:string='';private initialized:boolean=false;
+  // Account/hide boundaries revoke every consumer. Ordinary navigation only
+  // revokes the outgoing page, including a different route in the same page.
+  transition(page:string,route:string,account:string):void{
+    if(!this.initialized||this.account!==account||!route){
+      if(!this.initialized||this.account!==account||this.route!==route){this.reset();}
+    }else if(this.route!==route||this.active!==page){this.owners.get(this.active)?.deactivate();}
+    this.initialized=true;this.account=account;this.route=route;this.active=page;
+  }
   register(page:string,work:PageWork):void{this.owners.set(page,work);}
   get(page:string):PageWork|undefined{return this.owners.get(page);}
   reset():void{for(const work of this.owners.values()){work.reset();}}

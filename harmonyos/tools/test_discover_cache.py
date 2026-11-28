@@ -78,7 +78,7 @@ const repo=new DiscoverRead(disk,net);
     subprocess.run(["node","test.cjs","read"],cwd=work,check=True)
 page=(root/"pages"/"Index.ets").read_text()
 assert "repo.load(clientId,request,force,publish,consumer)" in page
-assert "revision === this.discoverRevision && clientId === this.clientId" in page
+assert "revision === lane.version() && lane.current(consumer) && clientId === this.clientId" in page
 assert "this.discoverOptions === options" in page
 assert "this.discoverOptions.hideCollection && (!this.ready || (this.signedIn && !this.activeCloud()))" in page
 assert "filterDiscover(this.discoverItems,this.discoverOptions,hidden,members,now)" in page
