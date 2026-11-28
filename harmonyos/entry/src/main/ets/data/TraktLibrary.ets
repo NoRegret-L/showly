@@ -32,6 +32,7 @@ interface SyncItem {
   episode?:PartIdentity;
   listed_at?: string;
   rating?: number;
+  rated_at?: string;
   plays?: number;
   last_watched_at?: string;
   last_updated_at?: string;
@@ -194,7 +195,7 @@ function showProgress(rows: SyncItem[]): ShowProgress[] {
   return result;
 }
 
-export interface CollectionRating { id: string; value: number; }
+export interface CollectionRating { id: string; value: number; ratedAt?: number; }
 const ratingFlights = new ReadFlight<CollectionRating[]>();
 export async function readCollectionRatings(session: TraktSession, kind: string, activity: string): Promise<CollectionRating[]> {
   ensureCurrent(session);
@@ -215,7 +216,8 @@ async function readRatingsVerified(session: TraktSession, kind: string, activity
       throw new Error('Invalid personal rating');
     }
     seen.add(item.id);
-    ratings.push({ id: item.id, value: row.rating });
+    const ratedAt = Date.parse(row.rated_at ?? '');
+    ratings.push({ id: item.id, value: row.rating, ratedAt: Number.isFinite(ratedAt) && ratedAt>0 ? ratedAt : undefined });
   }
   if (await readActivity(session) !== activity) { throw new Error('Activity changed'); }
   ensureCurrent(session);

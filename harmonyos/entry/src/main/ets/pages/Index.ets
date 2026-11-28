@@ -1,3 +1,5 @@
+import { StatisticsPage } from './StatisticsPage';
+import { StatisticsInput, StatisticsRating } from '../model/StatisticsOwner';
 import { CustomListsPage } from './CustomListsPage';
 import { SeasonExtrasCoordinator } from '../data/SeasonExtrasCoordinator';
 import { SearchController, SearchSnapshot } from '../model/SearchController';
@@ -5917,6 +5919,26 @@ struct Index {
     return rows;
   }
 
+  private statisticsInputs(kind:string):StatisticsInput[]{
+    const scope=this.currentProgressScope();if(!scope){return [];}
+    const library=this.personalLibrary(),state=this.currentCollectionState();
+    const mine=collectionMembers(library,state,kind,'mine','all'),members=new Map<string,Media>(),mineIds=new Set<string>();
+    for(const row of mine){members.set(row.media.id,row.media);mineIds.add(row.media.id);}
+    if(kind==='show'){for(const row of collectionMembers(library,state,kind,'queue','all')){if(!members.has(row.media.id)){members.set(row.media.id,row.media);}}
+      for(const hidden of state.hidden){if(hidden.media.kind==='show'&&!members.has(hidden.media.id)){members.set(hidden.media.id,hidden.media);}}}
+    const sources=new Map<string,NextShow>();for(const row of this.nextShows){sources.set(row.media.id,row);}
+    const movies=this.movieMetadataIndex(),result:StatisticsInput[]=[];
+    for(const media of members.values()){if(!isTraktMedia(media)){continue;}const next=sources.get(media.id),meta=this.titleIndex.get(media.id)?.collection,movie=movies.get(media.id);
+      result.push({media:media,mine:mineIds.has(media.id),source:next?.source,sourceKey:next?.sourceStateKey&&next?.sourceCatalogKey?JSON.stringify([next.sourceStateKey,next.sourceCatalogKey]):'',observed:next?.completed??0,meta:meta??(movie?.runtime!==undefined?{genres:[],network:'',release:movie.released,runtime:movie.runtime}:undefined),runtimes:[]});}
+    return result;
+  }
+  private async statisticsRatings(kind:string,scope:string):Promise<StatisticsRating[]>{
+    const session=traktAuth.session(this.clientId),source=this.activeCloud();
+    if(!session||!source||!this.cloudFresh||scope!==this.currentProgressScope()){throw new Error('Verified account required');}
+    const rows=await readCollectionRatings(session,kind,source.activity);
+    if(scope!==this.currentProgressScope()||source!==this.activeCloud()||!traktAuth.isCurrent(session.clientId,session.generation)||this.tab!=='statistics'){throw new Error('Statistics scope changed');}
+    return rows;
+  }
   private currentCollectionState(): CollectionState {
     return this.collectionScope && this.collectionScope === this.currentProgressScope() ? this.collectionState : emptyCollectionState();
   }
@@ -6334,6 +6356,7 @@ struct Index {
           if(!this.collectionSearchOpen){this.collectionQuery='';this.resetCollection();}
           this.captureCollectionView();
         })
+        Button('统计').fontSize(12).height(32).onClick(()=>{this.navigate('statistics');})
         Button('列表').fontSize(12).height(32).backgroundColor($r('app.color.showly_muted_surface')).fontColor($r('app.color.showly_text')).onClick(() => { this.chooseCollection('lists'); })
       }.width('100%')
       this.librarySyncNotice()
@@ -6735,7 +6758,7 @@ struct Index {
       if ((this.tab === 'library' || (this.tab === 'progress' && this.progressMode === 'next')) && !this.nextShows.length) { this.loadNextShows(); }
       return true;
     }
-    if (this.tab === 'search' || this.tab === 'cloud' || this.tab === 'account') {
+    if (this.tab === 'search' || this.tab === 'cloud' || this.tab === 'account' || this.tab === 'statistics') {
       this.navigate(this.returnTab);
       return true;
     }
@@ -6879,7 +6902,7 @@ struct Index {
 
   private navigate(value: string): void {
     this.watchSelection.clear();
-    if (value==='search' || value==='account' || value==='cloud') { this.rememberScroll(); }
+    if (value==='search' || value==='account' || value==='cloud' || value==='statistics') { this.rememberScroll(); }
     if (this.tab === 'progress' || this.tab === 'discover' || this.tab === 'library') { this.returnTab = this.tab; }
     this.closeDetail();
     if (this.tab === 'discover' && value !== 'discover') { this.cancelDiscoverRead(); this.discoverBusy = false; }
@@ -7135,7 +7158,7 @@ struct Index {
         this.headerAction('设置', 'account')
       }.width('100%').padding(12).backgroundColor($r('app.color.showly_surface'))
       Divider().color($r('app.color.showly_line'))
-      if (!this.selectedMedia && (this.tab === 'progress' || this.tab === 'discover' || this.tab === 'library')) {
+      if (!this.selectedMedia && (this.tab === 'progress' || this.tab === 'discover' || this.tab === 'library' || this.tab==='statistics')) {
         this.mediaModeTabs()
         if (this.modeStatus) { Text(this.modeStatus).fontSize(12).width('100%') }
       }
@@ -7153,6 +7176,15 @@ struct Index {
               },(scope:string)=>scope)
             }.width('100%').height('100%')
           }else{this.collectionView()}
+        } else if (!this.selectedMedia && this.tab==='statistics') {
+          Column(){
+            ForEach([this.currentProgressScope()+'|'+this.mediaMode],(key:string)=>{
+              StatisticsPage({scope:this.currentProgressScope(),kind:this.mediaMode,client:this.clientId,language:this.presentationLanguage,repository:this.presentation,
+                current:()=>this.pageVisible&&!this.selectedMedia&&this.tab==='statistics'&&key===this.currentProgressScope()+'|'+this.mediaMode,
+                inputs:()=>this.statisticsInputs(this.mediaMode),readRatings:()=>this.statisticsRatings(this.mediaMode,this.currentProgressScope()),
+                onBack:()=>{this.navigate(this.returnTab);},onOpen:(item:Media)=>{this.openDetail(item);}})
+            },(key:string)=>key)
+          }.width('100%').height('100%')
         } else if (!this.selectedMedia && this.tab === 'discover') {
           this.discoverView()
         } else if (!this.selectedMedia && this.tab === 'search') {
