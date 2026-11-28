@@ -61,34 +61,18 @@ jobs:
           path: .ci-sdk-setup
           persist-credentials: false
 
-      # Independent preparation. The pinned script verifies the SDK archive.
-      # Both child processes must succeed before toolchain verification.
-      - name: Prepare SDK and Linux dependencies in parallel
+      # Build 77 stock-runner probe passed both cold and warm HAP builds.
+      # Keep pinned setup and verified archive; no unmeasured cache or apt.
+      - name: Prepare SDK on stock runner
         id: sdk
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          (
-            set -euo pipefail
-            start=$(date +%s)
-            if ! dpkg-query -W -f='${Status}' libgl1-mesa-dev 2>/dev/null | grep -qx 'install ok installed'; then
-              sudo apt-get update
-              sudo apt-get install -y libgl1-mesa-dev
-            fi
-            echo "Linux dependency seconds=$(( $(date +%s)-start ))"
-          ) > "$RUNNER_TEMP/linux-dependencies.log" 2>&1 &
-          linux_pid=$!
           start=$(date +%s)
-          bash .ci-sdk-setup/setup.sh -v '6.1.1.280' > "$RUNNER_TEMP/sdk-setup.log" 2>&1 &
-          sdk_pid=$!
-          linux_status=0; sdk_status=0
-          wait "$linux_pid" || linux_status=$?
-          wait "$sdk_pid" || sdk_status=$?
-          cat "$RUNNER_TEMP/linux-dependencies.log" "$RUNNER_TEMP/sdk-setup.log"
-          echo "Parallel setup seconds=$(( $(date +%s)-start ))"
-          test "$linux_status" -eq 0
-          test "$sdk_status" -eq 0
+          dpkg-query -W libgl1-mesa-dev libgl1 || true
+          bash .ci-sdk-setup/setup.sh -v '6.1.1.280'
+          echo "SDK setup seconds=$(( $(date +%s)-start ))" | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Verify toolchain
         run: |
@@ -150,6 +134,7 @@ jobs:
         if: ${{ inputs.mode == 'build' || hashFiles('harmonyos/build-profile.json5') != '' }}
         run: |
           set -euo pipefail
+          python3 harmonyos/tools/preflight_detail.py
           npm exec --yes --package=typescript@5.8.3 -- python3 harmonyos/tools/run_regressions.py
 
   publish-preview:

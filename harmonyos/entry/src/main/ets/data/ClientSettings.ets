@@ -53,7 +53,7 @@ export class ClientSettings {
     return defaultCollectionSpoilers();
   }
   async saveCollectionSpoilers(kind:string,section:string,value:CollectionSpoilers):Promise<void>{
-    if(!['show','movie'].includes(kind)||!['mine','queue','hidden'].includes(section)){throw new Error('Invalid spoiler scope');}
+    if(!['show','movie'].includes(kind)||!['mine','queue','hidden','detail'].includes(section)){throw new Error('Invalid spoiler scope');}
     await this.storage.put('collection_spoilers:'+kind+':'+section,JSON.stringify(value));await this.storage.flush();
   }
   loadCollectionRecentAmount():number {

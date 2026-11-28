@@ -11,9 +11,26 @@ with tempfile.TemporaryDirectory() as tmp:
     work=Path(tmp)
     for path in (root/"model").glob("*.ets"):
         shutil.copyfile(path,work/(path.stem+".ts"))
-    subprocess.run(["tsc","--strict","--target","ES2020","--module","commonjs","DetailSession.ts","EffectiveState.ts"],cwd=work,check=True)
+    subprocess.run(["tsc","--strict","--target","ES2020","--module","commonjs","DetailSession.ts","EffectiveState.ts","DetailViewOwner.ts"],cwd=work,check=True)
     (work/"test.cjs").write_text("""
 const assert=require('node:assert/strict'),{DetailSession,summarizeSeasons}=require('./DetailSession'),{resolveEpisodes}=require('./EffectiveState');
+const {DetailViewOwner}=require('./DetailViewOwner');
+const owner=new DetailViewOwner();
+for(let i=0;i<100;i++){
+ const token=owner.begin('A','show:1',{description:true,rating:true,reveal:true});
+ const initial=owner.snapshot();const summary={title:'A'};
+ owner.summary(token,summary,false,'');const s=owner.snapshot();
+ assert.equal(initial.summary,undefined);assert.equal(s.summary,summary);
+ owner.summary(token,summary,false,'');assert.strictEqual(owner.snapshot(),s);
+ owner.personalRating(token,8,false,'');assert.strictEqual(owner.snapshot().summary,summary);
+ owner.artwork(token,'fanart',false,'');assert.equal(owner.snapshot().rating,8);
+ owner.reveal(token,'rating');assert(owner.snapshot().ratingRevealed);assert(!owner.snapshot().descriptionRevealed);
+ const newer=owner.begin('B','show:1',{description:true,rating:true,reveal:false});
+ owner.personalRating(token,9,false,'');owner.artwork(token,'stale',false,'');
+ owner.reveal(newer,'rating');assert.equal(owner.snapshot().rating,undefined);assert.equal(owner.snapshot().fanart,'');assert(!owner.snapshot().ratingRevealed);
+ assert(!owner.current(token,'A','show:1'));
+}
+console.log('100 detail UI lifecycles: independent lanes, no-op snapshots, scoped stale rejection and spoiler isolation passed');
 const session=new DetailSession();
 const full={media:{id:'show:1',title:'Long show',year:2020,kind:'show',watched:false},status:'returning series',fetchedAt:Date.now(),seasons:Array.from({length:20},(_,s)=>({number:s+1,firstAired:'2020-01-01T00:00:00Z',episodes:Array.from({length:100},(_,e)=>({id:s*100+e+1,season:s+1,number:e+1,title:'Episode',firstAired:'2020-01-01T00:00:00Z'}))}))};
 let reads=0;
@@ -64,3 +81,9 @@ assert "ForEach(season.episodes, (entry: LocalEpisodeState)" not in page
 assert "await store.saveReadCheckpoints(account.uuid, result.matches)" in page
 assert "await readSyncAccount(session)" in page and "await readActivity(session)" in page
 print("10,000 journal rows: indexed scoped query returns 100 identical rows; native virtual season and sync boundaries verified")
+
+assert "this.detailOwner.current(token,scope,item.id)" in page
+assert "this.presentation?.readCachedDetail(item,consumer)" in page and "this.presentation?.saveCachedDetail(item,data,consumer)" in page
+assert "readCollectionRatings(session,item.kind,source.activity)" in page
+assert "this.detailFanart.visible(" in page
+assert "DetailHeader({" in page

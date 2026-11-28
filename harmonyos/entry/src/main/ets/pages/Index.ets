@@ -1,3 +1,5 @@
+import { DetailViewOwner, DetailSnapshot, emptyDetail } from '../model/DetailViewOwner';
+import { DetailHeader } from './DetailHeader';
 import { CollectionViewOwner, CollectionNetworkGroup, CollectionGenreOption, COLLECTION_NETWORK_GROUPS, COLLECTION_GENRES, toggleCollectionSelection, COLLECTION_RECENT_AMOUNTS, CollectionDependencyVersions, CollectionMetadataVersions, CollectionRatingRequest, CollectionRecoveryOwner, CollectionUiSnapshot, emptyCollectionUi, collectionUiNext, CollectionSpoilers, defaultCollectionSpoilers, collectionSpoilerText, progressRatingSpoilerText, collectionEmptyText } from '../model/CollectionViewOwner';
 import { StableDisplayOrder, StableOrderChange } from '../model/StableDisplayOrder';
 import { PageStateOwner, PageWork, PageWorkSet, PageSortJobs, PageSummary } from '../model/PageStateOwner';
@@ -402,10 +404,11 @@ struct Index {
   @State discoverBusy: boolean = false;
   @State discoverStatus: string = '';
   @State @Watch('onPresentationChanged') selectedMedia?: Media = undefined;
-  @State detail?: MediaDetail = undefined;
-  @State detailBusy: boolean = false;
-  @State detailStatus: string = '';
-  @State posterUri: string = '';
+  @State detailUi:DetailSnapshot<MediaDetail>=emptyDetail<MediaDetail>();
+  private detailOwner:DetailViewOwner<MediaDetail>=new DetailViewOwner<MediaDetail>();
+  private detailFanart:CollectionFanartOwner=new CollectionFanartOwner();
+  private publishDetail():void{const next=this.detailOwner.snapshot();if(next!==this.detailUi){this.detailUi=next;}}
+  private resetDetailUi():void{this.detailFanart.clear();this.detailOwner.clear();this.publishDetail();}
   private detailRevision: number = 0;
   @State @Watch('onPresentationChanged') clientId: string = '';
   @State draftId: string = '';
@@ -2073,7 +2076,7 @@ struct Index {
     const tasks = new Map<string,PresentationTask>();
     const detail=this.selectedMedia;
     if (detail) {
-      this.addPresentationTask(tasks,detail,true,this.localSeason>0?this.localSeason:0,this.detail?.posterUrls??[]);
+      this.addPresentationTask(tasks,detail,true,this.localSeason>0?this.localSeason:0,this.detailUi.summary?.posterUrls??[]);
       if (this.fullSchedule && detail.kind==='show') {
         for (const episode of this.extraSchedule().slice((this.schedulePage-1)*this.collectionPageSize,this.schedulePage*this.collectionPageSize)) {
           this.addPresentationTask(tasks,detail,false,episode.season);
@@ -3397,7 +3400,7 @@ struct Index {
     this.movieUndoStatus = '';
     this.cloudLocalAllowed = false;
     this.detailSession.clear(); this.detailConsumer=this.detailSession.consumer();
-    this.detailRevision++; this.detailResumePending=!!this.selectedMedia;
+    this.detailRevision++; this.detailResumePending=!!this.selectedMedia; this.resetDetailUi();
     this.episodeRowOwner.clear(); this.episodeRowCount=0; this.seasonSummaries=[];
     this.localSeries = undefined;
     this.effectiveEditable = false;
@@ -3808,6 +3811,7 @@ struct Index {
     }
   }
 
+  private detailLibraryRow(item:Media):PersonalLibraryRow|undefined{this.personalLibrary();return this.libraryIndex.get(item.id);}
   @Builder
   mediaStateView(item: Media) {
     Column({ space: 8 }) {
@@ -3815,11 +3819,11 @@ struct Index {
       this.librarySyncNotice()
       if (this.movieUndo?.id === item.id) { this.movieUndoView() }
       if (item.kind === 'movie') {
-        Text(this.personalLibrary().find((row: PersonalLibraryRow) => row.media.id === item.id)?.watched ? '已看' : '未看或未确认').fontSize(14).width('100%')
-        Button(this.personalLibrary().find((row: PersonalLibraryRow) => row.media.id === item.id)?.watched ? '撤销已看' : '标记已看')
+        Text(this.detailLibraryRow(item)?.watched ? '已看' : '未看或未确认').fontSize(14).width('100%')
+        Button(this.detailLibraryRow(item)?.watched ? '撤销已看' : '标记已看')
           .width('100%').enabled(this.canEditLibrary() && this.ready && !this.saving && !this.cloudBusy && !this.syncBusy)
           .onClick(() => { this.changeMediaIntent(item, 'movie',
-            this.personalLibrary().find((row: PersonalLibraryRow) => row.media.id === item.id)?.watched ? 'no' : 'yes'); })
+            this.detailLibraryRow(item)?.watched ? 'no' : 'yes'); })
       }
       if (item.kind === 'movie') { this.showProgressActions(item) }
       if (item.kind === 'show') {
@@ -3831,11 +3835,11 @@ struct Index {
             .onClick(() => { this.joinFollowed(item); })
         }
       }
-      Button(this.personalLibrary().find((row: PersonalLibraryRow) => row.media.id === item.id)?.queued ?
+      Button(this.detailLibraryRow(item)?.queued ?
         '移出待看' : this.isFollowed(item) ? '移回待看' : '加入待看')
         .width('100%').enabled(this.canEditLibrary() && this.ready && !this.saving && !this.cloudBusy && !this.syncBusy)
         .onClick(() => { this.changeMediaIntent(item, 'watchlist',
-          this.personalLibrary().find((row: PersonalLibraryRow) => row.media.id === item.id)?.queued ? 'no' : 'yes'); })
+          this.detailLibraryRow(item)?.queued ? 'no' : 'yes'); })
       if (!this.ready) { Text('收藏暂不可编辑，请检查设置。').fontSize(12).width('100%') }
       if (this.libraryStatus.includes('失败')) { Text('操作未完成，请检查设置后重试。').fontSize(12).width('100%') }
       if (this.libraryNotice) { Text(this.libraryNotice).fontSize(12).width('100%') }
@@ -5309,7 +5313,7 @@ struct Index {
         }.layoutWeight(1)
       }.width('100%')
       Row({ space: 6 }) {
-        Button('详情').layoutWeight(1).fontSize(12).enabled(!this.detailBusy)
+        Button('详情').layoutWeight(1).fontSize(12).enabled(!this.detailUi.summaryBusy)
           .onClick(() => { this.openDetail(row.media, false, row.episode.season); })
         Button(row.upcoming ? '尚未播出' : '标记已看').layoutWeight(1).fontSize(12).backgroundColor($r('app.color.showly_accent')).fontColor($r('app.color.showly_on_accent'))
           .enabled(!row.upcoming && this.canEditLibrary() && !this.localBusy && !this.cloudBusy && !this.syncBusy && !this.saving)
@@ -5490,7 +5494,7 @@ struct Index {
                   '已看 · 待看' : row.movie.cloudWatched ? '已看' : '待看')
                   .fontSize(12).width('100%')
                 Row({ space: 8 }) {
-                  Button('查看详情').fontSize(12).layoutWeight(1).enabled(!this.detailBusy && !this.localBusy && !this.syncBusy)
+                  Button('查看详情').fontSize(12).layoutWeight(1).enabled(!this.detailUi.summaryBusy && !this.localBusy && !this.syncBusy)
                     .onClick(() => { this.openDetail(row.movie.media); })
                   if (!row.movie.released) {
                     Button('补查日期').fontSize(12).layoutWeight(1).enabled(!this.calendarBusy && !this.syncBusy)
@@ -5565,7 +5569,7 @@ struct Index {
                   if (row.queued) { Text('待看列表').fontSize(12).width('100%') }
                 }.layoutWeight(1)
               }.width('100%')
-              Button('查看详情').fontSize(12).enabled(!this.detailBusy && !this.localBusy && !this.syncBusy)
+              Button('查看详情').fontSize(12).enabled(!this.detailUi.summaryBusy && !this.localBusy && !this.syncBusy)
                 .onClick(()=>{ this.openDetail(row.media,false,row.synthetic ? 0 : row.season); })
             }.padding(12).width('100%').borderRadius(10).backgroundColor($r('app.color.showly_surface'))
               .onVisibleAreaChange([0],(visible: boolean,ratio: number)=>{ this.viewportChanged(row.media,row.synthetic ? 0 : row.season,[],visible && ratio>0,'progress','calendar',row.key); })
@@ -6662,7 +6666,7 @@ struct Index {
     if (!this.selectedMedia) { return; }
     this.detailResumePending=true;
     this.detailSession.clear(); this.detailConsumer=this.detailSession.consumer();
-    this.detailRevision++; this.detailBusy=false;
+    this.detailRevision++; this.resetDetailUi();
     this.effectiveEditable=false;
     this.localSeries=undefined; this.fullSchedule=undefined;
     this.episodeRowOwner.clear(); this.episodeRowCount=0; this.seasonSummaries=[];
@@ -6673,15 +6677,16 @@ struct Index {
     if (!this.detailResumePending || !item || !this.pageVisible || this.localBusy || this.cloudBusy || this.syncBusy || this.setupBusy || this.authBusy) { return; }
     this.detailResumePending=false;
     this.detailSession.begin(this.currentSearchAccount(),item.id); this.detailConsumer=this.detailSession.consumer();
+    this.beginDetailUi(item);
     if (item.kind==='show') { this.loadLocalEpisodes(item); }
-    this.loadDetailSummary(item);
+    this.loadDetailRating(item); this.loadDetailFanart(item); this.loadDetailSummary(item);
   }
   private closeDetail(): void {
     this.detailSession.clear(); this.detailConsumer=this.detailSession.consumer();
     this.detailResumePending=false;
     this.episodePage=false; this.episodeRowOwner.clear(); this.episodeRowCount=0; this.seasonSummaries=[];
     this.detailScrollOffset=0;
-    this.detailBusy=false;
+    this.resetDetailUi();
     this.detailRevision++;
     this.localSeries = undefined;
     this.effectiveEditable = false;
@@ -6695,9 +6700,6 @@ struct Index {
     this.progressStatus = '';
     this.seasonNumber = -1;
     this.selectedMedia = undefined;
-    this.detail = undefined;
-    this.posterUri = '';
-    this.detailStatus = '';
   }
 
   onBackPress(): boolean {
@@ -6715,7 +6717,7 @@ struct Index {
   }
 
   private async openDetail(item: Media, reload: boolean = false, preferredSeason: number = 0): Promise<void> {
-    if (this.detailBusy || this.localBusy || this.setupBusy || !canReadDetails(item) || (!this.clientId && item.kind !== 'show')) {
+    if (this.detailUi.summaryBusy || this.localBusy || this.setupBusy || !canReadDetails(item) || (!this.clientId && item.kind !== 'show')) {
       return;
     }
     if (!this.selectedMedia) { this.rememberScroll(); }
@@ -6724,38 +6726,82 @@ struct Index {
     this.detailRevision++;
     this.detailSession.begin(this.currentSearchAccount(),item.id); this.detailConsumer=this.detailSession.consumer();
     this.selectedMedia = item;
-    this.detail = undefined;
-    this.posterUri = '';
+    this.beginDetailUi(item);
     if (item.kind === 'show') { this.loadLocalEpisodes(item); }
+    this.loadDetailRating(item); this.loadDetailFanart(item);
     await this.loadDetailSummary(item,reload);
   }
 
+  private beginDetailUi(item:Media):void{
+    this.detailFanart.clear();
+    this.detailOwner.begin(this.currentSearchAccount(),item.id,this.settings?.loadCollectionSpoilers(item.kind,'detail')??defaultCollectionSpoilers());this.publishDetail();
+  }
+  private detailCurrent(token:number,scope:string,item:Media):boolean{
+    return this.pageVisible&&this.selectedMedia?.id===item.id&&scope===this.currentSearchAccount()&&this.detailOwner.current(token,scope,item.id);
+  }
   private async loadDetailSummary(item: Media,reload: boolean=false): Promise<void> {
-    const revision=this.detailRevision;
-    const clientId=this.clientId;
-    const scope=this.currentSearchAccount();
-    this.detailBusy = true;
-    this.detailStatus = '正在读取影视详情…';
-    if (!clientId) {
-      this.detailStatus = '离线本机详情';
-      this.detailBusy = false;
-      return;
-    }
-    try {
-      const data = await readDetails(item, clientId, reload,this.detailConsumer);
-      if (!this.pageVisible || revision !== this.detailRevision || this.clientId !== clientId || scope!==this.currentSearchAccount()) {
+    if(this.detailUi.summaryBusy){return;}
+    const token=this.detailOwner.token(),clientId=this.clientId,scope=this.currentSearchAccount(),consumer=this.detailConsumer;
+    const current=():boolean=>this.detailCurrent(token,scope,item)&&this.clientId===clientId&&!consumer.cancelled();
+    if(!current()){return;}
+    this.detailOwner.summary(token,this.detailUi.summary,true,'正在读取影视详情…');this.publishDetail();
+    try{
+      if(!this.detailUi.summary){
+        const cached=await this.presentation?.readCachedDetail(item,consumer);
+        if(!current()){return;}
+        if(cached){this.detailOwner.summary(token,cached,true,'已恢复本地资料，正在核对…');this.publishDetail();this.requestPresentation();}
+      }
+      if(!clientId){
+        if(current()){this.detailOwner.summary(token,this.detailUi.summary,false,this.detailUi.summary?'本地缓存资料':'离线本机详情');this.publishDetail();}
         return;
       }
-      this.detail = data;
-      this.detailStatus = '';
-      this.requestPresentation();
-    } catch (error) {
-      if (revision === this.detailRevision) {
-        this.detailStatus = '详情读取失败，请检查网络或 Trakt API 权限后重试。';
-      }
-    } finally {
-      if (revision === this.detailRevision) { this.detailBusy = false; }
+      const data=await readDetails(item,clientId,reload,consumer);
+      if(!current()){return;}
+      this.detailOwner.summary(token,data,false,'');this.publishDetail();this.requestPresentation();
+      try{await this.presentation?.saveCachedDetail(item,data,consumer);}catch(error){}
+    }catch(error){
+      if(current()){this.detailOwner.summary(token,this.detailUi.summary,false,this.detailUi.summary?'显示本地缓存；联网更新失败，可重试。':'详情读取失败，请重试。');this.publishDetail();}
     }
+  }
+  private async loadDetailRating(item:Media):Promise<void>{
+    if(this.detailUi.ratingBusy){return;}
+    const token=this.detailOwner.token(),scope=this.currentSearchAccount(),source=this.activeCloud(),session=traktAuth.session(this.clientId);
+    const current=():boolean=>this.detailCurrent(token,scope,item)&&this.activeCloud()===source&&(!session||traktAuth.isCurrent(session.clientId,session.generation));
+    if(!current()){return;}
+    if(!source||!session||!this.currentProgressScope()||!this.cloudFresh){this.detailOwner.personalRating(token,undefined,false,'个人评分需验证账户');this.publishDetail();return;}
+    this.detailOwner.personalRating(token,undefined,true,'正在读取个人评分…');this.publishDetail();
+    try{
+      const ratings=await readCollectionRatings(session,item.kind,source.activity);
+      if(current()){const rating=ratings.find((r:CollectionRating)=>r.id===item.id)?.value;this.detailOwner.personalRating(token,rating,false,rating===undefined?'尚未评分':'');this.publishDetail();}
+    }catch(error){if(current()){this.detailOwner.personalRating(token,undefined,false,'个人评分读取失败，可重试。');this.publishDetail();}}
+    finally{
+      if(this.detailCurrent(token,scope,item)&&!current()){this.detailOwner.personalRating(token,undefined,false,'账户资料已变化，请重试。');this.publishDetail();}
+    }
+  }
+  private async loadDetailFanart(item:Media):Promise<void>{
+    if(this.detailUi.artBusy){return;}
+    const token=this.detailOwner.token(),scope=this.currentSearchAccount(),client=this.clientId;
+    const current=():boolean=>this.detailCurrent(token,scope,item)&&client===this.clientId;
+    if(!current()){return;}
+    this.detailFanart.clear();
+    this.detailOwner.artwork(token,'',true,'');this.publishDetail();
+    await this.detailFanart.visible(item,client,this.context().cacheDir,this.settings,current,(rows:Map<string,string>)=>{
+      if(current()){this.detailOwner.artwork(token,rows.get(item.id)??'',false,'');this.publishDetail();}
+    });
+    if(current()&&this.detailUi.artBusy){this.detailOwner.artwork(token,'',false,'背景图暂无或加载失败');this.publishDetail();}
+  }
+  private async toggleDetailSpoiler(item:Media,field:string):Promise<void>{
+    const token=this.detailOwner.token(),scope=this.currentSearchAccount(),v=this.detailUi.spoilers;
+    const next:CollectionSpoilers={description:field==='description'?!v.description:v.description,rating:field==='rating'?!v.rating:v.rating,reveal:field==='reveal'?!v.reveal:v.reveal};
+    try{
+      await this.settings?.saveCollectionSpoilers(item.kind,'detail',next);
+      if(this.detailCurrent(token,scope,item)){this.detailOwner.setSpoilers(token,next);this.publishDetail();}
+    }catch(error){if(this.detailCurrent(token,scope,item)){this.presentationStatus='详情剧透设置保存失败。';}}
+  }
+  private revealDetail(field:string):void{this.detailOwner.reveal(this.detailOwner.token(),field);this.publishDetail();}
+  private detailSubtitle(item:Media):string{
+    const d=this.detailUi.summary;
+    const year=d?.year??item.year;return (year>0?year+' · ':'')+(item.kind==='movie'?'电影':'剧集')+(d?.status?' · '+d.status:'')+(d?.runtime?' · '+d.runtime+' 分钟':'');
   }
 
   private async changeMediaMode(mode: string): Promise<void> {
@@ -6850,47 +6896,43 @@ struct Index {
 
   @Builder
   detailPage(item: Media) {
-    Column({ space: 12 }) {
-      Button('返回').onClick(() => { this.closeDetail(); if ((this.tab === 'library' || (this.tab === 'progress' && this.progressMode === 'next')) && !this.nextShows.length) { this.loadNextShows(); } })
-      Text(this.displayTitle(item))
-        .fontSize(26).fontWeight(FontWeight.Bold).width('100%')
-      if (this.artwork(item)) {
-        ArtworkImage({uri:this.artwork(item),widthValue:180,ratio:2/3,corner:10,contain:true,onFailure:(uri: string)=>{this.artworkFailed(item,uri);}})
-      } else {
-        Column() {
-          Text(this.detailBusy ? '正在加载海报…' : '海报未显示').fontColor($r('app.color.showly_secondary'))
-        }.width(180).height(270).justifyContent(FlexAlign.Center)
-          .backgroundColor($r('app.color.showly_placeholder')).borderRadius(10)
+    Column({space:12}){
+      DetailHeader({title:this.displayTitle(item),subtitle:this.detailSubtitle(item),poster:this.artwork(item),fanart:this.detailUi.fanart,
+        onBack:()=>{this.closeDetail();if((this.tab==='library'||(this.tab==='progress'&&this.progressMode==='next'))&&!this.nextShows.length){this.loadNextShows();}},
+        onPosterFailure:(uri:string)=>{this.artworkFailed(item,uri);},
+        onFanartFailure:(uri:string)=>{if(this.detailFanart.failed(item.id,uri)){this.detailOwner.artwork(this.detailOwner.token(),'',false,'背景图读取失败');this.publishDetail();}}})
+      if(isTraktMedia(item)){this.mediaStateView(item)}
+      if(item.kind==='show'){this.localEpisodesView(item)}
+      if(this.detailUi.summary){
+        Column({space:6}){
+          Text('影视资料').fontSize(19).fontWeight(FontWeight.Medium).width('100%')
+          if(this.detailUi.summary.collection?.release){Text('日期：'+this.detailUi.summary.collection?.release).fontSize(13).width('100%')}
+          if(this.detailUi.summary.collection?.network){Text('电视网：'+this.detailUi.summary.collection?.network).fontSize(13).width('100%')}
+          if(this.detailUi.summary.genres){Text(this.detailUi.summary.genres).fontSize(13).width('100%')}
+          if(this.detailUi.summary.certification){Text('分级：'+this.detailUi.summary.certification).fontSize(13).width('100%')}
+          if(this.detailUi.summary.country){Text('国家：'+this.detailUi.summary.country).fontSize(13).width('100%')}
+          if(this.detailUi.summary.language){Text('语言：'+this.detailUi.summary.language).fontSize(13).width('100%')}
+          if(item.kind==='show'&&this.detailUi.summary.airedEpisodes>0){Text('已播 '+this.detailUi.summary.airedEpisodes+' 集').fontSize(13).width('100%')}
+          if(this.detailUi.summary.rating>0){Text('Trakt '+collectionSpoilerText(this.detailUi.summary.rating.toFixed(1),this.detailUi.spoilers.rating,this.detailUi.ratingRevealed,true)+' / 10').fontSize(16).width('100%').onClick(()=>{this.revealDetail('rating');})}
+          if(this.detailUi.summary.votes!==undefined){Text('评分人数：'+this.detailUi.summary.votes).fontSize(12).width('100%')}
+          Text('剧情简介').fontSize(19).fontWeight(FontWeight.Medium).width('100%')
+          Text(collectionSpoilerText(this.displayOverview(item,this.detailUi.summary.overview)||'暂无简介',this.detailUi.spoilers.description,this.detailUi.descriptionRevealed)).fontSize(15).width('100%').onClick(()=>{this.revealDetail('description');})
+          if(this.presentationLanguage==='zh'){Button('重试中文资料').fontSize(12).onClick(()=>{this.translateDetail(item);})}
+          Row({space:4}){
+            Button(this.detailUi.spoilers.description?'简介隐藏':'简介显示').fontSize(11).layoutWeight(1).onClick(()=>{this.toggleDetailSpoiler(item,'description');})
+            Button(this.detailUi.spoilers.rating?'评分隐藏':'评分显示').fontSize(11).layoutWeight(1).onClick(()=>{this.toggleDetailSpoiler(item,'rating');})
+            Button(this.detailUi.spoilers.reveal?'允许揭示':'禁止揭示').fontSize(11).layoutWeight(1).onClick(()=>{this.toggleDetailSpoiler(item,'reveal');})
+          }.width('100%')
+        }.width('100%').padding(10).backgroundColor($r('app.color.showly_surface')).borderRadius(10)
       }
-      if (this.detail) {
-        Text((this.detail.year > 0 ? this.detail.year + ' · ' : '') +
-          (item.kind === 'movie' ? '电影' : '剧集') +
-          (this.detail.runtime > 0 ? ' · ' + this.detail.runtime + ' 分钟' : '')).fontSize(15)
-        if (this.detail.rating > 0) {
-          Text('Trakt 评分 ' + this.detail.rating.toFixed(1) + ' / 10').fontSize(16)
-        }
-        if (this.detail.genres) {
-          Text(this.detail.genres).fontSize(14)
-        }
-        if (this.detail.status) {
-          Text('状态：' + this.detail.status).fontSize(14)
-        }
-        if (item.kind === 'show' && this.detail.airedEpisodes > 0) {
-          Text('已播 ' + this.detail.airedEpisodes + ' 集').fontSize(14)
-        }
-        Text('剧情简介').fontSize(20).fontWeight(FontWeight.Medium).width('100%')
-        Text(this.displayOverview(item, this.detail.overview) || '暂无简介').fontSize(15).width('100%')
-        if (this.presentationLanguage === 'zh') {
-          Button('重试中文资料').onClick(() => { this.translateDetail(item); })
-        }
-      }
-      if (isTraktMedia(item)) { this.mediaStateView(item) }
-      if (item.kind === 'show') {
-        this.localEpisodesView(item)
-      }
-      if (this.detailBusy) { Text('正在更新详情…').fontSize(12).width('100%') }
-      Button('刷新详情').enabled(!this.detailBusy && !this.setupBusy)
-        .onClick(() => { this.openDetail(item, true); })
+      if(this.detailUi.ratingBusy){LoadingProgress().width(24).height(24)}
+      if(this.detailUi.rating!==undefined){Text('我的评分：'+this.detailUi.rating+' / 10').fontSize(15).width('100%')}
+      if(this.detailUi.ratingStatus){Text(this.detailUi.ratingStatus).fontSize(12).width('100%')}
+      if(this.detailUi.ratingStatus.includes('失败')||this.detailUi.ratingStatus.includes('重试')){Button('重试个人评分').fontSize(12).onClick(()=>{this.loadDetailRating(item);})}
+      if(this.detailUi.artStatus){Text(this.detailUi.artStatus).fontSize(12).width('100%');Button('重试背景图').fontSize(12).onClick(()=>{this.loadDetailFanart(item);})}
+      if(this.detailUi.summaryBusy){LoadingProgress().width(24).height(24)}
+      if(this.detailUi.summaryStatus){Text(this.detailUi.summaryStatus).fontSize(12).width('100%')}
+      Button('刷新详情').enabled(!this.detailUi.summaryBusy&&!this.setupBusy).onClick(()=>{this.loadDetailSummary(item,true);})
     }.width('100%')
   }
 
@@ -6900,7 +6942,7 @@ struct Index {
       Text(mediaLabel(item)).layoutWeight(1)
         .onClick(() => { this.openDetail(item); })
       if (this.clientId && canReadDetails(item)) {
-        Button('详情').fontSize(12).enabled(!this.detailBusy && !this.setupBusy)
+        Button('详情').fontSize(12).enabled(!this.detailUi.summaryBusy && !this.setupBusy)
           .onClick(() => { this.openDetail(item); })
       }
       Button(item.watched ? '撤销' : '已看')
@@ -7041,7 +7083,7 @@ struct Index {
             Text(this.displayLabel(item)).layoutWeight(1)
               .onClick(() => { this.openDetail(item); })
             if (this.isHidden(item)) { Text('已隐藏').fontSize(12) }
-            Button('详情').fontSize(12).enabled(!this.detailBusy && !this.setupBusy)
+            Button('详情').fontSize(12).enabled(!this.detailUi.summaryBusy && !this.setupBusy)
               .onClick(() => { this.openDetail(item); })
             Button(this.isInLibrary(item) ? '已收藏' : '添加')
               .enabled(this.ready && !this.saving && !this.cloudBusy && this.canEditLibrary() && !this.isInLibrary(item))

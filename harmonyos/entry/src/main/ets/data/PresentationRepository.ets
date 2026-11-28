@@ -5,8 +5,9 @@ import { Media } from '../model/Media';
 import { ReadFlight, ReadCancel, ConsumerReadFlight } from '../model/ReadFlight';
 import { PresentationFailure, presentationFailure } from '../model/PresentationPolicy';
 import { TitlePresentation, SeasonPresentation, EpisodePresentation, TranslationText, CollectionMeta, validTitle, validSeason, titleNeedsTranslation, seasonNeedsTranslation, mergeText, PresentationTask, TITLE_RETRY, SEASON_RETRY } from '../model/MediaPresentation';
-import { readDetails, cachePoster, cachedPoster, canReadDetails, rejectPosterUri } from './TraktDetails';
+import { MediaDetail, readDetails, cachePoster, cachedPoster, canReadDetails, rejectPosterUri } from './TraktDetails';
 import { readChinese, readChineseSeason } from './TraktProgress';
+interface PublicDetailRow { id:string; summary:MediaDetail; }
 interface TitlePatch { expectedPosterUri?: string; text?: TranslationText; translatedAt?: number; posterUrls?: string[]; posterUri?: string; collection?: CollectionMeta; }
 export interface PresentationChanges { titles: TitlePresentation[]; seasons: SeasonPresentation[]; }
 // Public metadata cache only: no personal library or sync writes.
@@ -37,6 +38,7 @@ export class PresentationRepository {
     const db = await relationalStore.getRdbStore(context, { name: 'showly_presentation.db', securityLevel: relationalStore.SecurityLevel.S1 });
     await db.executeSql('CREATE TABLE IF NOT EXISTS presentation_title (id TEXT PRIMARY KEY,payload TEXT NOT NULL)');
     await db.executeSql('CREATE TABLE IF NOT EXISTS presentation_season (show_id TEXT NOT NULL,season INTEGER NOT NULL,payload TEXT NOT NULL,PRIMARY KEY(show_id,season))');
+    await db.executeSql('CREATE TABLE IF NOT EXISTS presentation_detail (id TEXT PRIMARY KEY,payload TEXT NOT NULL)');
     const repo = new PresentationRepository(db, context.filesDir, context.cacheDir);
     const titles = await db.querySql('SELECT id,payload FROM presentation_title');
     try {
@@ -59,6 +61,28 @@ export class PresentationRepository {
   private lightTitle(row: TitlePresentation): TitlePresentation {
     return {id:row.id,text:{title:row.text.title,overview:''},translatedAt:row.translatedAt,
       posterUrls:[],posterUri:row.posterUri,collection:row.collection};
+  }
+  async readCachedDetail(item:Media,consumer:ReadCancel):Promise<MediaDetail|undefined>{
+    if(!canReadDetails(item)){return undefined;}
+    consumer.check();
+    const rows=await this.db.querySql('SELECT payload FROM presentation_detail WHERE id=?',[item.id]);
+    try{
+      consumer.check();
+      if(!rows.goToFirstRow()){return undefined;}
+      const row=JSON.parse(rows.getString(0)) as PublicDetailRow;
+      const d=row.summary;
+      if(row.id!==item.id||!d||typeof d.title!=='string'||typeof d.overview!=='string'||
+        typeof d.year!=='number'||typeof d.rating!=='number'||typeof d.runtime!=='number'||typeof d.status!=='string'||
+        typeof d.genres!=='string'||typeof d.airedEpisodes!=='number'||!Array.isArray(d.posterUrls)||
+        !d.posterUrls.every((url:string)=>typeof url==='string')){return undefined;}
+      return d;
+    }catch(error){return undefined;}finally{rows.close();}
+  }
+  async saveCachedDetail(item:Media,summary:MediaDetail,consumer:ReadCancel):Promise<void>{
+    if(!canReadDetails(item)){return;}
+    consumer.check();
+    const row:PublicDetailRow={id:item.id,summary:summary};
+    await this.db.executeSql('INSERT OR REPLACE INTO presentation_detail(id,payload) VALUES(?,?)',[item.id,JSON.stringify(row)]);
   }
   overview(id: string): string { return this.titles.get(id)?.text.overview ?? ''; }
   releaseTransient(): void {

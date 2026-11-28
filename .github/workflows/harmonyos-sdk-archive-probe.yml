@@ -13,7 +13,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        cache: ['false','true']
+        mode: ['direct','parallel','cached']
     env:
       SDK_VERSION: '6.1.1.280'
       SDK_FILE: ohos-sdk-linux-amd64.tar.gz
@@ -35,7 +35,7 @@ jobs:
           echo "SDK_DIGEST=$digest" >> "$GITHUB_ENV"
       - name: Restore compressed archive only
         id: archive-cache
-        if: matrix.cache == 'true'
+        if: matrix.mode == 'cached'
         uses: actions/cache@v4
         with:
           path: ~/sdk-archive/ohos-sdk-linux-amd64.tar.gz
@@ -47,13 +47,19 @@ jobs:
           set -euo pipefail
           cd "$HOME/sdk-archive"
           if [[ ! -s "$SDK_FILE" ]]; then
-            gh release download "$SDK_VERSION" --repo ErBWs/ohos-sdk --pattern "$SDK_FILE.a?"
+            if [[ "${{ matrix.mode }}" == parallel ]]; then
+              gh release download "$SDK_VERSION" --repo ErBWs/ohos-sdk --pattern "$SDK_FILE.aa" & p1=$!
+              gh release download "$SDK_VERSION" --repo ErBWs/ohos-sdk --pattern "$SDK_FILE.ab" & p2=$!
+              rc=0; wait "$p1" || rc=$?; wait "$p2" || rc=$?; test "$rc" -eq 0
+            else
+              gh release download "$SDK_VERSION" --repo ErBWs/ohos-sdk --pattern "$SDK_FILE.a?"
+            fi
             cat "$SDK_FILE.aa" "$SDK_FILE.ab" > "$SDK_FILE"
             rm "$SDK_FILE.aa" "$SDK_FILE.ab"
           fi
           printf '%s  %s\n' "$SDK_DIGEST" "$SDK_FILE" | sha256sum -c -
           tar -xzf "$SDK_FILE" -C "$HOME/ohos-sdk"
-          echo "archive_cache=${{ matrix.cache }} cache_hit=${{ steps.archive-cache.outputs.cache-hit == 'true' }} elapsed_seconds=$(( $(date +%s)-$(cat "$RUNNER_TEMP/archive-start") ))"
+          echo "archive_mode=${{ matrix.mode }} cache_hit=${{ steps.archive-cache.outputs.cache-hit == 'true' }} elapsed_seconds=$(( $(date +%s)-$(cat "$RUNNER_TEMP/archive-start") ))"
           du -sh "$SDK_FILE"
           echo "$HOME/ohos-sdk/command-line-tools/bin" >> "$GITHUB_PATH"
           echo "$HOME/ohos-sdk/command-line-tools/tool/node/bin" >> "$GITHUB_PATH"

@@ -31,6 +31,11 @@ interface Summary {
   first_aired?: string;
   released?: string;
   aired_episodes?: number;
+  certification?: string;
+  country?: string;
+  language?: string;
+  tagline?: string;
+  votes?: number;
   images?: Images;
 }
 export interface MediaDetail {
@@ -44,6 +49,11 @@ export interface MediaDetail {
   airedEpisodes: number;
   posterUrls: string[];
   fanartUrls?: string[];
+  certification?: string;
+  country?: string;
+  language?: string;
+  tagline?: string;
+  votes?: number;
   collection?: CollectionMeta;
 }
 let posterWriteSequence: number = 0;
@@ -110,6 +120,11 @@ async function fetchDetails(item: Media, clientId: string, key: string, epoch: n
         rating: typeof data.rating === 'number' && Number.isFinite(data.rating) && data.rating >= 0 && data.rating <= 10 ? data.rating : undefined,
         runtime: typeof data.runtime === 'number' && Number.isFinite(data.runtime) && data.runtime >= 0 ? data.runtime : undefined },
       airedEpisodes: typeof data.aired_episodes === 'number' ? data.aired_episodes : 0,
+      certification: typeof data.certification === 'string' ? data.certification : undefined,
+      country: typeof data.country === 'string' ? data.country : undefined,
+      language: typeof data.language === 'string' ? data.language : undefined,
+      tagline: typeof data.tagline === 'string' ? data.tagline : undefined,
+      votes: typeof data.votes === 'number' && Number.isSafeInteger(data.votes) && data.votes >= 0 ? data.votes : undefined,
       posterUrls: Array.isArray(poster) ? poster.filter((value: string) => typeof value === 'string' && value.length > 0) : [],
       fanartUrls: Array.isArray(data.images?.fanart) ? data.images?.fanart?.filter((value: string) => typeof value === 'string' && value.length > 0) : []
     };
