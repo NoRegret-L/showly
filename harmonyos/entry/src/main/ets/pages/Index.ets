@@ -1,3 +1,6 @@
+import { RatingEditor } from './RatingEditor';
+import { RatingTarget,RatingState,RatingRecord } from '../model/RatingRules';
+import { openRatings } from '../data/RatingsRepository';
 import { StatisticsPage } from './StatisticsPage';
 import { StatisticsInput, StatisticsRating } from '../model/StatisticsOwner';
 import { CustomListsPage } from './CustomListsPage';
@@ -257,6 +260,57 @@ struct Index {
   private seasonExtras:SeasonExtrasCoordinator=new SeasonExtrasCoordinator();
   private clearSeasonDetail():void{this.seasonExtras.clear();this.seasonDetailOwner.clear();this.seasonDetail=this.seasonDetailOwner.snapshot();this.episodeRowOwner.clear();}
   private seasonScope(item:Media):string{return JSON.stringify([this.currentSearchAccount(),item.id]);}
+  @State ratingSheetOpen:boolean=false;
+  @State ratingTarget:RatingTarget={kind:'show',id:0,label:''};
+  private ratingTicket:number=0;
+  private ratingScopeCaptured:string='';
+  private ratingDetailCaptured:number=0;
+  private ratingCurrent(ticket:number,scope:string):boolean{return this.ratingSheetOpen&&ticket===this.ratingTicket&&this.pageVisible&&this.currentProgressScope()===scope&&this.detailRevision===this.ratingDetailCaptured;}
+  private closeRating():void{this.ratingTicket++;this.ratingSheetOpen=false;}
+  private openRating(kind:string,id:number,label:string):void{
+    const scope=this.currentProgressScope();if(!scope||!Number.isSafeInteger(id)||id<=0||!this.selectedMedia||this.setupBusy||this.authBusy||this.syncBusy||this.cloudBusy){return;}
+    this.ratingTicket++;this.ratingScopeCaptured=scope;this.ratingDetailCaptured=this.detailRevision;this.ratingTarget={kind:kind,id:id,label:label};this.ratingSheetOpen=true;
+  }
+  private async ratingRead():Promise<RatingState>{
+    const ticket=this.ratingTicket,scope=this.ratingScopeCaptured,target=this.ratingTarget,session=scope==='device'?undefined:traktAuth.session(this.clientId);
+    const current=():boolean=>this.ratingCurrent(ticket,scope)&&(!session||traktAuth.isCurrent(session.clientId,session.generation));
+    const repo=await openRatings(this.context());return repo.inspect(scope,target,session,current);
+  }
+  private async ratingSave(expected:RatingState,value:number):Promise<RatingState>{
+    const ticket=this.ratingTicket,scope=this.ratingScopeCaptured,target=this.ratingTarget,session=scope==='device'?undefined:traktAuth.session(this.clientId);
+    const current=():boolean=>this.ratingCurrent(ticket,scope)&&!this.setupBusy&&!this.authBusy&&!this.syncBusy&&!this.cloudBusy&&(!session||traktAuth.isCurrent(session.clientId,session.generation));
+    const repo=await openRatings(this.context()),state=await repo.change(scope,target,expected,value,session,current);
+    if(current()&&!state.pending){
+      const item=this.selectedMedia;
+      if(item&&(target.kind==='show'||target.kind==='movie')){
+        this.detailOwner.personalRating(this.detailOwner.token(),state.value||undefined,false,state.value?'':'尚未评分');this.publishDetail();
+        this.showRatingRequest.reset();this.movieRatingRequest.reset();this.collectionRatingKey='';this.movieRatingKey='';this.collectionDependencies.sourceChanged(target.kind);
+      }else if(item){await this.reloadPartRatingRows(item);}
+      if(scope!=='device'){this.requestObservation();}else{this.scheduleLazyRows();}
+    }
+    return state;
+  }
+  @Builder ratingSheet(){
+    RatingEditor({target:this.ratingTarget,read:()=>this.ratingRead(),save:(state:RatingState,value:number)=>this.ratingSave(state,value),onClose:()=>{this.closeRating();}})
+  }
+  private async sharedRatings(kind:string,scope:string):Promise<RatingRecord[]>{
+    if(!scope||scope!==this.currentProgressScope()){throw new Error('Rating scope changed');}
+    const session=scope==='device'?undefined:traktAuth.session(this.clientId),source=this.activeCloud();
+    const current=():boolean=>this.pageVisible&&scope===this.currentProgressScope()&&(!session||traktAuth.isCurrent(session.clientId,session.generation));
+    const repo=await openRatings(this.context()),snapshot=await repo.list(scope,kind,session,this.cloudFresh?source?.activity??'':'',current);
+    if(!current()||!snapshot.known){throw new Error('Rating data unavailable');}return snapshot.rows;
+  }
+  private async sharedTitleRatings(kind:string,scope:string):Promise<CollectionRating[]>{
+    return (await this.sharedRatings(kind,scope)).map((row:RatingRecord):CollectionRating=>({id:kind+':'+row.id,value:row.value,ratedAt:row.ratedAt}));
+  }
+  private async reloadPartRatingRows(item:Media):Promise<void>{
+    const scope=this.currentProgressScope(),revision=this.detailRevision,seasonScope=this.seasonScope(item),ratingScope=this.partRatingScope();
+    try{const rows=await Promise.all([this.sharedRatings('season',scope),this.sharedRatings('episode',scope)]);
+      if(this.pageVisible&&revision===this.detailRevision&&this.selectedMedia?.id===item.id&&scope===this.currentProgressScope()&&ratingScope===this.partRatingScope()){
+        this.seasonExtras.presentation.setRatings(seasonScope,ratingScope,rows[0],rows[1]);this.publishSeasonPresentation();
+      }
+    }catch(error){}
+  }
   private partRatingScope():string{return JSON.stringify([this.currentProgressScope(),this.activeCloud()?.generation??-1,this.activeCloud()?.activity??'',this.cloudFresh]);}
   private publishSeasonPresentation():void{this.seasonDetail=this.seasonDetailOwner.touch();this.updateEpisodePageRows();}
   private displaySeasonRows():DetailSeasonRow[]{
@@ -274,6 +328,7 @@ struct Index {
     await this.seasonExtras.load(item,client,scope,consumer,this.presentation,refresh,()=>this.activeCloud(),()=>this.partRatingScope(),
       ()=>this.cloudFresh&&!!this.currentProgressScope(),()=>this.pageVisible&&this.selectedMedia?.id===item.id&&revision===this.detailRevision&&scope===this.seasonScope(item)&&client===this.clientId,
       ()=>{this.publishSeasonPresentation();});
+    if(this.currentProgressScope()==='device'){await this.reloadPartRatingRows(item);}
   }
   private presentationReaders: Map<string, ReadCancel>=new Map<string, ReadCancel>();
   private presentationReaderTasks: Map<string, PresentationTask>=new Map<string, PresentationTask>();
@@ -1271,7 +1326,7 @@ struct Index {
     DetailSeasons({rows:this.displaySeasonRows(),item:item,cacheDir:this.context().cacheDir,presentation:this.seasonExtras.presentation,metadataRevision:this.seasonDetail.revision,special:this.settings?.loadSpecialSeasons()??false,publicStatus:this.seasonExtras.publicStatus,ratingStatus:this.seasonExtras.ratingStatus,ratingScope:this.partRatingScope(),hideRating:this.progressRatingHidden,tapReveal:this.progressTapReveal,onSpecial:()=>{this.toggleSpecialSeasons();},onMetadata:()=>{this.loadSeasonExtras(item,true);},ready:this.episodeReady,busy:this.localBusy,editable:this.effectiveEditable,
       verify:this.localCatalogNeedsVerification,refreshable:!this.cloudBusy&&!this.syncBusy&&!!this.clientId,
       status:this.episodeReady?this.localStatus:this.episodeInitStatus,completed:this.localSeries?.completed??0,count:this.localSeries?.catalog.episodes.length??0,next:this.localSeries?.next??'',
-      onRefresh:()=>{this.loadLocalEpisodes(item,true);},onOpen:(season:number)=>{this.openSeasonPage(season);}})
+      onRefresh:()=>{this.loadLocalEpisodes(item,true);},onOpen:(season:number)=>{this.openSeasonPage(season);},onRate:(id:number,label:string)=>{this.openRating('season',id,label);}})
   }
 
   private currentSeason(): LocalSeasonState | undefined {
@@ -1340,7 +1395,7 @@ struct Index {
       editable:this.localSeason!==0 && this.effectiveEditable && !this.localCatalogNeedsVerification && !this.cloudBusy && !this.syncBusy,
       busy:this.localBusy,status:this.localStatus,onBack:()=>{this.closeSeasonPage();},
       onToggle:(id: number,watched: boolean)=>{this.markSeasonPage(item,watched,id);},
-      onMarkSeason:(watched: boolean)=>{this.markSeasonPage(item,watched);},onQuickProgress:(id:number)=>{this.quickFillTo(item,id);}
+      onMarkSeason:(watched: boolean)=>{this.markSeasonPage(item,watched);},onQuickProgress:(id:number)=>{this.quickFillTo(item,id);},onRate:(id:number,label:string)=>{this.openRating('episode',id,label);}
     })
   }
   private async initializePresentation(context: common.UIAbilityContext): Promise<void> {
@@ -4997,7 +5052,7 @@ struct Index {
     const current = (): boolean => this.movieRatingRequest.current(ticket)&&this.activeCloud() === source && this.movieCalendarData === snapshot &&
       this.currentProgressScope() === scope && traktAuth.isCurrent(session.clientId,session.generation);
     try {
-      const ratings = await readCollectionRatings(session,'movie',source.activity);
+      const ratings = await this.sharedTitleRatings('movie',scope);
       if (!current()) { return; }
       const values = new Map<string,number>();
       for (const rating of ratings) { values.set(rating.id,rating.value); }
@@ -5933,18 +5988,10 @@ struct Index {
     return result;
   }
   private async customListRatings(scope:string):Promise<CollectionRating[]>{
-    const session=traktAuth.session(this.clientId),source=this.activeCloud();
-    if(!session||!source||!this.cloudFresh||scope!==this.currentProgressScope()){return [];}
-    const rows=await Promise.all([readCollectionRatings(session,'show',source.activity),readCollectionRatings(session,'movie',source.activity)]);
-    if(scope!==this.currentProgressScope()||source!==this.activeCloud()||!traktAuth.isCurrent(session.clientId,session.generation)){throw new Error('List rating scope changed');}
-    return rows[0].concat(rows[1]);
+    const rows=await Promise.all([this.sharedTitleRatings('show',scope),this.sharedTitleRatings('movie',scope)]);return rows[0].concat(rows[1]);
   }
   private async statisticsRatings(kind:string,scope:string):Promise<StatisticsRating[]>{
-    const session=traktAuth.session(this.clientId),source=this.activeCloud();
-    if(!session||!source||!this.cloudFresh||scope!==this.currentProgressScope()){throw new Error('Verified account required');}
-    const rows=await readCollectionRatings(session,kind,source.activity);
-    if(scope!==this.currentProgressScope()||source!==this.activeCloud()||!traktAuth.isCurrent(session.clientId,session.generation)||this.tab!=='statistics'){throw new Error('Statistics scope changed');}
-    return rows;
+    return this.sharedTitleRatings(kind,scope);
   }
   private currentCollectionState(): CollectionState {
     return this.collectionScope && this.collectionScope === this.currentProgressScope() ? this.collectionState : emptyCollectionState();
@@ -6100,7 +6147,7 @@ struct Index {
       this.clientId === session.clientId && traktAuth.isCurrent(session.clientId,session.generation);
     try {
       this.collectionRatingStatus = '正在读取个人评分…';
-      const ratings = await readCollectionRatings(session,kind,snapshot.activity);
+      const ratings = await this.sharedTitleRatings(kind,scope);
       if (current()) { this.collectionRatings = ratings; this.collectionRatingStatus = ''; }
     } catch (error) { if (current()) { this.collectionRatingStatus = '个人评分读取失败；可重试。'; } }
     finally {
@@ -6727,6 +6774,7 @@ struct Index {
     this.loadDetailRating(item); this.loadDetailFanart(item); this.loadDetailSummary(item);
   }
   private closeDetail(preserveRelated:boolean=false): void {
+    this.closeRating();
     if(!preserveRelated){this.relatedBack=[];this.relatedOffsets=[];}
     this.detailSession.clear(); this.detailConsumer=this.detailSession.consumer();
     this.detailResumePending=false;
@@ -6758,6 +6806,7 @@ struct Index {
     this.openDetail(previous).then(()=>{const revision=this.detailRevision;this.getUIContext().postFrameCallback(new RestoreScrollFrame(()=>{if(revision===this.detailRevision&&this.selectedMedia?.id===previous.id){try{this.detailScroller.scrollTo({xOffset:0,yOffset:offset,animation:false});}catch(error){}}}));});return true;
   }
   onBackPress(): boolean {
+    if(this.ratingSheetOpen){this.closeRating();return true;}
     if (this.episodePage && this.selectedMedia) { this.closeSeasonPage(); return true; }
     if (this.selectedMedia) {
       if(this.backFromDetail()){return true;}
@@ -6821,18 +6870,12 @@ struct Index {
   }
   private async loadDetailRating(item:Media):Promise<void>{
     if(this.detailUi.ratingBusy){return;}
-    const token=this.detailOwner.token(),scope=this.currentSearchAccount(),source=this.activeCloud(),session=traktAuth.session(this.clientId);
-    const current=():boolean=>this.detailCurrent(token,scope,item)&&this.activeCloud()===source&&(!session||traktAuth.isCurrent(session.clientId,session.generation));
-    if(!current()){return;}
-    if(!source||!session||!this.currentProgressScope()||!this.cloudFresh){this.detailOwner.personalRating(token,undefined,false,'个人评分需验证账户');this.publishDetail();return;}
+    const token=this.detailOwner.token(),scope=this.currentSearchAccount(),ratingScope=this.currentProgressScope();
+    const current=():boolean=>this.detailCurrent(token,scope,item)&&ratingScope===this.currentProgressScope();
+    if(!current()||!ratingScope){return;}
     this.detailOwner.personalRating(token,undefined,true,'正在读取个人评分…');this.publishDetail();
-    try{
-      const ratings=await readCollectionRatings(session,item.kind,source.activity);
-      if(current()){const rating=ratings.find((r:CollectionRating)=>r.id===item.id)?.value;this.detailOwner.personalRating(token,rating,false,rating===undefined?'尚未评分':'');this.publishDetail();}
-    }catch(error){if(current()){this.detailOwner.personalRating(token,undefined,false,'个人评分读取失败，可重试。');this.publishDetail();}}
-    finally{
-      if(this.detailCurrent(token,scope,item)&&!current()){this.detailOwner.personalRating(token,undefined,false,'账户资料已变化，请重试。');this.publishDetail();}
-    }
+    try{const rows=await this.sharedTitleRatings(item.kind,ratingScope);if(current()){const value=rows.find((r:CollectionRating)=>r.id===item.id)?.value;this.detailOwner.personalRating(token,value,false,value===undefined?'尚未评分':'');this.publishDetail();}}
+    catch(error){if(current()){this.detailOwner.personalRating(token,undefined,false,'评分状态未知，可重试。');this.publishDetail();}}
   }
   private async loadDetailFanart(item:Media):Promise<void>{
     if(this.detailUi.artBusy){return;}
@@ -6973,6 +7016,7 @@ struct Index {
         DetailRelatedSection({item:item,client:this.clientId,scope:this.currentSearchAccount(),cacheDir:this.context().filesDir,repository:this.presentation,
           hiddenKey:this.hiddenVersion('show'),onOpen:(related:Media)=>{this.openRelatedDetail(related);}})
       },(key:string)=>key)
+      Button('我的评分').fontSize(14).enabled(!!this.currentProgressScope()&&!this.syncBusy&&!this.cloudBusy).onClick(()=>{this.openRating(item.kind,Number(item.id.substring(item.kind.length+1)),this.displayTitle(item));})
       if(this.detailUi.ratingBusy){LoadingProgress().width(24).height(24)}
       if(this.detailUi.rating!==undefined){Text('我的评分：'+this.detailUi.rating+' / 10').fontSize(15).width('100%')}
       if(this.detailUi.ratingStatus){Text(this.detailUi.ratingStatus).fontSize(12).width('100%')}
@@ -7302,5 +7346,6 @@ struct Index {
       }.padding({ left: 12, right: 12, top: 4, bottom: 4 }).width('100%')
         .backgroundColor($r('app.color.showly_surface'))
     }.width('100%').height('100%').backgroundColor($r('app.color.showly_background'))
+      .bindSheet($this.ratingSheetOpen,this.ratingSheet(),{height:SheetSize.MEDIUM,showClose:true})
   }
 }

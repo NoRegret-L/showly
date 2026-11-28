@@ -31,6 +31,7 @@ export struct DetailSeasons{
   onMetadata:()=>void=()=>{};
   onRefresh:()=>void=()=>{};
   onOpen:(season:number)=>void=()=>{};
+  onRate:(id:number,label:string)=>void=()=>{};
   build(){
     Column({space:8}){
       Row(){
@@ -61,6 +62,7 @@ export struct DetailSeasons{
                   .onClick(()=>{if(this.tapReveal){this.revealed.add(row.number);this.revealRevision++;}})
               }
               if(this.presentation.seasonRating(row.number,this.ratingScope)!==undefined){Text('我的评分 '+this.presentation.seasonRating(row.number,this.ratingScope)).fontSize(12)}
+              if(this.presentation.season(row.number)?.id){Button('评分').fontSize(11).height(28).onClick(()=>{const info=this.presentation.season(row.number);if(info){this.onRate(info.id,row.number===0?'特别篇':'第 '+row.number+' 季');}})}
               if(row.count>0){Progress({value:row.completed,total:row.count,type:ProgressType.Linear}).width('100%').color($r('app.color.showly_accent'))}
             }.layoutWeight(1)
             Text(row.count>0&&row.completed===row.count?'✓':'›').fontSize(20)

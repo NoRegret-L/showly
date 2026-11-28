@@ -24,7 +24,7 @@ export function parseSeasonPresentation(raw:string):SeasonInfo[]{
   }
   return seasons.sort((a:SeasonInfo,b:SeasonInfo)=>b.number-a.number);
 }
-export interface PartRating {id:number;value:number;}
+export interface PartRating {id:number;value:number;ratedAt?:number;}
 export class SeasonPresentationOwner{
   private scope:string='';private seasons:Map<number,SeasonInfo>=new Map<number,SeasonInfo>();private episodes:Map<number,EpisodeInfo>=new Map<number,EpisodeInfo>();
   private seasonRatings:Map<number,number>=new Map<number,number>();private episodeRatings:Map<number,number>=new Map<number,number>();

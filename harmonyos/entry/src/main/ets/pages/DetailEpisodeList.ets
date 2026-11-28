@@ -29,6 +29,7 @@ export struct DetailEpisodeList {
   onToggle: (id: number,watched: boolean)=>void=()=>{};
   onMarkSeason: (watched: boolean)=>void=()=>{};
   onQuickProgress:(id:number)=>void=()=>{};
+  onRate:(id:number,label:string)=>void=()=>{};
   build() {
     List({ space: 8 }) {
       ListItem() {
@@ -64,6 +65,7 @@ export struct DetailEpisodeList {
               if(row.runtime!==undefined){Text(row.runtime+' 分钟').fontSize(11)}
               if(row.rating!==undefined){Text('★ '+collectionSpoilerText(row.rating.toFixed(1),this.hideRating,this.revealed===row.id,true)).fontSize(12)}
               if(row.myRating!==undefined){Text('我的评分 '+row.myRating).fontSize(12)}
+              Button('评分').fontSize(11).height(28).onClick(()=>{this.onRate(row.id,'第 '+this.season+' 季 · 第 '+row.number+' 集');})
               if(row.eligible===false){Text('待播、特别篇或未验证 · 只读').fontSize(11).width('100%')}
               Button(this.selected===row.id?'收起详情':'分集详情').fontSize(11).height(28).onClick(()=>{this.selected=this.selected===row.id?0:row.id;})
               if(this.selected===row.id&&row.overview){Text(collectionSpoilerText(row.overview,this.hideTitle&&!row.watched,this.revealed===row.id)).fontSize(12)}

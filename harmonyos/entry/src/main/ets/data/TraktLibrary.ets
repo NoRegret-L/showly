@@ -234,7 +234,7 @@ export async function readPartRatings(session:TraktSession,kind:string,activity:
       const part=kind==='seasons'?row.season:row.episode;
       const id=part?.ids?.trakt,value=row.rating;
       if(id===undefined||!Number.isSafeInteger(id)||id<=0||seen.has(id)||value===undefined||!Number.isInteger(value)||value<1||value>10){throw new Error('Invalid part rating');}
-      seen.add(id);values.push({id:id,value:value});
+      const ratedAt=Date.parse(row.rated_at??'');seen.add(id);values.push({id:id,value:value,ratedAt:Number.isFinite(ratedAt)&&ratedAt>0?ratedAt:undefined});
     }
     if(await readActivity(session)!==activity){throw new Error('Activity changed');}
     ensureCurrent(session);return values;
