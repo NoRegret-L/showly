@@ -14,7 +14,7 @@ jobs:
       fail-fast: false
       matrix:
         order: [default-first, optimized-first]
-        property: [ohos.arkCompile.noEmitJs, ohos.nativeResolver]
+        property: [ohos.arkCompile.noEmitJs]
     env:
       GH_TOKEN: ${{ github.token }}
       ORDER: ${{ matrix.order }}
@@ -58,6 +58,7 @@ jobs:
              start=$(date +%s%N)
              /usr/bin/time -v hvigorw assembleHap --mode module -p module=entry@default -p product=default -p buildMode=debug --no-daemon "${flags[@]}"
              echo "$mode native cold nanoseconds=$(( $(date +%s%N)-start ))" | tee -a "$GITHUB_STEP_SUMMARY"
+             python3 -c 'import pathlib; p=list(pathlib.Path("entry/build").rglob("*.js")); print("Intermediate JS files:",len(p),"bytes:",sum(x.stat().st_size for x in p))' | tee -a "$GITHUB_STEP_SUMMARY"
              hap="$(find entry/build -type f -name '*.hap' -print -quit)"
              test -s "$hap"; cp "$hap" "$RUNNER_TEMP/$mode.hap")
           done

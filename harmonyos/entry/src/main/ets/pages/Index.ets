@@ -1,3 +1,5 @@
+import { GalleryTarget } from '../model/GalleryRules';
+import { GalleryPage } from './GalleryPage';
 import { CommentTarget } from '../model/CommentRules';
 import { CommentsPage } from './CommentsPage';
 import { WatchOptions } from '../model/AvailabilityRules';
@@ -325,6 +327,13 @@ struct Index {
   private commentCurrent():boolean{return this.commentSheetOpen&&this.pageVisible&&this.commentScope===this.currentProgressScope()&&this.commentRevision===this.detailRevision&&this.commentClient===this.clientId;}
   private openComments(t:CommentTarget):void{if(!this.clientId||!this.selectedMedia){return;}this.commentScope=this.currentProgressScope();this.commentRevision=this.detailRevision;this.commentClient=this.clientId;this.commentTarget=t;this.commentSheetOpen=true;}
   @Builder commentSheet(){CommentsPage({target:this.commentTarget,client:this.commentClient,scope:this.commentScope,session:()=>this.commentScope.startsWith('account:')?traktAuth.session(this.commentClient):undefined,current:()=>this.commentCurrent()&&!this.setupBusy&&!this.authBusy,onClose:()=>{this.commentSheetOpen=false;}})}
+  @State gallerySheetOpen:boolean=false;
+  @State galleryTarget:GalleryTarget={item:{id:'',kind:'show',title:'',year:0,watched:false},type:'poster',hints:[],initialUri:''};
+  private galleryRevision:number=0;
+  private galleryScope:string='';
+  private openMediaGallery(item:Media,type:string):void{this.galleryRevision=this.detailRevision;this.galleryScope=this.currentSearchAccount();this.galleryTarget={item:item,type:type,hints:type==='poster'?this.detailUi.summary?.posterUrls??[]:this.detailUi.summary?.fanartUrls??[],initialUri:type==='poster'?this.artwork(item):this.detailUi.fanart};this.gallerySheetOpen=true;}
+  private galleryCurrent():boolean{return this.gallerySheetOpen&&this.pageVisible&&this.galleryRevision===this.detailRevision&&this.galleryScope===this.currentSearchAccount();}
+  @Builder gallerySheet(){GalleryPage({target:this.galleryTarget,client:this.clientId,current:()=>this.galleryCurrent(),onClose:()=>{this.gallerySheetOpen=false;}})}
   private partRatingScope():string{return JSON.stringify([this.currentProgressScope(),this.activeCloud()?.generation??-1,this.activeCloud()?.activity??'',this.cloudFresh]);}
   private publishSeasonPresentation():void{this.seasonDetail=this.seasonDetailOwner.touch();this.updateEpisodePageRows();}
   private displaySeasonRows():DetailSeasonRow[]{
@@ -6791,6 +6800,7 @@ struct Index {
     this.loadDetailRating(item); this.loadDetailFanart(item); this.loadDetailSummary(item);
   }
   private closeDetail(preserveRelated:boolean=false): void {
+    this.gallerySheetOpen=false;
     this.commentSheetOpen=false;
     this.closeRating();
     if(!preserveRelated){this.relatedBack=[];this.relatedOffsets=[];}
@@ -6824,6 +6834,7 @@ struct Index {
     this.openDetail(previous).then(()=>{const revision=this.detailRevision;this.getUIContext().postFrameCallback(new RestoreScrollFrame(()=>{if(revision===this.detailRevision&&this.selectedMedia?.id===previous.id){try{this.detailScroller.scrollTo({xOffset:0,yOffset:offset,animation:false});}catch(error){}}}));});return true;
   }
   onBackPress(): boolean {
+    if(this.gallerySheetOpen){this.gallerySheetOpen=false;return true;}
     if(this.commentSheetOpen){this.commentSheetOpen=false;return true;}
     if(this.ratingSheetOpen){this.closeRating();return true;}
     if (this.episodePage && this.selectedMedia) { this.closeSeasonPage(); return true; }
@@ -7020,6 +7031,7 @@ struct Index {
         onPosterFailure:(uri:string)=>{this.artworkFailed(item,uri);},
         onFanartFailure:(uri:string)=>{if(this.detailFanart.failed(item.id,uri)){this.detailOwner.artwork(this.detailOwner.token(),'',false,'背景图读取失败');this.publishDetail();}}})
       if(isTraktMedia(item)){
+        Row({space:6}){Button('海报图库').fontSize(12).layoutWeight(1).onClick(()=>{this.openMediaGallery(item,'poster');});Button('背景图图库').fontSize(12).layoutWeight(1).onClick(()=>{this.openMediaGallery(item,'fanart');})}.width('100%')
         this.mediaStateView(item)
         ForEach([JSON.stringify([this.currentProgressScope(),item.id,this.detailRevision])],(_key:string)=>{
           CustomListsPage({scope:this.currentProgressScope(),client:this.clientId,language:this.presentationLanguage,manage:true,selectedItem:item,
@@ -7371,5 +7383,6 @@ struct Index {
     }.width('100%').height('100%').backgroundColor($r('app.color.showly_background'))
       .bindSheet($$this.ratingSheetOpen,this.ratingSheet(),{height:SheetSize.MEDIUM,showClose:true})
       .bindSheet($$this.commentSheetOpen,this.commentSheet(),{height:SheetSize.LARGE,showClose:true})
+      .bindSheet($$this.gallerySheetOpen,this.gallerySheet(),{height:SheetSize.LARGE,showClose:true})
   }
 }

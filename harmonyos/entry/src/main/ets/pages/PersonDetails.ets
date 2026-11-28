@@ -1,3 +1,5 @@
+import { GalleryTarget } from '../model/GalleryRules';
+import { GalleryPage } from './GalleryPage';
 import { common } from '@kit.AbilityKit';
 import { Media } from '../model/Media';
 import { PersonRow } from '../model/DetailSections';
@@ -21,6 +23,8 @@ export struct PersonDetails{
   onBack:()=>void=()=>{};
   onOpen:(media:Media)=>void=()=>{};
   @State profile?:PersonProfile=undefined;
+  @State galleryOpen:boolean=false;
+  @State galleryTarget:GalleryTarget={item:{id:'',kind:'person',title:'',year:0,watched:false},type:'profile',hints:[],initialUri:''};
   @State status:string='';
   @State busy:boolean=false;
   @State kind:string='all';
@@ -50,6 +54,8 @@ export struct PersonDetails{
     finally{if(this.allowed(signal)){this.busy=false;}}
   }
   private portrait():PersonRow{return {key:this.person.key,personId:this.person.personId,tmdb:this.profile?.identity.tmdb??this.person.tmdb,name:this.profile?.name??this.person.name,department:this.person.department,roles:this.person.roles,headshots:this.profile?.headshots.length?this.profile.headshots:this.person.headshots};}
+  private openPersonGallery():void{const p=this.portrait();this.galleryTarget={item:{id:'person:'+p.personId,kind:'person',title:p.name,year:0,watched:false},type:'profile',tmdb:p.tmdb,hints:p.headshots??[],initialUri:''};this.galleryOpen=true;}
+  @Builder personGallery(){GalleryPage({target:this.galleryTarget,client:this.client,current:()=>this.active&&this.current()&&this.galleryOpen,onClose:()=>{this.galleryOpen=false;}})}
   private async external(tmdb:boolean):Promise<void>{
     const id=this.profile?.identity.tmdb??this.person.tmdb;if(tmdb&&(!id||!Number.isSafeInteger(id)||id<=0)){return;}
     try{await (this.getUIContext().getHostContext() as common.UIAbilityContext).startAbility({action:'ohos.want.action.viewData',uri:tmdb?'https://www.themoviedb.org/person/'+id:'https://trakt.tv/people/'+this.person.personId});}catch(error){this.status='无法打开外部链接';}
@@ -63,6 +69,7 @@ export struct PersonDetails{
             if(this.profile?.birthday){Text('出生：'+this.profile.birthday).fontSize(12)}
             if(this.profile?.death){Text('逝世：'+this.profile.death).fontSize(12)}
             if(this.profile?.birthplace){Text(this.profile.birthplace).fontSize(12)}
+            Button('人物图库').fontSize(11).onClick(()=>{this.openPersonGallery();})
             Row({space:4}){Button('Trakt').fontSize(11).onClick(()=>this.external(false));if(this.profile?.identity.tmdb||this.person.tmdb){Button('TMDB').fontSize(11).onClick(()=>this.external(true));}}
           }.layoutWeight(1).alignItems(HorizontalAlign.Start)
         }.width('100%')}
@@ -80,6 +87,6 @@ export struct PersonDetails{
           else{Text(r.group).fontSize(17).fontWeight(FontWeight.Bold).width('100%')}
         }},(r:PersonCreditRow)=>this.source.keyFor(r.key))
       }.width('100%').layoutWeight(1)
-    }.width('100%').height('100%').padding(16)
+    }.width('100%').height('100%').padding(16).bindSheet($$this.galleryOpen,this.personGallery(),{height:SheetSize.LARGE,showClose:true})
   }
 }

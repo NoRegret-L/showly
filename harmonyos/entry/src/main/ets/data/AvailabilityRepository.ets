@@ -9,6 +9,7 @@ import { checkPresentationService,presentationHttpError,traktPresentationService
 let tmdbToken:string='';let credentialVersion:number=0;
 export function configureTmdb(value:string):number{const token=value.trim();if(token&&!/^[A-Za-z0-9._~-]+$/.test(token)){throw new Error('Invalid token format');}tmdbToken=token;credentialVersion++;return credentialVersion;}
 export function tmdbConfigured():boolean{return !!tmdbToken;}
+export function tmdbCredentialVersion():number{return credentialVersion;}
 interface CacheRow{raw:string;at:number;}
 interface TraktHeaders{'Content-Type':string;'trakt-api-version':string;'trakt-api-key':string;}
 interface TmdbHeaders{Authorization:string;Accept:string;}
@@ -38,6 +39,14 @@ export class AvailabilityRepository{
    const raw=await this.flights.run(flightKey,async(scope:ReadCancel):Promise<string>=>{const data=await fetcher(scope);parse(data);scope.check();await this.db.executeSql('INSERT OR REPLACE INTO availability_cache(cache_key,payload,observed_at) VALUES(?,?,?)',[key,data,Date.now()]);return data;},signal);
    signal.check();return {rows:parse(raw),cached:false,stale:false};
   }catch(error){signal.check();if(previous){return {rows:previous,cached:true,stale:true};}throw new Error('Public detail unavailable');}
+ }
+ async galleryIdentity(item:Media,client:string,signal:ReadCancel):Promise<number>{
+  const n=mediaNumber(item),kind=item.kind==='show'?'shows':'movies',key='identity:'+item.id;
+  const value=await this.cached<number>(key,JSON.stringify([client,key]),SERIES_AGE,false,signal,(raw:string)=>[parseTmdbIdentity(raw,item)],(scope:ReadCancel)=>this.fetch(kind+'/'+n+'?extended=full',client,false,0,scope));return value.rows[0];
+ }
+ async galleryImages(kind:string,tmdb:number,version:number,signal:ReadCancel):Promise<string>{
+  if(!['movie','tv','person'].includes(kind)||!Number.isSafeInteger(tmdb)||tmdb<=0){throw new Error('Invalid TMDB gallery identity');}
+  return this.fetch(kind+'/'+tmdb+'/images','',true,version,signal);
  }
  async providers(item:Media,client:string,region:string,refresh:boolean,signal:ReadCancel):Promise<PublicRead<Provider>>{
   const n=mediaNumber(item),kind=item.kind==='show'?'shows':'movies',version=credentialVersion;

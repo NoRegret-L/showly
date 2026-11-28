@@ -1,3 +1,4 @@
+import { tmdbArtworkUrl } from '../model/GalleryRules';
 import { util } from '@kit.ArkTS';
 import { cryptoFramework } from '@kit.CryptoArchitectureKit';
 import { image } from '@kit.ImageKit';
@@ -149,6 +150,7 @@ export interface PosterResult {
 // The API examples and CDN hosts change over time. Validate the authority and
 // traversal-safe path, not the provider's internal ID/size directory layout.
 function normalizePoster(raw: string): string {
+  const tmdb=tmdbArtworkUrl(raw.trim());if(tmdb){return tmdb;}
   const value = raw.trim();
   if (!value || /[\s\\#\x00-\x1f\x7f]/.test(value)) {
     return '';
@@ -208,7 +210,8 @@ function networkError(code: number): string {
 const rejectedPosterUris: Set<string>=new Set<string>();
 export function rejectPosterUri(uri: string): void { if (uri) { rejectedPosterUris.add(uri); } }
 export async function posterPath(cacheDir: string,item: Media,url: string,type:string='poster'): Promise<string> {
-  const key=type==='poster'?artworkIdentity('trakt','poster',item.id,url):artworkIdentity('trakt','fanart',item.id,url);
+  const source=tmdbArtworkUrl(url)?'tmdb':'trakt';
+  const key=type==='poster'?artworkIdentity(source,'poster',item.id,url):artworkIdentity(source,'fanart',item.id,url);
   // normalizePoster accepts ASCII paths and authority; encode UTF-8 explicitly
   // for query strings as well, without storing signed URLs in file names.
   const data=new util.TextEncoder().encodeInto(key);
@@ -250,6 +253,7 @@ export async function cachedPoster(cacheDir: string, item: Media, candidates: st
   // Existing offline files are a compatibility fallback only. Never promote
   // them to the new exact identity, and reject ambiguous legacy basenames.
   for (const url of urls) {
+    if(tmdbArtworkUrl(url)){continue;}
     const name=legacyPosterName(url);
     if (urls.filter((other: string)=>legacyPosterName(other)===name).length!==1) { continue; }
     const path=cacheDir+'/showly_poster_'+item.kind+'_'+item.id.substring(item.kind.length+1)+'_'+name;
@@ -259,7 +263,7 @@ export async function cachedPoster(cacheDir: string, item: Media, candidates: st
 }
 export async function cachePoster(cacheDir: string, item: Media, candidates: string[], consumer?: ReadCancel,type:string='poster'): Promise<PosterResult> {
   const selected=candidates.map((candidate: string)=>normalizePoster(candidate)).find((url: string)=>!!url)??'';
-  const key=JSON.stringify([cacheDir,artworkIdentity('trakt',type,item.id,selected),selected?'':candidates[0]??'']);
+  const key=JSON.stringify([cacheDir,artworkIdentity(tmdbArtworkUrl(selected)?'tmdb':'trakt',type,item.id,selected),selected?'':candidates[0]??'']);
   return posterFlights.run(key,(scope: ReadCancel)=>downloadPoster(cacheDir,item,candidates,scope,type),consumer);
 }
 async function downloadPoster(cacheDir: string, item: Media, candidates: string[], scope: ReadCancel,type:string): Promise<PosterResult> {

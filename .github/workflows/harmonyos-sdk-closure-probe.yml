@@ -1,0 +1,75 @@
+name: HarmonyOS SDK traced dependency closure
+on:
+  push:
+    branches: [harmonyos-bootstrap]
+    paths: ['.github/workflows/harmonyos-sdk-closure-probe.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  pair:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+          sparse-checkout: harmonyos
+      - name: Prepare verified streaming SDK
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/verified-sdk"
+          mkdir "$dir"
+          cd "$dir"
+          file=ohos-sdk-linux-amd64.tar.gz
+          gh release download 6.1.1.280 --repo ErBWs/ohos-sdk --pattern "$file.a?" --pattern "$file.sha256"
+          digest="$(awk 'NR==1 {print $1}' "$file.sha256")"
+          [[ "$digest" =~ ^[a-fA-F0-9]{64}$ ]]
+          actual="$(cat "$file.aa" "$file.ab" | sha256sum | cut -d' ' -f1)"
+          test "$actual" = "$digest"
+          start=$(date +%s%N)
+          cat "$file.aa" "$file.ab" | pigz -dc | tar -xf -
+          echo "full extraction nanoseconds=$(( $(date +%s%N)-start ))" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "$dir/command-line-tools/bin" >> "$GITHUB_PATH"
+          echo "$dir/command-line-tools/tool/node/bin" >> "$GITHUB_PATH"
+          echo "DEVECO_SDK_HOME=$dir/command-line-tools/sdk" >> "$GITHUB_ENV"
+          echo "HOS_SDK_HOME=$dir/command-line-tools/sdk" >> "$GITHUB_ENV"
+      - name: Trace baseline and test independent filtered extraction
+        run: |
+          set -euo pipefail
+          command -v strace || { sudo apt-get update -qq; sudo apt-get install -y strace; }
+          dir="$RUNNER_TEMP/verified-sdk"
+          file=ohos-sdk-linux-amd64.tar.gz
+          build=(hvigorw assembleHap --mode module -p module=entry@default -p product=default -p buildMode=debug --no-daemon --optimization-strategy=performance)
+          (cd harmonyos
+           ohpm install --all
+           strace -ff -yy -s 4096 -e trace=%file,getdents64 -o "$RUNNER_TEMP/sdktrace" "${build[@]}"
+           hap="$(find entry/build -type f -name '*.hap' -print -quit)"
+           test -s "$hap"; cp "$hap" "$RUNNER_TEMP/full.hap")
+          python3 harmonyos/tools/sdk_trace_closure.py "$dir" "$RUNNER_TEMP/sdktrace" "$RUNNER_TEMP/sdk-excludes.txt" | tee -a "$GITHUB_STEP_SUMMARY"
+          test -s "$RUNNER_TEMP/sdk-excludes.txt" || { echo "No conservative exclusions found"; exit 1; }
+          git clean -fdx -- harmonyos
+          (cd "$dir"
+           rm -rf command-line-tools
+           start=$(date +%s%N)
+           cat "$file.aa" "$file.ab" | pigz -dc | tar --exclude-from="$RUNNER_TEMP/sdk-excludes.txt" -xf -
+           echo "filtered extraction nanoseconds=$(( $(date +%s%N)-start ))" | tee -a "$GITHUB_STEP_SUMMARY")
+          (cd harmonyos
+           ohpm install --all
+           start=$(date +%s%N)
+           "${build[@]}"
+           echo "filtered cold HAP nanoseconds=$(( $(date +%s%N)-start ))" | tee -a "$GITHUB_STEP_SUMMARY"
+           hap="$(find entry/build -type f -name '*.hap' -print -quit)"
+           test -s "$hap"; cp "$hap" "$RUNNER_TEMP/filtered.hap")
+          python3 - "$RUNNER_TEMP/full.hap" "$RUNNER_TEMP/filtered.hap" <<'PY'
+          import sys,zipfile,hashlib
+          def manifest(path):
+              with zipfile.ZipFile(path) as z:
+                  assert z.testzip() is None
+                  return {n:hashlib.sha256(z.read(n)).hexdigest() for n in z.namelist() if not n.endswith('/')}
+          a,b=map(manifest,sys.argv[1:])
+          assert a==b,sorted(k for k in a.keys()|b.keys() if a.get(k)!=b.get(k))
+          print('Traced SDK candidate HAP entries equivalent')
+          PY
