@@ -7145,11 +7145,13 @@ struct Index {
           else { this.nextShowsView() }
         } else if (!this.selectedMedia && this.tab === 'library') {
           if(this.collectionFilter==='lists'){
-            ForEach([this.currentProgressScope()],(scope:string)=>{
-              CustomListsPage({scope:scope,client:this.clientId,language:this.presentationLanguage,presentation:this.presentation,
-                current:()=>this.pageVisible&&this.currentProgressScope()===scope&&this.tab==='library'&&this.collectionFilter==='lists'&&!this.selectedMedia,
-                onBack:()=>{this.chooseCollection('mine');},onOpen:(item:Media)=>{this.openDetail(item);}})
-            },(scope:string)=>scope)
+            Column(){
+              ForEach([this.currentProgressScope()],(scope:string)=>{
+                CustomListsPage({scope:scope,client:this.clientId,language:this.presentationLanguage,presentation:this.presentation,
+                  current:()=>this.pageVisible&&this.currentProgressScope()===scope&&this.tab==='library'&&this.collectionFilter==='lists'&&!this.selectedMedia,
+                  onBack:()=>{this.chooseCollection('mine');},onOpen:(item:Media)=>{this.openDetail(item);}})
+              },(scope:string)=>scope)
+            }.width('100%').height('100%')
           }else{this.collectionView()}
         } else if (!this.selectedMedia && this.tab === 'discover') {
           this.discoverView()

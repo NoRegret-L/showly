@@ -22,3 +22,10 @@ for name in ("DetailPeopleSection","DetailRelatedSection"):
     code=(root/"entry/src/main/ets/pages"/(name+".ets")).read_text()
     assert "private visibility(" not in code and "this.updateSectionVisibility(visible&&ratio>0)" in code
 print("Detail section ArkTS named types and component visibility assertions passed")
+
+# Refresh accepts exactly one child per branch. Account-keyed ForEach must
+# stay inside the single Column, not be a direct child of Refresh.
+refresh=p.split("Refresh({ refreshing: $$this.refreshing })",1)[1]
+assert "if(this.collectionFilter==='lists'){\n            Column(){\n              ForEach([this.currentProgressScope()]" in refresh
+assert "},(scope:string)=>scope)\n            }.width('100%').height('100%')" in refresh
+print("Custom lists Refresh single-child branch assertion passed")
