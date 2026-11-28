@@ -52,6 +52,14 @@ export class RatingsRepository{
     await this.verify(scope,session,current);if(await readActivity(session)!==activity||!validRatingRows(rows)){throw new Error('Rating observation changed');}
     return {known:true,activity:activity,rows:rows};
   }
+  // Explicit sync never mistakes a retained stale cache for a fresh import.
+  refreshVerified(scope:string,kind:string,session:TraktSession,current:()=>boolean):Promise<RatingSnapshot>{
+    return this.serial(async():Promise<RatingSnapshot>=>{
+      this.guard(scope,kind,current);const old=await this.disk(scope,kind);
+      const next=await this.remote(scope,kind,session,current);
+      await this.persist(scope,kind,old,next,current);return next;
+    });
+  }
   list(scope:string,kind:string,session:TraktSession|undefined,activity:string,current:()=>boolean):Promise<RatingSnapshot>{
     return this.serial(async():Promise<RatingSnapshot>=>{
       this.guard(scope,kind,current);const old=await this.disk(scope,kind);

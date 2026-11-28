@@ -5,6 +5,7 @@ import { QueueEntry } from '../data/EpisodeStore';
 @Component
 export struct SyncStatusPanel {
   @Prop busy: boolean = false;
+  @Prop details: boolean = false;
   @Prop cloudBusy: boolean = false;
   @Prop cloudText: string = '';
   @Prop bound: boolean = false;
@@ -50,41 +51,28 @@ export struct SyncStatusPanel {
       this.scheduleStatus=ok ? '后台只读授权已更新' : '未改变授权：请确认账户或等待当前核对完成';
     } finally { this.setting=false; }
   }
+  private periodLabel(hours:number):string { return hours===0?'关闭':hours<24?hours+'小时':(hours/24)+'天'; }
   build() {
     Column({space: 8}) {
-      if (this.busy || this.cloudBusy) {
-        Row({space: 8}) {
-          LoadingProgress().width(22).height(22)
-          Text(this.cloudBusy ? '正在核对云端版本' : '正在处理同步任务').fontSize(13).layoutWeight(1)
-        }.width('100%')
-      }
+      Button(this.hours===0?'定时同步时间':'定时同步：'+this.periodLabel(this.hours))
+        .fontSize(14).enabled(!this.setting&&!this.busy&&!this.cloudBusy)
+        .onClick(()=>{
+          const choices:SheetInfo[]=SYNC_PERIODS.map((hours:number):SheetInfo=>({
+            title:(hours===this.hours?'✓ ':'')+this.periodLabel(hours),action:()=>{this.updateSchedule(hours);}
+          }));
+          this.getUIContext().showActionSheet({title:'定时同步时间',message:'实际执行由系统决定；后台只读需单独授权。',autoCancel:true,sheets:choices});
+        })
+      if(this.lastVerified>0){Text('上次云端核对：'+new Date(this.lastVerified).toLocaleString()).fontSize(12).textAlign(TextAlign.Center)}
+      if(this.scheduleStatus){Text(this.scheduleStatus).fontSize(12).textAlign(TextAlign.Center)}
+      if(this.details){
       Text(this.cloudText).fontSize(12).width('100%')
       if (this.bound) {
-        Row({space: 12}) {
-          Text('待发送 ' + this.rows.filter((row: QueueEntry)=>!row.blocked).length).fontSize(14).layoutWeight(1)
-          Text('待核对/受保护 ' + this.rows.filter((row: QueueEntry)=>row.blocked).length).fontSize(14).layoutWeight(1)
+        Row({space:12}){
+          Text('待发送 '+this.rows.filter((row:QueueEntry)=>!row.blocked).length).fontSize(14).layoutWeight(1)
+          Text('待核对/受保护 '+this.rows.filter((row:QueueEntry)=>row.blocked).length).fontSize(14).layoutWeight(1)
         }.width('100%')
-        if (this.lastUpload > 0) {
-          Text('最近完整分集上传确认：' + new Date(this.lastUpload).toLocaleString()).fontSize(12).width('100%')
-        }
+        if(this.lastUpload>0){Text('最近完整分集上传确认：'+new Date(this.lastUpload).toLocaleString()).fontSize(12).width('100%')}
       }
-      if (this.lastVerified > 0) {
-        Text('上次成功核对云端：' + new Date(this.lastVerified).toLocaleString()).fontSize(12).width('100%')
-      }
-      Text('系统定时同步').fontSize(14).width('100%')
-      Text(this.hours === 0 ? '关闭' : '每 ' + this.hours + ' 小时，实际由系统决定').fontSize(12).width('100%')
-      Row({space: 4}) {
-        ForEach(SYNC_PERIODS.slice(0,4),(h: number)=>{
-          Button(h === 0 ? '关闭' : h + '小时').fontSize(12).layoutWeight(1).enabled(!this.setting && h !== this.hours)
-            .onClick(()=>{this.updateSchedule(h);})
-        },(h: number)=>h.toString())
-      }.width('100%')
-      Row({space: 4}) {
-        ForEach(SYNC_PERIODS.slice(4),(h: number)=>{
-          Button(h/24 + '天').fontSize(12).layoutWeight(1).enabled(!this.setting && h !== this.hours)
-            .onClick(()=>{this.updateSchedule(h);})
-        },(h: number)=>h.toString())
-      }.width('100%')
       if (this.wake > 0) { Text('最近系统唤醒：' + new Date(this.wake).toLocaleString()).fontSize(12).width('100%') }
       if (this.scheduleStatus) { Text(this.scheduleStatus).fontSize(12).width('100%') }
       if (this.bound) {
@@ -100,6 +88,7 @@ export struct SyncStatusPanel {
         }
       }
       Text('未授权后台读取时，仅记录系统唤醒，前台按原有授权核对。').fontSize(12).width('100%')
+      }
     }.width('100%')
   }
 }

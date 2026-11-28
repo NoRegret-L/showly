@@ -1,5 +1,8 @@
 import { readPreparedObservation } from '../data/BackgroundObservation';
 import { SyncStatusPanel } from './SyncStatusPanel';
+import { syncDirections } from '../model/ManualSync';
+import { openCustomLists } from '../data/CustomListsRepository';
+import { readCustomLists } from '../data/TraktCustomLists';
 import { lastScheduleWake } from '../data/SyncSchedule';
 import { executeEpisodeQueue } from '../data/EpisodeQueueExecutor';
 import { SyncCoordinator, syncService } from '../model/SyncCoordinator';
@@ -595,6 +598,13 @@ struct Index {
   @State @Watch('onRecoveryGateChanged') cloudBusy: boolean = false;
   @State cloudStatus: string = '';
   @State advancedSync: boolean = false;
+  @State manualImport: boolean = true;
+  @State manualExport: boolean = true;
+  @State manualRunning: boolean = false;
+  @State manualStatus: string = '';
+  @State quickSettingsOpen: boolean = false;
+  @State quickChanging: boolean = false;
+  private manualSignal: ReadCancel = new ReadCancel();
   @State libraryNotice: string = '';
   private settings?: ClientSettings;
   @State watchOptions:WatchOptions={enabled:false,region:'us'};
@@ -871,6 +881,7 @@ struct Index {
   // A busy auth/DB/sync operation no longer drops the network-resume event.
   // Coalesce to a single pending event, not a periodic retry loop.
   private onObservationAuthChanged(): void {
+    if (this.manualRunning && !this.signedIn) { this.manualSignal.cancel(); }
     if (this.cloud && this.cloudUuid && traktAuth.cachedAccount(this.clientId)===this.cloudUuid) {
       if (!this.activeCloud()) { this.cloudFresh=false; }
       if (this.signedIn && !this.cloudBusy) { this.requestObservation(); }
@@ -967,6 +978,97 @@ struct Index {
     } catch (error) { return false; }
   }
 
+  private syncPageBusy(): boolean {
+    return this.manualRunning || this.quickChanging || this.syncBusy || this.cloudBusy || this.localBusy ||
+      this.authBusy || this.setupBusy || this.backupBusy || this.saving || syncService.busy();
+  }
+
+  private async runManualSync(): Promise<void> {
+    const direction=syncDirections(this.manualImport,this.manualExport);
+    if (!direction || this.syncPageBusy() || !this.ready || !this.episodeReady || !this.clientId) { return; }
+    if (!this.signedIn) { this.beginSyncLogin(); return; }
+    this.manualRunning=true;
+    this.manualStatus='正在核对同步账户…';
+    this.manualSignal.cancel(); this.manualSignal=new ReadCancel();
+    const signal=this.manualSignal, client=this.clientId;
+    const session=traktAuth.session(client);
+    const store=this.episodeStore;
+    try {
+      if (!session || !store) { throw new Error('Session unavailable'); }
+      const account=await readSyncAccount(session);
+      const current=():boolean=>this.clientId===client && this.signedIn && !signal.cancelled() &&
+        traktAuth.isCurrent(client,session.generation);
+      if (!current()) { throw new Error('Account changed'); }
+      const bound=await store.boundAccount();
+      if (!current()) { throw new Error('Account changed'); }
+      if (bound!==account.uuid) {
+        this.syncAccount=bound?undefined:account; this.syncBound=false;
+        this.syncStatus=bound?'本机已绑定其他账户，禁止重新绑定。':'请核对当前账户后确认首次绑定。';
+        this.manualStatus=this.syncStatus; this.advancedSync=true; return;
+      }
+      this.syncAccount=account; this.syncBound=true;
+      const scope='account:'+account.uuid;
+      if (direction.importEnabled) {
+        this.manualStatus='正在导入观看进度与待看列表…';
+        await this.loadCloud(false);
+        if (!current() || !this.cloudFresh || this.cloudUuid!==account.uuid || !this.cloudLocalAllowed) { throw new Error('Cloud observation unavailable'); }
+        // The existing verified baseline import is additive and never writes Trakt.
+        await this.generateSyncPreview();
+        if (!current() || !this.syncPreview || this.syncPreview.account.uuid!==account.uuid) { throw new Error('Episode preview unavailable'); }
+        this.importConfirm=true; await this.confirmCloudImport();
+        if (!current() || !this.uploadStatus.startsWith('已新增保存')) { throw new Error('Episode import incomplete'); }
+        await this.importCloud();
+        if (!current() || this.cloudStatus.includes('失败')) { throw new Error('Title import incomplete'); }
+        this.manualStatus='正在导入自定义列表…';
+        const lists=await openCustomLists(this.context());
+        const remoteLists=await readCustomLists(session,account.uuid,signal);
+        if (!current()) { throw new Error('Account changed'); }
+        await lists.importRemote(scope,remoteLists,current);
+        this.manualStatus='正在导入个人评分…';
+        const repo=await openRatings(this.context());
+        for (const kind of ['show','movie','season','episode']) {
+          if (!current()) { throw new Error('Account changed'); }
+          await repo.refreshVerified(scope,kind,session,current);
+        }
+        this.collectionRatingKey=''; this.movieRatingKey=''; this.showRatingRequest.reset(); this.movieRatingRequest.reset();
+        this.projectionPending=true;
+      }
+      if (direction.exportEnabled) {
+        this.manualStatus='正在处理此前已授权的待同步操作…';
+        await this.reloadQueue();
+        if (!current()) { throw new Error('Account changed'); }
+        if (this.queueRows.length) { this.queueConfirm=true; await this.resumeQueued(true); }
+        if (!current()) { throw new Error('Account changed'); }
+        // Prior title intents already have their own scope/epoch consent.
+        if (this.titleQuickActive()) { await this.resumeTitleQuick(); }
+        if (!current()) { throw new Error('Account changed'); }
+        await this.recoverMediaPending();
+        if (!current()) { throw new Error('Account changed'); }
+        this.manualStatus=(direction.importEnabled?'四类导入已核对；':'')+'已处理授权队列。旧记录、列表与评分批量导出尚需高级核对，不能确认全部导出完成。';
+      } else {
+        this.manualStatus='观看进度、待看、自定义列表与评分导入已核对。';
+      }
+    } catch (error) {
+      this.manualStatus='同步未全部完成；已有记录与保护凭证保留。请重试读取或查看高级管理。';
+    } finally {
+      this.manualRunning=false;
+      this.onRecoveryGateChanged();
+    }
+  }
+
+  private async changeQuickSync(enabled:boolean):Promise<void> {
+    if (this.syncPageBusy() || !this.syncBound || !this.syncAccount ||
+        !traktAuth.isCurrent(this.clientId,this.syncAccount.generation)) { return; }
+    this.quickChanging=true;
+    try {
+      if (this.autoActive()!==enabled) { await this.setAuto(enabled); }
+      if (this.titleQuickActive()!==enabled) { await this.setTitleQuick(enabled); }
+      this.manualStatus=this.autoActive()===enabled && this.titleQuickActive()===enabled ?
+        (enabled?'快捷同步已开启，仅处理此后明确授权的新操作。':'快捷同步已关闭，旧队列保留。') :
+        '部分快捷同步设置未生效，请核对账户后重试。';
+    } finally { this.quickChanging=false; this.onRecoveryGateChanged(); }
+  }
+
   private requestSyncNow(): void {
     if (!this.pageVisible || !this.signedIn || !this.clientId || this.backupBusy ||
         !this.ready || !this.episodeReady || this.authBusy || this.setupBusy) { return; }
@@ -987,6 +1089,7 @@ struct Index {
   }
 
   private onRecoveryGateChanged(): void {
+    if (this.manualRunning || this.quickChanging) { return; }
     // Read-only local projection can proceed during OAuth, not durable writes.
     if (this.projectionPending && this.ready && this.episodeReady && this.pageVisible && !this.backupBusy &&
         !this.syncBusy && !syncService.busy() && !this.localBusy && !this.cloudBusy && !this.saving && !this.setupBusy) {
@@ -6897,7 +7000,8 @@ struct Index {
       if ((this.tab === 'library' || (this.tab === 'progress' && this.progressMode === 'next')) && !this.nextShows.length) { this.loadNextShows(); }
       return true;
     }
-    if (this.tab === 'search' || this.tab === 'cloud' || this.tab === 'account' || this.tab === 'statistics') {
+    if (this.tab === 'cloud') { this.navigate('account'); return true; }
+    if (this.tab === 'search' || this.tab === 'account' || this.tab === 'statistics') {
       this.navigate(this.returnTab);
       return true;
     }
@@ -7043,8 +7147,8 @@ struct Index {
       this.collectionOptionsOpen=false;
       if(this.collectionBusy){this.resetCollection();}
     }
-    this.tab = value === 'cloud' ? 'account' : value;
-    if (value === 'cloud') { this.advancedSync = true; }
+    this.tab = value;
+    if (value === 'cloud') { this.advancedSync = false; this.quickSettingsOpen=false; }
     if (value === 'progress') { this.chooseProgressMode(this.progressMode); }
     if (value === 'discover' && !this.discoverBusy) { this.loadDiscover(this.discoverPage); }
     if (value === 'library' && this.episodeReady && this.ready) {
@@ -7144,76 +7248,81 @@ struct Index {
 
   @Builder
   syncSettingsView() {
-    Column({ space: 10 }) {
-      Text('Trakt 同步').fontSize(20).fontWeight(FontWeight.Medium).width('100%')
-      Text(this.signedIn ? '已连接' : '未连接').fontSize(14).width('100%')
-      if (this.signedIn) {
-        Text(this.autoActive() ? '快捷同步已开启；仅限已授权的新观看记录。' : '快捷同步未开启；需要上传的操作请在高级同步管理确认。').fontSize(12).width('100%')
-        SyncStatusPanel({busy:this.syncBusy,cloudBusy:this.cloudBusy,
-          cloudText:this.cloud && this.cloudFresh ? '云端版本已核对' :
-            this.cloud ? '显示上次缓存，尚未确认最新版本' : '尚未核对云端版本',
-          bound:!!this.syncBound && !!this.syncAccount && traktAuth.isCurrent(this.clientId,this.syncAccount.generation),
-          rows:this.queueRows,lastUpload:this.lastEpisodeUpload,lastVerified:this.cloud?.verifiedAt ?? 0,
-          uuid:this.syncAccount?.uuid ?? '',clientId:this.clientId,onBackgroundRead:(enabled:boolean)=>this.changeBackgroundRead(enabled)})
-        if (this.autoStatus) { Text(this.autoStatus).fontSize(12).width('100%') }
-        if (this.mediaSyncStatus) { Text(this.mediaSyncStatus).fontSize(12).width('100%') }
-        Button(this.cloudBusy || this.syncBusy ? '同步处理中…' : '立即同步').width('100%')
-          .enabled(this.ready && this.episodeReady && !this.backupBusy && !this.authBusy && !this.setupBusy)
-          .onClick(() => { this.requestSyncNow(); })
-        Text('核对云端并处理已授权的待同步操作；不会自动上传旧记录或删除观看历史。').fontSize(12).width('100%')
-        if (this.libraryNotice) { Text(this.libraryNotice).fontSize(12).width('100%') }
-        if (!this.cloudLocalAllowed) {
-          Button('验证并绑定账户').enabled(!this.cloudBusy && !this.syncBusy && !this.authBusy && !this.localBusy)
-            .onClick(() => { this.advancedSync = true; this.verifySync(); })
+    Column({ space: 16 }) {
+      Row({space:8}) {
+        Button('返回').fontSize(12).onClick(()=>{this.navigate('account');})
+        Text('Trakt 同步').fontSize(22).fontWeight(FontWeight.Medium).layoutWeight(1)
+      }.width('100%')
+      Text('Trakt  ⇄  Showly').fontSize(26).fontWeight(FontWeight.Bold).fontColor($r('app.color.showly_accent')).margin({top:20})
+      Text('TRAKT 同步').fontSize(20).fontWeight(FontWeight.Bold)
+      Text('同步观看进度、待看列表、自定义列表和评分。保留已有历史，不自动删除。').fontSize(14).textAlign(TextAlign.Center).fontColor($r('app.color.showly_secondary'))
+      if (this.manualRunning || this.syncBusy || this.cloudBusy) {
+        LoadingProgress().width(36).height(36)
+      } else {
+        Row({space:8}) {
+          Checkbox({name:'sync-import',group:'sync-direction'}).select(this.manualImport).onChange((v:boolean)=>{this.manualImport=v;})
+          Text('从 Trakt.tv 导入到 Showly').fontSize(14).onClick(()=>{this.manualImport=!this.manualImport;})
+        }.width('100%')
+        Row({space:8}) {
+          Checkbox({name:'sync-export',group:'sync-direction'}).select(this.manualExport).onChange((v:boolean)=>{this.manualExport=v;})
+          Text('从 Showly 导出到 Trakt.tv').fontSize(14).onClick(()=>{this.manualExport=!this.manualExport;})
+        }.width('100%')
+        Button(!this.signedIn?'Trakt.tv 授权':'立即同步').width('72%')
+          .enabled(!this.syncPageBusy()&&!!this.clientId&&(!this.signedIn||!!syncDirections(this.manualImport,this.manualExport)))
+          .onClick(()=>{if(!this.signedIn){this.beginSyncLogin();}else{this.runManualSync();}})
+        if (!this.signedIn && this.hasAccount()) {
+          Text('授权需要恢复。').fontSize(12)
+          Text('重试恢复登录').fontSize(13).fontColor($r('app.color.showly_accent')).onClick(()=>{traktAuth.restore(this.clientId,true);})
         }
-        if (this.syncBound && this.syncAccount && traktAuth.isCurrent(this.clientId, this.syncAccount.generation)) {
-          Button(this.autoActive() ? '关闭快捷同步' : '开启快捷同步')
-            .enabled(!this.syncBusy && !this.cloudBusy && !this.localBusy && !this.authBusy)
-            .onClick(() => { this.setAuto(!this.autoActive()); })
-          Text('分集快捷同步仅上传已授权的新观看标记。电影及待看使用下方独立授权。').fontSize(12).width('100%')
-        } else {
-          Button('同步设置').enabled(!this.cloudBusy && !this.syncBusy && !this.authBusy && !this.localBusy)
-            .onClick(() => { this.advancedSync = true; this.verifySync(); })
+        if (this.signedIn) {
+          SyncStatusPanel({busy:this.syncBusy,cloudBusy:this.cloudBusy,details:this.advancedSync,
+            cloudText:this.cloudFresh?'云端版本已核对':this.cloud?'显示上次缓存':'尚未核对云端版本',
+            bound:!!this.syncBound&&!!this.syncAccount&&traktAuth.isCurrent(this.clientId,this.syncAccount.generation),
+            rows:this.queueRows,lastUpload:this.lastEpisodeUpload,lastVerified:this.cloud?.verifiedAt??0,
+            uuid:this.syncAccount?.uuid??'',clientId:this.clientId,onBackgroundRead:(enabled:boolean)=>this.changeBackgroundRead(enabled)})
         }
       }
-      if (this.signedIn && this.cloudLocalAllowed) {
-        Text('电影及待看快捷同步').fontSize(16).width('100%')
-        Button(this.titleQuickActive() ? '关闭电影及待看快捷同步' : '开启电影及待看快捷同步')
-          .enabled(!this.syncBusy && !this.cloudBusy && !this.localBusy && !this.authBusy && !this.saving)
-          .onClick(() => {
-            if (this.titleQuickActive()) { this.setTitleQuick(false); }
-            else { this.titleConfirm = true; }
-          })
-        if (this.titleConfirm) {
-          Text('授权此后标记电影已看（可能移出待看）以及加入／移出待看自动同步。不会自动删除观看历史，不会上传旧记录。')
-            .fontSize(12).width('100%')
-          Row({ space: 8 }) {
-            Button('取消').layoutWeight(1).onClick(() => { this.titleConfirm = false; })
-            Button('确认授权').layoutWeight(1).enabled(!this.syncBusy && !this.cloudBusy && !this.localBusy && !this.saving)
-              .onClick(() => { this.setTitleQuick(true); })
+      if(this.manualStatus){Text(this.manualStatus).fontSize(13).textAlign(TextAlign.Center).width('100%')}
+      if(this.signedIn){
+        Text('导出目前仅处理已授权的操作；列表与评分批量导出尚未实现。').fontSize(12).fontColor($r('app.color.showly_secondary')).textAlign(TextAlign.Center)
+        Row(){
+          Text('快捷同步设置').fontSize(14).layoutWeight(1)
+          Text(this.quickSettingsOpen?'收起':'›').fontSize(14)
+        }.width('100%').onClick(()=>{this.quickSettingsOpen=!this.quickSettingsOpen;})
+        if(this.quickSettingsOpen){
+          Text('仅同步开启后明确执行的新操作，不追溯旧记录。').fontSize(12).width('100%')
+          Row({space:8}){
+            Text(this.autoActive()&&this.titleQuickActive()?'已开启':this.autoActive()||this.titleQuickActive()?'部分开启':'已关闭').layoutWeight(1).fontSize(14)
+            Button(this.autoActive()&&this.titleQuickActive()?'关闭':'开启').fontSize(12).enabled(!this.syncPageBusy()&&this.syncBound&&this.cloudLocalAllowed)
+              .onClick(()=>{
+                if(this.autoActive()&&this.titleQuickActive()){this.changeQuickSync(false);}
+                else{this.getUIContext().showActionSheet({title:'开启快捷同步',message:'授权此后新的分集、电影已看和待看操作自动同步；不会自动删除观看历史。',autoCancel:true,sheets:[{title:'确认授权',action:()=>{this.changeQuickSync(true);}}]});}
+              })
           }.width('100%')
         }
-        if (this.titleQuickStatus) { Text(this.titleQuickStatus).fontSize(12).width('100%') }
-        Button('核对待处理操作').enabled(this.titleQuickActive() && !this.syncBusy && !this.cloudBusy && !this.localBusy && !this.saving)
-          .onClick(() => { this.titleQuickPending = true; this.onRecoveryGateChanged(); })
       }
-      Button(this.advancedSync ? '收起高级同步管理' : '高级同步管理')
-        .onClick(() => { this.advancedSync = !this.advancedSync; })
-      if (this.advancedSync) {
+      Row(){
+        Text('高级同步管理').fontSize(14).layoutWeight(1)
+        Text(this.advancedSync?'收起':'›').fontSize(14)
+      }.width('100%').onClick(()=>{this.advancedSync=!this.advancedSync;})
+      if(this.advancedSync && !this.manualRunning && !this.quickChanging) {
         this.syncPreviewView()
         this.mediaPreviewView()
         Text(this.cloudStatus).fontSize(12).width('100%')
+        Text(this.libraryNotice).fontSize(12).width('100%')
         Text(this.migrationStatus).fontSize(12).width('100%')
         Text(this.libraryStatus).fontSize(12).width('100%')
         Text(this.localStatus).fontSize(12).width('100%')
+        Text(this.titleQuickStatus).fontSize(12).width('100%')
+        if(this.signedIn&&this.cloudLocalAllowed){
+          Button('核对待处理影视操作').enabled(this.titleQuickActive()&&!this.syncPageBusy()).onClick(()=>{this.titleQuickPending=true;this.onRecoveryGateChanged();})
+        }
         if (this.cloud && this.signedIn) {
-          Button('仅导入新待看与已看电影到本机')
-            .enabled(this.ready && this.cloudLocalAllowed && !this.saving && !this.cloudBusy && !this.authBusy)
-            .onClick(() => { this.importCloud(); })
-          Button('清除云端预览').enabled(!this.cloudBusy).onClick(() => { this.clearCloud(); })
+          Button('仅导入新待看与已看电影到本机').enabled(this.ready && this.cloudLocalAllowed && !this.saving && !this.cloudBusy && !this.authBusy).onClick(()=>{this.importCloud();})
+          Button('清除云端预览').enabled(!this.cloudBusy).onClick(()=>{this.clearCloud();})
         }
       }
-    }.width('100%').padding(10).borderRadius(10).backgroundColor($r('app.color.showly_surface'))
+    }.width('100%').padding(16).borderRadius(10).backgroundColor($r('app.color.showly_surface'))
   }
 
   @Builder
@@ -7302,11 +7411,11 @@ struct Index {
 
   build() {
     Column({ space: 0 }) {
-      Row() {
+      if(this.tab!=='cloud') { Row() {
         Text('Showly').fontSize(27).fontWeight(FontWeight.Bold).layoutWeight(1)
         this.headerAction('搜索', 'search')
         this.headerAction('设置', 'account')
-      }.width('100%').padding(12).backgroundColor($r('app.color.showly_surface'))
+      }.width('100%').padding(12).backgroundColor($r('app.color.showly_surface')) }
       Divider().color($r('app.color.showly_line'))
       if (!this.selectedMedia && (this.tab === 'progress' || this.tab === 'discover' || this.tab === 'library' || this.tab==='statistics')) {
         this.mediaModeTabs()
@@ -7353,6 +7462,8 @@ struct Index {
             this.detailPage(this.selectedMedia)
           } else if (this.tab === 'progress') {
             this.progressView()
+          } else if (this.tab === 'cloud') {
+            this.syncSettingsView()
           } else {
             Text('账户与设置').fontSize(23).fontWeight(FontWeight.Bold)
             Text('影视资料语言').fontSize(19).fontWeight(FontWeight.Medium).width('100%')
@@ -7431,7 +7542,7 @@ struct Index {
           Text('登录使用 Trakt 官方浏览器页面。').fontSize(12)
 
         }
-            this.syncSettingsView()
+            Button('Trakt 同步').width('100%').onClick(()=>{this.navigate('cloud');})
           }
         }.width('100%').padding(16)
         }.width('100%').height('100%').align(Alignment.TopStart)
@@ -7439,12 +7550,12 @@ struct Index {
       }.width('100%').layoutWeight(1)
         .onRefreshing(() => { this.refreshPage(); })
       Divider().color($r('app.color.showly_line'))
-      Row({ space: 6 }) {
+      if(this.tab!=='cloud') { Row({ space: 6 }) {
         this.navigationTab('进度', 'progress', $r('app.media.nav_ic_check_menu'))
         this.navigationTab('发现', 'discover', $r('app.media.nav_ic_search'))
         this.navigationTab('收藏', 'library', $r('app.media.nav_ic_bookmark'))
       }.padding({ left: 12, right: 12, top: 4, bottom: 4 }).width('100%')
-        .backgroundColor($r('app.color.showly_surface'))
+        .backgroundColor($r('app.color.showly_surface')) }
     }.width('100%').height('100%').backgroundColor($r('app.color.showly_background'))
       .bindSheet($$this.ratingSheetOpen,this.ratingSheet(),{height:SheetSize.MEDIUM,showClose:true})
       .bindSheet($$this.commentSheetOpen,this.commentSheet(),{height:SheetSize.LARGE,showClose:true})

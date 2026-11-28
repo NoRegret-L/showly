@@ -2,7 +2,7 @@ name: HarmonyOS SDK traced dependency closure
 # Recheck exact Build 96 correction revision; no candidate is promoted without proof.
 on:
   push:
-    branches: [harmonyos-bootstrap, harmonyos-build96]
+    branches: [harmonyos-bootstrap, harmonyos-build97]
     paths: ['.github/workflows/harmonyos-sdk-closure-probe.yml']
   workflow_dispatch:
 permissions:
@@ -48,7 +48,7 @@ jobs:
           build=(hvigorw assembleHap --mode module -p module=entry@default -p product=default -p buildMode=debug --no-daemon --optimization-strategy=performance)
           parent="$RUNNER_TEMP/parent-source"
           mkdir "$parent"
-          baseline=0cf47ffc70e3425547f8efca6f4f2d5554d49711
+          baseline=3e0daa96addb39d5fedffb5a3cd6b63d851a823f
           git cat-file -e "$baseline^{commit}" 2>/dev/null || git fetch --no-tags --depth=1 origin "$baseline"
           git archive "$baseline" harmonyos | tar -xf - -C "$parent"
           echo "Closure parent=$(git rev-parse "$baseline") current=$(git rev-parse HEAD)" | tee -a "$GITHUB_STEP_SUMMARY"
@@ -211,7 +211,7 @@ jobs:
           mv "$RUNNER_TEMP/full.hap" "$RUNNER_TEMP/current-full.hap"
           rm "$RUNNER_TEMP/closure-sdk.tar.zst" "$RUNNER_TEMP/closure-sdk.sha256"
           date +%s%N > "$RUNNER_TEMP/cache-start"
-      - name: Restore exact previous Build 96 closure (same branch)
+      - name: Restore previous Build 96 closure (branch-scoped candidate)
         uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684
         with:
           path: |
