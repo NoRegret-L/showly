@@ -84,7 +84,7 @@ assert "this.discoverOptions.hideCollection && (!this.ready || (this.signedIn &&
 assert "filterDiscover(this.discoverItems,this.discoverOptions,hidden,members,now)" in page
 assert "if (committed && current() && this.showRows.work.publishSummary(summary,this.showSummary)) { this.showSummary = summary; }" in page
 assert "if (committed && current() && this.movieRowsSource.work.publishSummary(summary,this.movieSummary)) { this.movieSummary = summary; }" in page
-assert "if (committed && current() && this.collectionRowsSource.work.publishSummary(summary,this.collectionSummary)) { this.collectionSummary = summary; }" in page
+assert "if (committed && current() && this.collectionRowsSource().work.publishSummary(summary,this.collectionSummary)) { this.collectionSummary = summary; }" in page
 assert "this.showSummary.key === this.showDisplayKey()" in page
 assert "await store.saveReadCheckpoints(account.uuid, result.matches)" in page
 assert "await readSyncAccount(session)" in page and "await readActivity(session)" in page

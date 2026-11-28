@@ -19,11 +19,17 @@ export interface UpdateInfo {
   version: string;
   versionCode: number;
   url: string;
+  directUrl: string;
   digest: string;
 }
 export interface UpstreamInfo { sha: string; changed: boolean; url: string; }
 
-async function readPublic(url: string): Promise<string> {
+async function readPublic(url:string):Promise<string>{
+  // Prefer verified official metadata; the user-selected proxy is only a public GET fallback.
+  try{return await readPublicOnce(url);}
+  catch(error){return await readPublicOnce('https://tvv.tw/'+url);}
+}
+async function readPublicOnce(url: string): Promise<string> {
   const request = http.createHttp();
   try {
     const response = await request.request(url, {
@@ -59,8 +65,8 @@ function parseRelease(row: ReleaseRow): UpdateInfo | undefined {
     asset.state === 'uploaded' && asset.size > 0 && asset.browser_download_url === prefix + 'release-info.json');
   if (!hap || !checksum || !metadata || typeof hap.digest !== 'string' ||
       !/^sha256:[0-9a-f]{64}$/.test(hap.digest)) { return undefined; }
-  return { version: version, versionCode: code, url: RELEASES_URL + '/tag/' + row.tag_name,
-    digest: hap.digest };
+  return { version: version, versionCode: code, url: 'https://tvv.tw/' + hap.browser_download_url,
+    directUrl:hap.browser_download_url,digest: hap.digest };
 }
 
 export async function checkRelease(): Promise<UpdateInfo | undefined> {

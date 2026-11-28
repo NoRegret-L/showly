@@ -229,6 +229,18 @@ assert "this.publishCollectionHeader();" in page
 assert "this.updateLazyRows().catch(" in page
 sort=page.split("  private async runCollectionSort(",1)[1].split("  private collectionEntries()",1)[0]
 assert "throw new Error" not in sort
-assert "this.reportCollectionFailure(key,'排序')" in sort
+assert "this.reportCollectionFailure(key,'排序',error as Error)" in sort
 assert "this.collectionFailureKey!==key" in sort
 assert "this.retryCollectionDisplay();" in collection_view
+
+assert "private get collectionRowsSource" not in page
+assert "private get collectionItemsMemo" not in page
+assert "private async retryCollectionDisplay()" in page
+assert "this.collectionFullRetry=true" in page
+assert "projectCollection(candidates,options,this.collectionFilter,this.collectionQuery,now)" in page
+assert "this.collectionStage='列表发布'" in page
+updates=(root/"data"/"ReleaseUpdates.ets").read_text()
+assert "url: 'https://tvv.tw/' + hap.browser_download_url" in updates
+assert "directUrl:hap.browser_download_url" in updates
+assert "asset.browser_download_url === prefix + hapName" in updates
+assert "this.availableUpdate?.directUrl" in page

@@ -128,7 +128,7 @@ assert "JSON.stringify(this.mediaRecords)" not in page
 assert "const recordKey = this.mediaInput.version()" in page and "store.committedProjectionKey()" in page
 assert "this.mediaRecords=records" in page
 assert "this.refreshPresentationRows(Array.from(dirty))" in page
-assert "this.discoverRows.refreshDependencies" in page and "this.collectionRowsSource.refreshDependencies" in page
+assert "this.discoverRows.refreshDependencies" in page and "this.collectionRowsSource().refreshDependencies" in page
 assert "this.projectionFence.finish(token,success,ids" in store
 assert "this.db.rollBack()" in store and "await this.markBody(intent.showId, [episodeId], value)" in store
 assert "store.assertProjectionReadable()" in projection and "store.projectionReadable(revision)" in projection

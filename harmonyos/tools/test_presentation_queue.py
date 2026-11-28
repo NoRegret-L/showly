@@ -209,6 +209,6 @@ assert "await readSyncAccount(session)" in page and "await readActivity(session)
 print("Frame coalescing, independent display owners, viewport/business separation, incremental episode and progress sorting, original sync guards passed")
 
 assert "this.searchTitleIndex.patch(row.id,row.text.title)" in page
-assert "this.movieSortKey(query,utc,false)" in page and "this.collectionTitleOrder.update(" in page
+assert "this.movieSortKey(query,utc,false)" in page and "this.collectionTitleOrder().update(" in page
 
-assert "order.reconcile(this.movieSortKey(" in page and "this.collectionTitleOrder.reconcile(" in page
+assert "order.reconcile(this.movieSortKey(" in page and "this.collectionTitleOrder().reconcile(" in page

@@ -18,7 +18,7 @@ import { DisplayRevisions } from '../model/DisplayJobs';
 import { ProgressSortInput, MovieSortInput, CollectionSortInput } from '../model/DisplaySort';
 import { diffDisplay, showDisplay, movieDisplay, collectionDisplay } from '../data/DisplayTasks';
 import { ViewportTasks, addPresentationTask } from '../model/ViewportTasks';
-import { CollectionCandidate, CollectionOptions, CollectionState, HiddenEntry, defaultCollection, emptyCollectionState, collectionMembers, recentCollection, recordCollectionDate, transitionCollectionDates, hideMedia, collectionSortEligible, compareCollectionCandidates, sameCollectionCandidate } from '../model/CollectionRules';
+import { CollectionCandidate, CollectionOptions, CollectionState, HiddenEntry, defaultCollection, emptyCollectionState, collectionMembers, recentCollection, projectCollection, recordCollectionDate, transitionCollectionDates, hideMedia, collectionSortEligible, compareCollectionCandidates, sameCollectionCandidate } from '../model/CollectionRules';
 import { PresentationAttempts, PresentationFailure, presentationFailure } from '../model/PresentationPolicy';
 import { presentationGate } from '../data/PresentationHttp';
 import { PresentationRepository } from '../data/PresentationRepository';
@@ -145,7 +145,7 @@ struct Index {
   private movieRowsSource: PageStateOwner<PersonalLibraryRow,PersonalLibraryRow[]> = new PageStateOwner<PersonalLibraryRow,PersonalLibraryRow[]>((row: PersonalLibraryRow)=>[row.media.id]);
   private showCollectionRowsSource: PageStateOwner<CollectionGroup,PersonalLibraryRow[]> = new PageStateOwner<CollectionGroup,PersonalLibraryRow[]>((group: CollectionGroup)=>group.rows.map((row: PersonalLibraryRow)=>row.media.id));
   private movieCollectionRowsSource: PageStateOwner<CollectionGroup,PersonalLibraryRow[]> = new PageStateOwner<CollectionGroup,PersonalLibraryRow[]>((group: CollectionGroup)=>group.rows.map((row: PersonalLibraryRow)=>row.media.id));
-  private get collectionRowsSource():PageStateOwner<CollectionGroup,PersonalLibraryRow[]>{return this.mediaMode==='movie'?this.movieCollectionRowsSource:this.showCollectionRowsSource;}
+  private collectionRowsSource():PageStateOwner<CollectionGroup,PersonalLibraryRow[]>{return this.mediaMode==='movie'?this.movieCollectionRowsSource:this.showCollectionRowsSource;}
   private collectionOwnerSlot():string{return this.mediaMode==='movie'?'libraryMovie':'libraryShow';}
   private collectionSortSlot():string{return this.mediaMode==='movie'?'collection-movie':'collection-show';}
   private pageWorks:PageWorkSet=this.createPageWorks();
@@ -175,6 +175,9 @@ struct Index {
   @State collectionRenderError:string='';
   private collectionFailureKey:string='';
   private collectionRecentKey:string='';
+  private collectionStage:string='初始化';
+  private collectionFullRetry:boolean=false;
+  @State collectionRetryBusy:boolean=false;
   private showTitleRevision: number = 0;
   private movieTitleRevision: number = 0;
   private showMetaRevision: number = 0;
@@ -432,8 +435,8 @@ struct Index {
   @State collectionRuleStatus: string = '';
   private collectionOptionKey: string = '';
   private collectionRandomKeys: Map<string, number> = new Map<string, number>();
-  private get collectionItemsMemo():RevisionMemo<PersonalLibraryRow[]>{return this.collectionRowsSource.memo;}
-  private get recentCollectionMemo():RevisionMemo<PersonalLibraryRow[]>{return this.collectionRowsSource.allMemo;}
+  private collectionItemsMemo():RevisionMemo<PersonalLibraryRow[]>{return this.collectionRowsSource().memo;}
+  private recentCollectionMemo():RevisionMemo<PersonalLibraryRow[]>{return this.collectionRowsSource().allMemo;}
   @State @Watch('onCollectionRatingsChanged') collectionRatings: CollectionRating[] = [];
   private collectionRatingKey: string = '';
   private showRatingRequest:CollectionRatingRequest=new CollectionRatingRequest();
@@ -472,7 +475,7 @@ struct Index {
   private movieAllTitleOrder=new StableDisplayOrder<MovieProgressSource>((x:MovieProgressSource)=>x.row);
   private showCollectionTitleOrder=new StableDisplayOrder<CollectionCandidate>((x:CollectionCandidate)=>x.row);
   private movieCollectionTitleOrder=new StableDisplayOrder<CollectionCandidate>((x:CollectionCandidate)=>x.row);
-  private get collectionTitleOrder():StableDisplayOrder<CollectionCandidate>{return this.mediaMode==='movie'?this.movieCollectionTitleOrder:this.showCollectionTitleOrder;}
+  private collectionTitleOrder():StableDisplayOrder<CollectionCandidate>{return this.mediaMode==='movie'?this.movieCollectionTitleOrder:this.showCollectionTitleOrder;}
   private releaseCollectionOwner(kind:string):void{
     const owner=kind==='movie'?this.movieCollectionRowsSource:this.showCollectionRowsSource;
     owner.memo.clear();owner.allMemo.clear();owner.replace([],[],[]);
@@ -480,7 +483,7 @@ struct Index {
   }
   private clearCollectionOwners():void{this.releaseCollectionOwner('show');this.releaseCollectionOwner('movie');this.clearCollectionHeader();}
   private clearCollectionHeader():void{
-    this.collectionRecentKey='';this.collectionFailureKey='';
+    this.collectionRecentKey='';this.collectionFailureKey='';this.collectionFullRetry=false;
     if(this.collectionRecentRows.length){this.collectionRecentRows=[];}
     if(this.collectionHasOther){this.collectionHasOther=false;}
     if(this.collectionRenderError){this.collectionRenderError='';}
@@ -495,13 +498,25 @@ struct Index {
     this.collectionRecentRows=recent;
     if(this.collectionHasOther!==other){this.collectionHasOther=other;}
   }
-  private reportCollectionFailure(key:string,stage:string):void{
+  private reportCollectionFailure(key:string,stage:string,error?:Error):void{
     this.collectionFailureKey=key;
-    this.collectionRenderError='收藏加载失败（'+stage+'），可重试；观看记录未修改。';
+    const detail=error?.message??'';
+    this.collectionRenderError='收藏加载失败（'+stage+'）'+(detail?'：'+detail:'')+'；观看记录未修改。';
   }
-  private retryCollectionDisplay():void{
-    this.collectionFailureKey='';this.collectionRenderError='';this.collectionRecentKey='';
-    this.collectionItemsMemo.clear();this.collectionTitleOrder.clear();this.requestPresentation();
+  private async retryCollectionDisplay():Promise<void>{
+    if(this.collectionRetryBusy||this.tab!=='library'){return;}
+    this.collectionRetryBusy=true;
+    try{
+      await Promise.resolve();
+      if(this.tab!=='library'||!this.pageVisible){return;}
+      this.collectionStage='重试缓存清理';
+      this.collectionItemsMemo().clear();this.collectionTitleOrder().clear();this.recentCollectionMemo().clear();
+      this.collectionFailureKey='';this.collectionRenderError='';this.collectionRecentKey='';
+      this.collectionFullRetry=true;
+      this.requestPresentation();
+    }catch(error){
+      this.reportCollectionFailure(this.collectionFailureKey,this.collectionStage,error as Error);
+    }finally{this.collectionRetryBusy=false;}
   }
   private searchHistoryGeneration: SearchGeneration = new SearchGeneration();
   @State libraryStatus: string = '';
@@ -1372,10 +1387,10 @@ struct Index {
         }
       }
     }
-    if(this.collectionTitleOrder.hasDirty()||(this.collectionFilter==='queue'&&this.collectionOptions.upcoming!=='all')){
+    if(this.collectionTitleOrder().hasDirty()||(this.collectionFilter==='queue'&&this.collectionOptions.upcoming!=='all')){
       // A changed release can introduce an earlier expiry; the complete
       // candidate path recomputes it. Pending translations also invalidate.
-      this.collectionTitleOrder.clear();needsFull=true;
+      this.collectionTitleOrder().clear();needsFull=true;
     }else if(this.collectionFilter==='mine'||this.collectionFilter==='queue'){
       const before=pending.collectionScope,after=this.collectionSortKey(false),basis=this.collectionSortKey(false,false);
       const collectionChanges:StableOrderChange<CollectionCandidate>[]=[];
@@ -1388,11 +1403,11 @@ struct Index {
         collectionChanges.push({id:change.id,item:candidate,ordinal:change.ordinal});
       }
       const options=this.collectionOptions;
-      const result=this.collectionTitleOrder.applyChanges(before,after,basis,pending.now,this.collectionTitleOrder.validUntil(),collectionChanges,
+      const result=this.collectionTitleOrder().applyChanges(before,after,basis,pending.now,this.collectionTitleOrder().validUntil(),collectionChanges,
         (value:CollectionCandidate)=>collectionSortEligible(value,options,this.collectionFilter,this.collectionQuery,pending.now),
         (a:CollectionCandidate,b:CollectionCandidate)=>compareCollectionCandidates(a,b,options,this.collectionFilter));
       if(result){
-        this.collectionItemsMemo.put(this.collectionSortKey(),result.rows,pending.now,this.collectionTitleOrder.validUntil());
+        this.collectionItemsMemo().put(this.collectionSortKey(),result.rows,pending.now,this.collectionTitleOrder().validUntil());
         if(this.pageVisible&&this.tab==='library'&&!this.selectedMedia){
           if(result.structural){needsFull=true;}
           else{
@@ -1408,11 +1423,11 @@ struct Index {
     return false;
   }
   private patchCollectionDisplayRow(row:PersonalLibraryRow):boolean{
-    const index=this.collectionRowsSource.indexOfId(row.media.id);if(index<0){return false;}
-    const group=this.collectionRowsSource.getData(index);
+    const index=this.collectionRowsSource().indexOfId(row.media.id);if(index<0){return false;}
+    const group=this.collectionRowsSource().getData(index);
     const rows=group.rows.map((item:PersonalLibraryRow)=>item.media.id===row.media.id?row:item);
     const next:CollectionGroup={key:group.key,label:group.label,rows:rows};
-    return this.collectionRowsSource.patchRow(group.key,next,this.collectionGroupKey(next));
+    return this.collectionRowsSource().patchRow(group.key,next,this.collectionGroupKey(next));
   }
 
   private onShowsChanged(): void {
@@ -1545,7 +1560,7 @@ struct Index {
       case 'movie': return this.movieRowsSource.refreshDependencies(ids,(row: PersonalLibraryRow)=>this.movieRowKey(row));
       case 'calendar': return this.calendarRows.refreshDependencies(ids,(row: CalendarEntry)=>this.calendarRowKey(row));
       case 'movieCalendar': return this.movieCalendarRows.refreshDependencies(ids,(row: MovieCalendarItem)=>this.movieCalendarKey(row));
-      case 'library': return this.collectionRowsSource.refreshDependencies(ids,(row: CollectionGroup)=>this.collectionGroupKey(row));
+      case 'library': return this.collectionRowsSource().refreshDependencies(ids,(row: CollectionGroup)=>this.collectionGroupKey(row));
       default: return true;
     }
   }
@@ -1598,7 +1613,7 @@ struct Index {
       case 'movie': return this.movieRowsSource;
       case 'calendar': return this.calendarRows;
       case 'movieCalendar': return this.movieCalendarRows;
-      case 'library': return this.collectionRowsSource;
+      case 'library': return this.collectionRowsSource();
       default: return undefined;
     }
   }
@@ -1786,9 +1801,9 @@ struct Index {
     if (this.lazyPending) { return; }
     this.lazyPending = true;
     const scope=this.viewScope(),account=this.currentProgressScope();
-    this.updateLazyRows().catch(()=>{
+    this.updateLazyRows().catch((error:Error)=>{
       if(this.pageVisible&&this.tab==='library'&&scope===this.viewScope()&&account===this.currentProgressScope()){
-        this.reportCollectionFailure(this.collectionSortKey(),'列表');
+        this.reportCollectionFailure(this.collectionSortKey(),this.collectionStage,error);
       }
     });
   }
@@ -1801,7 +1816,7 @@ struct Index {
       case 'movie': this.movieRowsSource.activate(scope); break;
       case 'calendar': this.calendarRows.activate(scope); break;
       case 'movieCalendar': this.movieCalendarRows.activate(scope); break;
-      case 'library': this.collectionRowsSource.activate(scope); break;
+      case 'library': this.collectionRowsSource().activate(scope); break;
     }
   }
   private async updateLazyRows(): Promise<void> {
@@ -1815,6 +1830,7 @@ struct Index {
     const differ=(input: ListDiffInput)=>diffDisplay(input,consumer);
     const scope = this.viewScope();
     const account = this.currentProgressScope();
+    if(this.tab==='library'){this.collectionStage='数据源初始化';}
     this.activateDisplayOwner(JSON.stringify([account,scope]));
     const current = (): boolean => this.pageVisible && work.current(ticket) && this.activePageWork()===work && scope === this.viewScope() && account === this.currentProgressScope() && !this.selectedMedia;
     if (this.tab === 'discover') {
@@ -1851,8 +1867,9 @@ struct Index {
     }
     if (this.tab === 'library') {
       if(this.collectionFailureKey===this.collectionSortKey()){return;}
-      this.publishCollectionHeader();
-      if (this.collectionOptions.sort === 'userRating') { this.loadCollectionRatings(); }
+      this.collectionStage='最近添加';this.publishCollectionHeader();
+      this.collectionStage='评分读取';if (this.collectionOptions.sort === 'userRating') { this.loadCollectionRatings(); }
+      this.collectionStage='收藏计算';
       const prepared = this.collectionItems(true);
       if (this.sortJobs.pending(this.collectionSortSlot())) { return; }
       const summary: PageSummary = {key:this.collectionDisplayKey(),total:prepared.length,page:this.collectionPage,pages:Math.max(1,Math.ceil(prepared.length/this.collectionPageSize))};
@@ -1865,10 +1882,11 @@ struct Index {
           }
         }
       }
-      const committed = await this.collectionRowsSource.submit(rows, rows.map((group: CollectionGroup) => group.key),
+      this.collectionStage='列表发布';
+      const committed = await this.collectionRowsSource().submit(rows, rows.map((group: CollectionGroup) => group.key),
         rows.map((group: CollectionGroup) => this.collectionGroupKey(group)),differ,current);
-      if (committed && current() && this.collectionRowsSource.work.publishSummary(summary,this.collectionSummary)) { this.collectionSummary = summary; }
-      if (committed && current()) { this.collectionRenderError='';this.restoreScroll('library'); }
+      if (committed && current() && this.collectionRowsSource().work.publishSummary(summary,this.collectionSummary)) { this.collectionSummary = summary; }
+      if (committed && current()) { this.collectionFullRetry=false;this.collectionRenderError='';this.restoreScroll('library'); }
       return;
     }
     if (this.tab !== 'progress' || this.progressMode !== 'next') { return; }
@@ -2206,8 +2224,8 @@ struct Index {
     } finally { this.updateBusy = false; }
   }
 
-  private async openReleasePage(upstream: boolean = false): Promise<void> {
-    const target = upstream ? this.upstreamInfo?.url : this.availableUpdate?.url ?? RELEASES_URL;
+  private async openReleasePage(upstream: boolean = false,direct:boolean=false): Promise<void> {
+    const target = upstream ? this.upstreamInfo?.url : (direct?this.availableUpdate?.directUrl:this.availableUpdate?.url) ?? RELEASES_URL;
     if (!target) { return; }
     try {
       await this.context().startAbility({ action: 'ohos.want.action.viewData', uri: target });
@@ -2370,9 +2388,9 @@ struct Index {
   updateView() {
     Column({ space: 8 }) {
       Text('版本与更新').fontSize(19).fontWeight(FontWeight.Medium).width('100%')
-      Text('当前版本 ' + APP_VERSION + ' · 未签名个人预览版 · 0.9.3c.1').fontSize(13)
+      Text('当前版本 ' + APP_VERSION + ' · 未签名个人预览版').fontSize(13)
         .fontColor($r('app.color.showly_secondary')).width('100%')
-      Text('v0.9.3c.1 个人电影上映日历修复版。').fontSize(12).width('100%')
+      Text('下载更新使用 tvv.tw GitHub 加速；请核对 SHA-256。').fontSize(12).width('100%')
       Button('查看功能审计与验收计划').onClick(() => { this.openFeatureAudit(); })
       Button(this.updateBusy ? '检查中…' : '检查更新').enabled(!this.updateBusy)
         .onClick(() => { this.checkAppUpdate(); })
@@ -2381,9 +2399,10 @@ struct Index {
         Text('新版本 ' + this.availableUpdate.version + ' · SHA-256 ' + this.availableUpdate.digest.substring(7))
           .fontSize(12).width('100%')
       }
-      Button(this.availableUpdate ? '打开新版本下载页' : '打开鸿蒙发布页')
+      Button(this.availableUpdate ? '直接下载新版本 HAP（加速）' : '打开鸿蒙发布页')
         .onClick(() => { this.openReleasePage(); })
-      Text('仅检查公开 GitHub 发布信息，不发送 Trakt 凭据或观看记录。不自动下载、安装或卸载；请核对哈希并用原安装方式覆盖安装。')
+      if(this.availableUpdate){Button('GitHub 原始下载链接').fontSize(12).onClick(()=>{this.openReleasePage(false,true);})}
+      Text('仅检查公开 GitHub 发布信息，不发送 Trakt 凭据或观看记录。浏览器下载，不自动安装或卸载；请核对官方哈希并用原安装方式覆盖安装。')
         .fontSize(12).width('100%')
       if (this.upstreamStatus) { Text(this.upstreamStatus).fontSize(12).width('100%') }
       if (this.upstreamInfo) {
@@ -6011,11 +6030,11 @@ struct Index {
     if(this.collectionRecentAmount===0){return [];}
     const now = Date.now();
     const key = JSON.stringify([this.collectionDependencies.source(this.mediaMode),this.collectionDependencies.business(this.mediaMode),this.collectionScope,this.currentProgressScope(),this.mediaMode,this.collectionRecentAmount]);
-    const cached = this.recentCollectionMemo.get(key,now);
+    const cached = this.recentCollectionMemo().get(key,now);
     if (cached) { return cached; }
     const members = collectionMembers(this.personalLibrary(),this.currentCollectionState(),this.mediaMode,'mine','all');
     const rows = recentCollection(this.collectionCandidates(members,'mine'),this.collectionRecentAmount);
-    this.recentCollectionMemo.put(key,rows,now,Number.MAX_SAFE_INTEGER);
+    this.recentCollectionMemo().put(key,rows,now,Number.MAX_SAFE_INTEGER);
     return rows;
   }
   private collectionSource(): PersonalLibraryRow[] { return this.collectionBase(); }
@@ -6054,13 +6073,24 @@ struct Index {
     const now = Date.now();
     const options = this.collectionFilter === 'other' ? defaultCollection() : this.collectionOptions;
     const key = this.collectionSortKey();
-    const cached = this.sortedViewRevision >= 0 ? this.collectionItemsMemo.get(key,now) : undefined;
+    const cached = this.sortedViewRevision >= 0 ? this.collectionItemsMemo().get(key,now) : undefined;
     if (cached) { return cached; }
     if (!prepare || this.sortJobs.matches(this.collectionSortSlot(),JSON.stringify([this.presentationEpoch,key]))) { return []; }
-    const delta=this.collectionTitleOrder.update(this.collectionSortKey(false),now,(x:CollectionCandidate):CollectionCandidate=>({row:x.row,translation:this.presentationLanguage==='zh'?this.titleIndex.get(x.row.media.id)?.text.title??'':'',meta:x.meta,added:x.added,recent:x.recent,userRating:x.userRating,randomOrder:x.randomOrder}),
+    if(this.collectionFullRetry){
+      const candidates=this.collectionCandidates(this.collectionSource(),this.collectionFilter);
+      const rows=projectCollection(candidates,options,this.collectionFilter,this.collectionQuery,now).map((candidate:CollectionCandidate)=>candidate.row);
+      let expiry=Number.MAX_SAFE_INTEGER;
+      if(this.collectionFilter==='queue'&&options.upcoming!=='all'){
+        expiry=Date.parse(new Date(now).toISOString().substring(0,10)+'T00:00:00Z')+86400000;
+        for(const candidate of candidates){const date=Date.parse(candidate.meta?.release??'');if(date>=now){expiry=Math.min(expiry,date===now?date+1:date);}}
+      }
+      this.collectionTitleOrder().seed(this.collectionSortKey(false),now,expiry,candidates,rows,this.collectionSortKey(false,false),(id:string)=>this.collectionFilter==='mine'||this.collectionFilter==='queue'?this.personalLibraryIndex.ordinal(id):undefined);
+      this.collectionItemsMemo().put(key,rows,now,expiry);return rows;
+    }
+    const delta=this.collectionTitleOrder().update(this.collectionSortKey(false),now,(x:CollectionCandidate):CollectionCandidate=>({row:x.row,translation:this.presentationLanguage==='zh'?this.titleIndex.get(x.row.media.id)?.text.title??'':'',meta:x.meta,added:x.added,recent:x.recent,userRating:x.userRating,randomOrder:x.randomOrder}),
       (x:CollectionCandidate)=>collectionSortEligible(x,options,this.collectionFilter,this.collectionQuery,now),
       (a:CollectionCandidate,b:CollectionCandidate)=>compareCollectionCandidates(a,b,options,this.collectionFilter));
-    if(delta){this.collectionItemsMemo.put(key,delta,now,this.collectionTitleOrder.validUntil());return delta;}
+    if(delta){this.collectionItemsMemo().put(key,delta,now,this.collectionTitleOrder().validUntil());return delta;}
     const candidates = this.collectionCandidates(this.collectionSource(),this.collectionFilter);
     let expiry = Number.MAX_SAFE_INTEGER;
     if (this.collectionFilter === 'queue' && options.upcoming !== 'all') {
@@ -6070,11 +6100,11 @@ struct Index {
         if (date >= now) { expiry = Math.min(expiry,date === now ? date + 1 : date); }
       }
     }
-    const reconciled=this.collectionTitleOrder.reconcile(this.collectionSortKey(false),this.collectionSortKey(false,false),now,expiry,candidates,sameCollectionCandidate,
+    const reconciled=this.collectionTitleOrder().reconcile(this.collectionSortKey(false),this.collectionSortKey(false,false),now,expiry,candidates,sameCollectionCandidate,
       (x:CollectionCandidate)=>collectionSortEligible(x,options,this.collectionFilter,this.collectionQuery,now),
       (a:CollectionCandidate,b:CollectionCandidate)=>compareCollectionCandidates(a,b,options,this.collectionFilter),
       (id:string)=>this.collectionFilter==='mine'||this.collectionFilter==='queue'?this.personalLibraryIndex.ordinal(id):undefined);
-    if(reconciled){this.collectionItemsMemo.put(key,reconciled,now,expiry);return reconciled;}
+    if(reconciled){this.collectionItemsMemo().put(key,reconciled,now,expiry);return reconciled;}
     const input: CollectionSortInput = {candidates:candidates,options:options,section:this.collectionFilter,query:this.collectionQuery,now:now};
     this.runCollectionSort(input,key,expiry);
     return [];
@@ -6089,12 +6119,12 @@ struct Index {
       if (!this.sortJobs.current(slot,token) || !this.pageVisible || this.selectedMedia || this.tab !== 'library' ||
           epoch !== this.presentationEpoch || key !== this.collectionSortKey() ||
           (this.signedIn && !this.activeCloud()) || Date.now() < input.now || Date.now() >= expiry) { return; }
-      this.collectionTitleOrder.seed(this.collectionSortKey(false),input.now,expiry,input.candidates,rows,this.collectionSortKey(false,false),
+      this.collectionTitleOrder().seed(this.collectionSortKey(false),input.now,expiry,input.candidates,rows,this.collectionSortKey(false,false),
         (id:string)=>this.collectionFilter==='mine'||this.collectionFilter==='queue'?this.personalLibraryIndex.ordinal(id):undefined);
-      this.collectionItemsMemo.put(key,rows,input.now,expiry);
+      this.collectionItemsMemo().put(key,rows,input.now,expiry);
     } catch (error) {
       if (!(error instanceof ReadCancelled) && this.sortJobs.current(slot,token) && this.pageVisible && this.tab==='library' && epoch===this.presentationEpoch && key===this.collectionSortKey()) {
-        this.reportCollectionFailure(key,'排序');
+        this.reportCollectionFailure(key,'排序',error as Error);
       }
     }
     finally {
@@ -6240,7 +6270,7 @@ struct Index {
         }.width('100%')
       }
       if(this.collectionRenderError){
-        Row({space:8}){Text(this.collectionRenderError).fontSize(12).layoutWeight(1);Button('重试').fontSize(12).onClick(()=>{this.retryCollectionDisplay();})}.width('100%')
+        Row({space:8}){Text(this.collectionRenderError).fontSize(12).layoutWeight(1);Button(this.collectionRetryBusy?'重试中…':'重试').fontSize(12).enabled(!this.collectionRetryBusy).onClick(()=>{this.retryCollectionDisplay();})}.width('100%')
       } else if (this.collectionSummary.key === this.collectionDisplayKey()) {
         if (!this.collectionSummary.total && !this.cloudBusy && !this.localBusy) { Text(collectionEmptyText(this.collectionHasFilters(),this.collectionFilter)).fontSize(14).width('100%').textAlign(TextAlign.Center).padding(16) }
         Text('共 ' + this.collectionSummary.total + ' 部').fontSize(14)

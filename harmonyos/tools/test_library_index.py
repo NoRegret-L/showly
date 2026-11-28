@@ -87,7 +87,7 @@ assert "this.personalLibraryIndex.rowsView()" in page
 assert "this.mediaInput.libraryChangedIds()" in page
 assert "order.applyChanges(before,after,basis" in page
 assert "[this.movieTitleOrder,pending.movieQueryScope" in page and "[this.movieAllTitleOrder,pending.movieAllScope" in page
-assert "this.collectionTitleOrder.applyChanges(" in page
+assert "this.collectionTitleOrder().applyChanges(" in page
 print("Production incremental member and sort wiring assertions passed")
 
 # ArkTS rejects destructuring declarations even when host TypeScript accepts them.
