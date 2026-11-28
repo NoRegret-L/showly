@@ -1,4 +1,5 @@
 name: HarmonyOS SDK traced dependency closure
+# Recheck exact Build 96 correction revision; no candidate is promoted without proof.
 on:
   push:
     branches: [harmonyos-bootstrap, harmonyos-build96]

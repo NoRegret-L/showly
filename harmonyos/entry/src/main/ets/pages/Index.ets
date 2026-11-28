@@ -756,7 +756,6 @@ struct Index {
       this.seenScheduleWake = wake;
       this.requestSyncNow();
     }
-    this.scheduleInitialRead();
     if (initialized && (!this.signedIn || !this.displayCloud())) { this.requestProjection(); }
     if (this.autoActive()) { this.requestRecovery(); }
     else if (this.clientId && !this.setupBusy && !this.cloudBusy && !this.syncBusy) {
@@ -996,7 +995,7 @@ struct Index {
     if (syncService.busy() || this.backupBusy || !this.pageVisible || this.syncBusy || this.localBusy || this.cloudBusy || this.saving ||
         this.authBusy || this.setupBusy) { return; }
     if (this.detailResumePending && this.selectedMedia) { this.resumeDetail(); if (this.localBusy) { return; } }
-    if (this.observationPending && this.ready && this.episodeReady && this.hasAccount() && !this.displayCloud()) {
+    if (this.observationPending && this.ready && this.episodeReady && this.signedIn && !this.activeCloud()) {
       this.observationPending=false; this.loadCloud(false); return;
     }
     const lane = this.syncCoordinator.next(this.autoActive() && this.episodeReady,
@@ -1272,6 +1271,14 @@ struct Index {
   private activeCloud(): CloudLibrary | undefined {
     const snapshot = this.cloud;
     return snapshot && this.signedIn && traktAuth.isCurrent(this.clientId, snapshot.generation) ? snapshot : undefined;
+  }
+
+  private rebaseReadSnapshot(snapshot:CloudLibrary,generation:number):CloudLibrary {
+    return {generation:generation,activity:snapshot.activity,observedAt:snapshot.observedAt,
+      watchlist:snapshot.watchlist,watchedMovies:snapshot.watchedMovies,shows:snapshot.shows,
+      moviePlays:snapshot.moviePlays,queueDates:snapshot.queueDates,movieDetails:snapshot.movieDetails,
+      movieWatchedDetails:snapshot.movieWatchedDetails,movieQueuedDetails:snapshot.movieQueuedDetails,
+      versions:snapshot.versions,verifiedAt:snapshot.verifiedAt};
   }
 
   private displayCloud(): CloudLibrary | undefined {
@@ -3591,7 +3598,10 @@ struct Index {
       if (!current()) { throw new Error('Session changed'); }
       if (this.cloudUuid !== account.uuid) { this.clearCloud(); }
       else if (this.cloud && this.cloud.generation!==session.generation) {
-        this.cloud={...this.cloud,generation:session.generation};
+        const calendarWasCurrent=this.calendarCurrent();
+        this.cloud=this.rebaseReadSnapshot(this.cloud,session.generation);
+        this.publishMovieSource(this.cloud);
+        if (calendarWasCurrent && this.calendarSourceScope) { this.calendarSourceScope=this.calendarScopeKey(); }
       }
       const bound = await store.boundAccount();
       if (!current()) { throw new Error('Session changed'); }
@@ -4604,7 +4614,8 @@ struct Index {
         }.width('100%')
         Text(this.discoverStatus).fontSize(12).width('100%')
         if (this.discoverOptions.hideCollection && (!this.ready || (this.hasAccount() && !this.displayCloud()))) {
-          Text('正在核对个人库，暂不显示未验证的收藏筛选结果。').fontSize(12).width('100%')
+          Text('个人库尚未核对，收藏筛选暂不可用；可选择显示已收藏查看公共榜单。').fontSize(12).width('100%')
+          this.librarySyncNotice()
         } else { Text('共 '+this.discoverTotal+' 部').fontSize(12).width('100%') }
         Button(this.discoverBusy ? '加载中…' : '刷新榜单')
           .enabled(!this.discoverBusy && !this.setupBusy)
@@ -4686,7 +4697,7 @@ struct Index {
         const bound=await store.boundAccount();
         if (!currentIdentity()) { return; }
         if (cached && cacheReadable(identity,identity,cached.verifiedAt ?? 0)) {
-          const restored:CloudLibrary={...cached,generation:-1};
+          const restored=this.rebaseReadSnapshot(cached,-1);
           this.cloudUuid=identity; this.cloudFresh=false; this.cloudLocalAllowed=allowLocalScope(true,bound,identity);
           this.cloud=restored; this.publishMovieSource(restored); this.reloadProgressFlags();
         }
@@ -4914,7 +4925,7 @@ struct Index {
     return [];
   }
   private validateNextTarget(row: ProgressRow): boolean {
-    if (!this.progressCandidateActive() || (this.hasAccount() && !this.displayCloud()) || this.isHidden(row.media)) { return false; }
+    if (!this.progressCandidateActive() || (this.hasAccount() && !this.activeCloud()) || this.isHidden(row.media)) { return false; }
     const target=this.nextShows.find((item: NextShow)=>item.media.id===row.media.id);
     const source=target?.source;
     if (!source) { return false; }

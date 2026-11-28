@@ -28,7 +28,10 @@ auth=(root/"data/TraktAuth.ets").read_text()
 vault=(root/"data/TokenVault.ets").read_text()
 assert "this.activeCloud() && this.cloudLocalAllowed" in page
 assert "cacheReadable(this.cloudUuid,traktAuth.cachedAccount(this.clientId)" in page
-assert "generation:-1" in page
+assert "this.rebaseReadSnapshot(cached,-1)" in page
+assert "this.signedIn && !this.activeCloud())" in page
+assert "this.activeCloud() === snapshot && this.cloudUuid === uuid && this.canEditLibrary()" in page
+assert "const source=this.displayCloud()" in page
 assert "this.nextStatus='进度读取已结束，请刷新核对。'" in page
 assert "this.projectionPending=false; this.loadNextShows(); return;" in page
 assert "await store.saveReadCheckpoints(account.uuid, result.matches)" in page

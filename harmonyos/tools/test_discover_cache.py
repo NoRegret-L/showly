@@ -80,7 +80,7 @@ page=(root/"pages"/"Index.ets").read_text()
 assert "repo.load(clientId,request,force,publish,consumer)" in page
 assert "revision === lane.version() && lane.current(consumer) && clientId === this.clientId" in page
 assert "this.discoverOptions === options" in page
-assert "this.discoverOptions.hideCollection && (!this.ready || (this.signedIn && !this.activeCloud()))" in page
+assert "this.discoverOptions.hideCollection && (!this.ready || (this.hasAccount() && !this.displayCloud()))" in page
 assert "filterDiscover(this.discoverItems,this.discoverOptions,hidden,members,now)" in page
 assert "if (committed && current() && this.showRows.work.publishSummary(summary,this.showSummary)) { this.showSummary = summary; }" in page
 assert "if (committed && current() && this.movieRowsSource.work.publishSummary(summary,this.movieSummary)) { this.movieSummary = summary; }" in page

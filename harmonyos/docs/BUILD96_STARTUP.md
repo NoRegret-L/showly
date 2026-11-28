@@ -5,3 +5,5 @@ Android source: ProgressViewModel and ProgressItemsCase own independent local lo
 - Failed local projection terminates loading. Existing display is retained only under the same credential identity. Existing receipt/checkpoint fences and no-resend rules remain.
 - Isolated branch release uses exact SHA and digest verification. SDK closure probe compares Build 95 and current source; sibling branch cache misses use verified full fallback.
 - Device cold start, real OAuth, actual process termination and performance measurements remain required before full acceptance.
+
+CI #151 exposed three outdated source assertions and two ArkTS object-spread errors. Correct assertions to require displayCloud only in read paths and preserve activeCloud for action validation; use explicit typed snapshots instead of spread.
