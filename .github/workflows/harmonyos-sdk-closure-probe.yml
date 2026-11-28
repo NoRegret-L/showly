@@ -1,7 +1,7 @@
 name: HarmonyOS SDK traced dependency closure
 on:
   push:
-    branches: [harmonyos-bootstrap]
+    branches: [harmonyos-bootstrap, harmonyos-build96]
     paths: ['.github/workflows/harmonyos-sdk-closure-probe.yml']
   workflow_dispatch:
 permissions:
@@ -47,7 +47,7 @@ jobs:
           build=(hvigorw assembleHap --mode module -p module=entry@default -p product=default -p buildMode=debug --no-daemon --optimization-strategy=performance)
           parent="$RUNNER_TEMP/parent-source"
           mkdir "$parent"
-          baseline=bf16e9fb4ef673522166af369411e99fc26f0c2d
+          baseline=0cf47ffc70e3425547f8efca6f4f2d5554d49711
           git cat-file -e "$baseline^{commit}" 2>/dev/null || git fetch --no-tags --depth=1 origin "$baseline"
           git archive "$baseline" harmonyos | tar -xf - -C "$parent"
           echo "Closure parent=$(git rev-parse "$baseline") current=$(git rev-parse HEAD)" | tee -a "$GITHUB_STEP_SUMMARY"
@@ -210,7 +210,7 @@ jobs:
           mv "$RUNNER_TEMP/full.hap" "$RUNNER_TEMP/current-full.hap"
           rm "$RUNNER_TEMP/closure-sdk.tar.zst" "$RUNNER_TEMP/closure-sdk.sha256"
           date +%s%N > "$RUNNER_TEMP/cache-start"
-      - name: Restore exact Build 94 closure
+      - name: Restore exact Build 94 closure (branch-scoped candidate)
         uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684
         with:
           path: |
@@ -218,7 +218,7 @@ jobs:
             ${{ runner.temp }}/closure-sdk.sha256
             ${{ runner.temp }}/full.hap
           key: closure-6.1.1.280-Linux-X64-e8643547783d4843b51f268c18ac33a3654dceb0-46157173522-1
-          fail-on-cache-miss: true
+          fail-on-cache-miss: false
       - name: Test old closure; reject incompatible build and recover with full SDK
         env:
           GH_TOKEN: ${{ github.token }}
@@ -227,9 +227,13 @@ jobs:
           root="$GITHUB_WORKSPACE"
           cd "$RUNNER_TEMP"
           echo "Cross-version transfer nanoseconds=$(( $(date +%s%N)-$(cat cache-start) ))" | tee -a "$GITHUB_STEP_SUMMARY"
-          sha256sum -c closure-sdk.sha256
           mkdir old-sdk
-          zstd -dc closure-sdk.tar.zst | tar -xf - -C old-sdk
+          if [[ -s closure-sdk.tar.zst && -s closure-sdk.sha256 ]]; then
+            sha256sum -c closure-sdk.sha256
+            zstd -dc closure-sdk.tar.zst | tar -xf - -C old-sdk
+          else
+            echo "Old closure not visible on this isolated branch; full verified fallback required" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
           echo "Cross-version SDK ready nanoseconds=$(( $(date +%s%N)-$(cat cache-start) ))" | tee -a "$GITHUB_STEP_SUMMARY"
           # The old candidate is an experimental input only. Its failure is
           # recorded, never interpreted as a successful compatible build.
@@ -254,10 +258,10 @@ jobs:
             test -s "$hap" || exit 1
             python3 "$RUNNER_TEMP/compare-hap.py" "$RUNNER_TEMP/current-full.hap" "$hap" || exit $?
           )
-          if build_sdk "$RUNNER_TEMP/old-sdk" > "$RUNNER_TEMP/old-sdk-build.log" 2>&1; then
+          if [[ -d "$RUNNER_TEMP/old-sdk/command-line-tools" ]] && build_sdk "$RUNNER_TEMP/old-sdk" > "$RUNNER_TEMP/old-sdk-build.log" 2>&1; then
             echo "Old closure compatible: HAP entries equivalent" | tee -a "$GITHUB_STEP_SUMMARY"
           else
-            tail -n 35 "$RUNNER_TEMP/old-sdk-build.log"
+            if [[ -f "$RUNNER_TEMP/old-sdk-build.log" ]]; then tail -n 35 "$RUNNER_TEMP/old-sdk-build.log"; fi
             echo "Old closure REJECTED (incompatible); testing full verified SDK fallback" | tee -a "$GITHUB_STEP_SUMMARY"
             cd "$root"
             git clean -fdx -- harmonyos

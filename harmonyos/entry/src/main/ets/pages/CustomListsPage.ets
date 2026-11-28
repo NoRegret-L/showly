@@ -24,6 +24,7 @@ export struct CustomListsPage{
   onBack:()=>void=()=>{};
   onOpen:(item:Media)=>void=()=>{};
   current:()=>boolean=()=>false;
+  writable:()=>boolean=()=>true;
   @State view:ListSnapshot=emptyListSnapshot();
   @State selected:string='';
   @State query:string='';
@@ -80,15 +81,17 @@ export struct CustomListsPage{
     }catch(error){this.publish(token,undefined,false,'列表读取失败，可重试；未覆盖数据',this.view.loaded);}
   }
   private async edit(command:ListCommand):Promise<void>{
+    if(!this.writable()){return;}
     const repo=this.repo;if(!repo||!this.allowed()||this.view.busy){return;}
     const token=this.owner.begin();this.publish(token,undefined,true,'',this.view.loaded);
-    try{const doc=await repo.edit(this.scope,command,()=>this.allowed()&&this.owner.current(token));
+    try{const doc=await repo.edit(this.scope,command,()=>this.allowed()&&this.writable()&&this.owner.current(token));
       if(!this.allowed()||!this.owner.current(token)){return;}
       if(command.kind==='delete'){this.selected='';}this.editing=false;
       this.publish(token,doc,false,'已保存至本机',true);
     }catch(error){this.publish(token,undefined,false,'列表保存失败，请重试',this.view.loaded);}
   }
   private async importLists():Promise<void>{
+    if(!this.writable()){return;}
     const repo=this.repo,session=traktAuth.session(this.client),scope=this.scope;
     if(!repo||!this.allowed()||this.view.busy||!scope.startsWith('account:')||!session){return;}
     const token=this.owner.begin();this.publish(token,undefined,true,'读取 Trakt 列表…',this.view.loaded);
@@ -115,9 +118,10 @@ export struct CustomListsPage{
     try{const ratings=await this.readRatings();if(this.allowed()&&!signal.cancelled()&&this.selected===id){for(const r of ratings){this.ratings.set(r.id,r.value);}this.updateRows();}}catch(error){}
   }
   private savePreference():void{
+    if(!this.writable()){return;}
     if(this.reorderMode||!this.selected){return;}const id=this.selected,revision=++this.preferenceRevision;
     const p:ListPreference={sort:this.memberSort,kind:this.kind,descending:this.descending};
-    this.repo?.savePreference(this.scope,id,p,()=>this.allowed()&&this.selected===id&&revision===this.preferenceRevision).catch(()=>{});
+    this.repo?.savePreference(this.scope,id,p,()=>this.allowed()&&this.writable()&&this.selected===id&&revision===this.preferenceRevision).catch(()=>{});
   }
   private toggleReorder():void{
     if(this.view.busy||this.list()?.remote!==false){return;}
@@ -139,6 +143,7 @@ export struct CustomListsPage{
     }catch(error){this.publish(token,undefined,false,'列表备份失败',true);}
   }
   private async restoreLists():Promise<void>{
+    if(!this.writable()){return;}
     const repo=this.repo;if(!repo||!this.allowed()||this.view.busy){return;}
     const token=this.owner.begin();this.publish(token,undefined,true,'选择本机列表备份…',true);
     try{const backup=await selectCustomListBackup(this.getUIContext().getHostContext() as common.UIAbilityContext);
@@ -150,9 +155,10 @@ export struct CustomListsPage{
     }catch(error){this.publish(token,undefined,false,'备份验证失败；未修改数据',true);}
   }
   private async confirmRestore(backup:ListDocument,old:ListDocument):Promise<void>{
+    if(!this.writable()){return;}
     const repo=this.repo;if(!repo||!this.allowed()||this.view.busy){return;}
     const token=this.owner.begin();this.publish(token,undefined,true,'恢复列表…',true);
-    try{const doc=await repo.restoreLocal(this.scope,backup,old,()=>this.allowed()&&this.owner.current(token));this.publish(token,doc,false,'本机列表恢复成功',true);}
+    try{const doc=await repo.restoreLocal(this.scope,backup,old,()=>this.allowed()&&this.writable()&&this.owner.current(token));this.publish(token,doc,false,'本机列表恢复成功',true);}
     catch(error){this.publish(token,undefined,false,'恢复失败或预览变化；请重新选择',true);}
   }
   private startEdit(row?:CustomList):void{this.name=row?.name??'';this.description=row?.description??'';this.editing=true;}
@@ -172,17 +178,18 @@ export struct CustomListsPage{
     Row({space:8}){
       if(!this.manage){Button('返回').fontSize(12).height(32).onClick(()=>{if(this.selected){this.enrichment.cancel();this.selected='';this.reorderMode=false;this.editing=false;this.updateRows();}else{this.onBack();}})}
       Text(this.manage?'加入自定义列表':this.list()?.name??'我的列表').fontSize(20).fontWeight(FontWeight.Medium).layoutWeight(1)
-      if(!this.selected){Button('新建').fontSize(12).height(32).enabled(this.view.loaded&&!this.view.busy).onClick(()=>{this.startEdit();})}
+      if(!this.selected){Button('新建').fontSize(12).height(32).enabled(this.writable()&&this.view.loaded&&!this.view.busy).onClick(()=>{this.startEdit();})}
     }.width('100%')
     if(this.view.busy){LoadingProgress().width(22).height(22)}
     if(this.view.status){Text(this.view.status).fontSize(12).width('100%')}
     if(!this.view.loaded&&!this.view.busy){Button('重试读取').onClick(()=>{this.load();})}
     if(!this.scope){Text('账户尚未验证，列表暂不可用').fontSize(12)}
+    else if(!this.writable()){Text('显示本账户上次列表；在线核验后可编辑。').fontSize(12)}
     if(this.editing){
       TextInput({placeholder:'列表名称',text:this.name}).onChange((v:string)=>{this.name=v;})
       TextInput({placeholder:'描述（可选）',text:this.description}).onChange((v:string)=>{this.description=v;})
       Row({space:8}){
-        Button('保存').enabled(!!this.name.trim()&&!this.view.busy).onClick(()=>{this.edit({kind:this.selected?'edit':'create',id:this.selected,name:this.name,description:this.description});})
+        Button('保存').enabled(this.writable()&&!!this.name.trim()&&!this.view.busy).onClick(()=>{this.edit({kind:this.selected?'edit':'create',id:this.selected,name:this.name,description:this.description});})
         Button('取消').onClick(()=>{this.editing=false;})
       }
     }

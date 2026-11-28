@@ -3,7 +3,7 @@ import { cryptoFramework } from '@kit.CryptoArchitectureKit';
 import { util } from '@kit.ArkTS';
 import { http } from '@kit.NetworkKit';
 import { TRAKT_REDIRECT_URI } from '../config/TraktConfig';
-import { loadRefresh, saveRefresh, removeRefresh, tryVaultLock, releaseVaultLock, clearBackgroundGrant, BackgroundGrant, newBackgroundGrantId, readBackgroundGrant, writeBackgroundGrant } from './TokenVault';
+import { loadRefreshRecord, saveRefresh, removeRefresh, tryVaultLock, releaseVaultLock, clearBackgroundGrant, BackgroundGrant, newBackgroundGrantId, readBackgroundGrant, writeBackgroundGrant } from './TokenVault';
 
 interface PendingLogin {
   state: string;
@@ -80,6 +80,36 @@ class TraktAuth {
   private busy: boolean = false;
   private clientId: string = '';
   private attemptedRestore: boolean = false;
+  private cacheClient: string = '';
+  private cacheScope: string = '';
+  private refreshPersisted: boolean = false;
+
+  // Account identity and refresh credential are one atomic secure record.
+  prepareLocal(clientId: string): void {
+    if (!clientId || this.busy) { return; }
+    this.cacheClient=clientId;
+    try {
+      const record=loadRefreshRecord(clientId);
+      this.cacheScope=record ? (record.uuid ? 'account:'+record.uuid : 'pending') : '';
+    } catch (error) { this.cacheScope='pending'; }
+    AppStorage.setOrCreate<string>('traktCacheScope',this.cacheScope);
+  }
+  cachedAccount(clientId: string): string {
+    return this.cacheClient===clientId && this.cacheScope.startsWith('account:') ? this.cacheScope.substring(8) : '';
+  }
+  rememberAccount(clientId: string, generation: number, uuid: string): boolean {
+    if (!uuid || uuid.trim()!==uuid || !this.isCurrent(clientId,generation) || !this.refreshPersisted) { return false; }
+    const lease=tryVaultLock(); if (!lease) { return false; }
+    try {
+      if (!this.isCurrent(clientId,generation)) { return false; }
+      const record=loadRefreshRecord(clientId); if (!record) { return false; }
+      if (record.uuid!==uuid) { saveRefresh(clientId,record.refreshToken,uuid); }
+      this.cacheClient=clientId; this.cacheScope='account:'+uuid;
+      AppStorage.setOrCreate<string>('traktCacheScope',this.cacheScope);
+      return true;
+    } catch (error) { return false; }
+    finally { releaseVaultLock(lease); }
+  }
 
   session(clientId: string): TraktSession | undefined {
     if (this.busy || this.clientId !== clientId || !this.accessToken || Date.now() >= this.expiresAt) {
@@ -125,12 +155,19 @@ class TraktAuth {
     // A new login cannot inherit a previous account's background consent.
     const revokeLease = tryVaultLock();
     if (!revokeLease) { this.status('后台核对正在进行，请稍后授权。'); return; }
-    try { clearBackgroundGrant(); }
+    try {
+      clearBackgroundGrant();
+      const old=loadRefreshRecord(clientId);
+      if (old?.uuid) { saveRefresh(clientId,old.refreshToken); }
+    }
     catch (error) { this.status('无法撤销旧后台授权，未开始登录。'); return; }
     finally { releaseVaultLock(revokeLease); }
     const generation: number = ++this.generation;
     this.clientId = clientId;
+    this.accessToken=''; this.expiresAt=0; this.refreshPersisted=false;
+    this.cacheClient=clientId; this.cacheScope='pending';
     this.busy = true;
+    AppStorage.setOrCreate<string>('traktCacheScope',this.cacheScope);
     this.status('正在打开 Trakt 官方授权页面…');
     try {
       const state: string = randomValue();
@@ -211,6 +248,7 @@ class TraktAuth {
       this.accessToken = tokens.access_token;
       this.expiresAt = Date.now() + tokens.expires_in * 1000;
       const saved = this.persistRefresh(pending.clientId, tokens.refresh_token);
+      this.refreshPersisted=saved;
       const username = await this.accountName(pending.clientId);
       if (pending.generation === this.generation) {
         this.status((username.length > 0 ? '已登录 Trakt：' + username : '已授权 Trakt（账户名称暂不可用）') + (saved ? '' : '；安全保存失败，重启后需重新登录。'));
@@ -252,13 +290,13 @@ class TraktAuth {
     }
   }
 
-  private persistRefresh(clientId: string, token?: string): boolean {
+  private persistRefresh(clientId: string, token?: string, uuid: string = ''): boolean {
     try {
       if (!token) {
         removeRefresh();
         return false;
       }
-      saveRefresh(clientId, token);
+      saveRefresh(clientId, token, uuid);
       return true;
     } catch (error) {
       return false;
@@ -275,16 +313,19 @@ class TraktAuth {
     if (this.attemptedRestore && !manual && this.expiresAt === 0) {
       return;
     }
+    this.prepareLocal(clientId);
     const lease = tryVaultLock();
     if (!lease) { this.status('授权存储正在使用，保留本机记录。'); return; }
     this.attemptedRestore = true;
+    this.refreshPersisted=false;
     this.clientId = clientId;
     const generation = ++this.generation;
     this.busy = true;
     this.status('正在恢复 Trakt 登录…');
     let request: http.HttpRequest | undefined;
     try {
-      const refreshToken = loadRefresh(clientId);
+      const record=loadRefreshRecord(clientId);
+      const refreshToken = record?.refreshToken ?? '';
       if (!refreshToken) {
         this.status('尚未登录 Trakt');
         return;
@@ -306,6 +347,7 @@ class TraktAuth {
           if (failure.error === 'invalid_grant') {
             clearBackgroundGrant();
             removeRefresh();
+            this.cacheScope=''; AppStorage.setOrCreate<string>('traktCacheScope',this.cacheScope);
             this.accessToken = '';
             this.expiresAt = 0;
             this.status('授权已失效，请重新登录 Trakt。');
@@ -323,11 +365,11 @@ class TraktAuth {
       }
       this.accessToken = tokens.access_token;
       this.expiresAt = Date.now() + tokens.expires_in * 1000;
-      const saved = this.persistRefresh(clientId, tokens.refresh_token);
-      const username = await this.accountName(clientId);
+      const saved = this.persistRefresh(clientId, tokens.refresh_token, record?.uuid ?? '');
+      this.refreshPersisted=saved;
+      if (!saved) { this.cacheScope='pending'; AppStorage.setOrCreate<string>('traktCacheScope',this.cacheScope); }
       if (generation === this.generation) {
-        this.status((username ? '已登录 Trakt：' + username : '已恢复 Trakt 授权') +
-          (saved ? '' : '；安全保存失败，重启后需重新登录。'));
+        this.status('已恢复 Trakt 授权；正在核对账户' + (saved ? '' : '；安全保存失败，重启后需重新登录。'));
       }
     } catch (error) {
       if (generation === this.generation) {
@@ -370,6 +412,8 @@ class TraktAuth {
     this.expiresAt = 0;
     this.busy = false;
     this.clientId = '';
+    this.cacheClient=''; this.cacheScope=''; this.refreshPersisted=false;
+    AppStorage.setOrCreate<string>('traktCacheScope','');
     this.attemptedRestore = true;
     this.status('本机已断开登录；未撤销 Trakt 网站上的授权。');
     return true;

@@ -4,9 +4,10 @@ import { asset } from '@kit.AssetStoreKit';
 import { util } from '@kit.ArkTS';
 import { BusinessError } from '@kit.BasicServicesKit';
 
-interface RefreshRecord {
+export interface RefreshRecord {
   clientId: string;
   refreshToken: string;
+  uuid?: string;
 }
 
 function bytes(value: string): Uint8Array {
@@ -29,8 +30,8 @@ export function removeRefresh(): void {
   }
 }
 
-export function saveRefresh(clientId: string, refreshToken: string): void {
-  const record: RefreshRecord = { clientId: clientId, refreshToken: refreshToken };
+export function saveRefresh(clientId: string, refreshToken: string, uuid: string = ''): void {
+  const record: RefreshRecord = { clientId: clientId, refreshToken: refreshToken, uuid: uuid };
   const secret = bytes(JSON.stringify(record));
   if (secret.length > 1024) {
     // Asset Store's documented maximum; never fall back to plaintext.
@@ -45,24 +46,27 @@ export function saveRefresh(clientId: string, refreshToken: string): void {
   asset.addSync(attrs);
 }
 
-export function loadRefresh(clientId: string): string {
+export function loadRefreshRecord(clientId: string): RefreshRecord | undefined {
   const query = alias();
   query.set(asset.Tag.RETURN_TYPE, asset.ReturnType.ALL);
   try {
     const records = asset.querySync(query);
     if (records.length !== 1) {
-      return '';
+      return undefined;
     }
     const raw = records[0].get(asset.Tag.SECRET) as Uint8Array;
     const record = JSON.parse(util.TextDecoder.create('utf-8').decodeToString(raw)) as RefreshRecord;
-    return record.clientId === clientId && typeof record.refreshToken === 'string' ? record.refreshToken : '';
+    if (!record || record.clientId !== clientId || typeof record.refreshToken !== 'string' || !record.refreshToken) { return undefined; }
+    return {clientId:clientId,refreshToken:record.refreshToken,uuid:typeof record.uuid==='string' && record.uuid.trim()===record.uuid ? record.uuid : ''};
   } catch (error) {
     if ((error as BusinessError).code === 24000002) {
-      return '';
+      return undefined;
     }
     throw new Error('Cannot read secure token');
   }
 }
+
+export function loadRefresh(clientId: string): string { return loadRefreshRecord(clientId)?.refreshToken ?? ''; }
 
 // One stable inode for all token-mutating operations, never unlink or rotate.
 // The kernel releases the advisory lock when the owning process exits.

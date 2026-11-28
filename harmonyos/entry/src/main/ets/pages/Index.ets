@@ -84,6 +84,7 @@ import { TRAKT_APPS_URL, TRAKT_REDIRECT_URI } from '../config/TraktConfig';
 import { ClientSettings, validateClientId } from '../data/ClientSettings';
 import { pasteboard } from '@kit.BasicServicesKit';
 import { traktAuth } from '../data/TraktAuth';
+import { cacheReadable, startupNotice } from '../model/StartupReadState';
 import { CloudLibrary, ShowProgress, readCloudLibraryIncremental, mergeNewTitles, readActivity } from '../data/TraktLibrary';
 import { LibraryProjection, LibraryProjectionSession, projectDetail } from '../data/LibraryProjection';
 import { allowLocalScope } from '../model/EffectiveState';
@@ -290,7 +291,7 @@ struct Index {
   }
   private async ratingSave(expected:RatingState,value:number):Promise<RatingState>{
     const ticket=this.ratingTicket,scope=this.ratingScopeCaptured,target=this.ratingTarget,session=scope==='device'?undefined:traktAuth.session(this.clientId);
-    const current=():boolean=>this.ratingCurrent(ticket,scope)&&!this.setupBusy&&!this.authBusy&&!this.syncBusy&&!this.cloudBusy&&(!session||traktAuth.isCurrent(session.clientId,session.generation));
+    const current=():boolean=>this.ratingCurrent(ticket,scope)&&(scope==='device'?!this.hasAccount():!!this.activeCloud())&&!this.setupBusy&&!this.authBusy&&!this.syncBusy&&!this.cloudBusy&&(!session||traktAuth.isCurrent(session.clientId,session.generation));
     const repo=await openRatings(this.context()),state=await repo.change(scope,target,expected,value,session,current);
     if(current()&&!state.pending){
       const item=this.selectedMedia;
@@ -338,7 +339,7 @@ struct Index {
   private openMediaGallery(item:Media,type:string):void{this.galleryRevision=this.detailRevision;this.galleryScope=this.currentSearchAccount();this.galleryTarget={item:item,type:type,hints:type==='poster'?this.detailUi.summary?.posterUrls??[]:this.detailUi.summary?.fanartUrls??[],initialUri:type==='poster'?this.artwork(item):this.detailUi.fanart};this.gallerySheetOpen=true;}
   private galleryCurrent():boolean{return this.gallerySheetOpen&&this.pageVisible&&this.galleryRevision===this.detailRevision&&this.galleryScope===this.currentSearchAccount();}
   @Builder gallerySheet(){GalleryPage({target:this.galleryTarget,client:this.clientId,current:()=>this.galleryCurrent(),onClose:()=>{this.gallerySheetOpen=false;}})}
-  private partRatingScope():string{return JSON.stringify([this.currentProgressScope(),this.activeCloud()?.generation??-1,this.activeCloud()?.activity??'',this.cloudFresh]);}
+  private partRatingScope():string{return JSON.stringify([this.currentProgressScope(),this.displayCloud()?.generation??-1,this.displayCloud()?.activity??'',this.cloudFresh]);}
   private publishSeasonPresentation():void{this.seasonDetail=this.seasonDetailOwner.touch();this.updateEpisodePageRows();}
   private displaySeasonRows():DetailSeasonRow[]{
     const rows=this.seasonDetail.seasons;
@@ -601,6 +602,8 @@ struct Index {
   @StorageLink('traktAuthStatus') authStatus: string = '尚未登录 Trakt';
   @StorageLink('traktAuthBusy') @Watch('onRecoveryGateChanged') authBusy: boolean = false;
   @StorageLink('traktSignedIn') @Watch('onObservationAuthChanged') signedIn: boolean = false;
+  @StorageLink('traktCacheScope') @Watch('onObservationAuthChanged') cacheScope: string = '';
+  private hasAccount(): boolean { return this.signedIn || !!this.cacheScope; }
   @State items: Media[] = [];
   @State @Watch('onSearchViewChanged') results: Media[] = [];
   @State ready: boolean = false;
@@ -721,6 +724,7 @@ struct Index {
       if (!this.clientId) { this.tab = 'account'; }
       this.settingsReady = true;
       if (this.clientId) {
+        traktAuth.prepareLocal(this.clientId);
         traktAuth.restore(this.clientId);
       }
     } catch (error) {
@@ -743,8 +747,9 @@ struct Index {
     this.requestPresentation();
     this.startNetworkListener();
     if (this.backupBusy) { return; }
-    this.requestMediaRecovery();
     const initialized = this.startupScheduled;
+    this.scheduleInitialRead();
+    this.requestMediaRecovery();
     this.requestObservation(true);
     const wake = lastScheduleWake(this.context().filesDir);
     if (wake > this.seenScheduleWake && this.ready && this.episodeReady && this.signedIn) {
@@ -752,7 +757,7 @@ struct Index {
       this.requestSyncNow();
     }
     this.scheduleInitialRead();
-    if (initialized && !this.signedIn) { this.requestProjection(); }
+    if (initialized && (!this.signedIn || !this.displayCloud())) { this.requestProjection(); }
     if (this.autoActive()) { this.requestRecovery(); }
     else if (this.clientId && !this.setupBusy && !this.cloudBusy && !this.syncBusy) {
       traktAuth.restore(this.clientId);
@@ -830,6 +835,7 @@ struct Index {
           this.networkStatus = '系统网络已验证，正在核对待同步记录';
           this.requestRecovery();
           this.requestMediaRecovery();
+          if (!this.signedIn && this.clientId && !this.authBusy) { traktAuth.restore(this.clientId,true); }
           this.requestObservation();
           this.presentationAttempts.retry(); this.presentationQueues.clear();
           this.requestPresentation();
@@ -866,7 +872,13 @@ struct Index {
   // A busy auth/DB/sync operation no longer drops the network-resume event.
   // Coalesce to a single pending event, not a periodic retry loop.
   private onObservationAuthChanged(): void {
+    if (this.cloud && this.cloudUuid && traktAuth.cachedAccount(this.clientId)===this.cloudUuid) {
+      if (!this.activeCloud()) { this.cloudFresh=false; }
+      if (this.signedIn && !this.cloudBusy) { this.requestObservation(); }
+      this.requestPresentation(); return;
+    }
     this.syncCoordinator.reset();
+    this.historyOwner.clear(); this.historyRows.replace([],[],[]);
     this.lastEpisodeUpload = 0;
     this.clearCollectionViews();
     this.clearProgressCandidates();
@@ -913,7 +925,7 @@ struct Index {
     this.titleConfirm = false;
     this.movieUndo = undefined;
     this.movieUndoStatus = '';
-    if (!this.signedIn) {
+    if (!this.hasAccount()) {
       this.cloudLocalAllowed = false;
       this.clearLocalCalendar(); this.libraryEvidence = [];
       this.localSeries = undefined;
@@ -927,14 +939,14 @@ struct Index {
     this.nextShows = [];
     this.localSeries = undefined;
     this.effectiveEditable = false;
-    this.requestObservation();
+    this.requestProjection(); this.requestObservation();
   }
 
   private scheduleInitialRead(): void {
     if (this.startupScheduled || !this.ready || !this.episodeReady || !this.pageVisible) { return; }
     this.startupScheduled = true;
+    this.requestProjection();
     if (this.signedIn) { this.requestObservation(true); }
-    else { this.requestProjection(); }
   }
 
   private requestObservation(passive: boolean = false): void {
@@ -976,9 +988,17 @@ struct Index {
   }
 
   private onRecoveryGateChanged(): void {
+    // Read-only local projection can proceed during OAuth, not durable writes.
+    if (this.projectionPending && this.ready && this.episodeReady && this.pageVisible && !this.backupBusy &&
+        !this.syncBusy && !syncService.busy() && !this.localBusy && !this.cloudBusy && !this.saving && !this.setupBusy) {
+      this.projectionPending=false; this.loadNextShows(); return;
+    }
     if (syncService.busy() || this.backupBusy || !this.pageVisible || this.syncBusy || this.localBusy || this.cloudBusy || this.saving ||
         this.authBusy || this.setupBusy) { return; }
     if (this.detailResumePending && this.selectedMedia) { this.resumeDetail(); if (this.localBusy) { return; } }
+    if (this.observationPending && this.ready && this.episodeReady && this.hasAccount() && !this.displayCloud()) {
+      this.observationPending=false; this.loadCloud(false); return;
+    }
     const lane = this.syncCoordinator.next(this.autoActive() && this.episodeReady,
       !this.saving, this.ready && this.episodeReady && this.signedIn,
       this.ready && this.episodeReady && this.titleQuickActive());
@@ -1254,8 +1274,14 @@ struct Index {
     return snapshot && this.signedIn && traktAuth.isCurrent(this.clientId, snapshot.generation) ? snapshot : undefined;
   }
 
+  private displayCloud(): CloudLibrary | undefined {
+    const live=this.activeCloud(); if (live) { return live; }
+    const snapshot=this.cloud;
+    return snapshot && cacheReadable(this.cloudUuid,traktAuth.cachedAccount(this.clientId),snapshot.verifiedAt ?? 0) ? snapshot : undefined;
+  }
+
   private canEditLibrary(): boolean {
-    return !this.signedIn || (!!this.activeCloud() && this.cloudLocalAllowed);
+    return !this.hasAccount() || (!!this.activeCloud() && this.cloudLocalAllowed);
   }
 
   private async refreshEffectiveDetail(): Promise<void> {
@@ -1266,9 +1292,9 @@ struct Index {
     const scope=this.currentSearchAccount();
     if (!this.detailSession.current(this.detailSession.token(),scope,item.id)) { this.detailSession.begin(scope,item.id); this.detailConsumer=this.detailSession.consumer(); }
     const token=this.detailSession.token();
-    const snapshot = this.activeCloud();
+    const snapshot = this.displayCloud();
     const uuid = this.cloudUuid;
-    if (this.signedIn && !snapshot) {
+    if (this.hasAccount() && !snapshot) {
       this.localSeries = undefined;
       this.clearSeasonDetail();
       this.effectiveEditable = false;
@@ -1277,7 +1303,7 @@ struct Index {
     }
     this.effectiveEditable=false;
     const readRevision=store.assertProjectionReadable();
-    const current=(): boolean=>this.pageVisible && revision===this.detailRevision && this.detailSession.current(token,scope,item.id) && scope===this.currentSearchAccount() && snapshot===this.activeCloud() && uuid===this.cloudUuid && store.projectionReadable(readRevision);
+    const current=(): boolean=>this.pageVisible && revision===this.detailRevision && this.detailSession.current(token,scope,item.id) && scope===this.currentSearchAccount() && snapshot===this.displayCloud() && uuid===this.cloudUuid && store.projectionReadable(readRevision);
     let full=this.detailSession.read(scope,item.id,readRevision);
     if (!full) { full=await store.fullCatalog(item.id); }
     if (!current()) { return; }
@@ -1488,14 +1514,14 @@ struct Index {
     const collectionScope=prior?.collectionScope??this.collectionSortKey(false);
     const changed=submitted&&expected!==undefined?this.mediaInput.replaceVerifiedEdit(expected,submitted,records,ids):this.mediaInput.replace(records);
     if (!changed) { return false; }
-    const changes=prior||this.signedIn&&!this.activeCloud()?undefined:this.personalLibraryIndex.updateRecords(this.mediaInput.recordsById(),this.mediaInput.libraryChangedIds(),
-      this.mediaInput.canApplyIncremental()&&!this.mediaInput.libraryOrderChanged(),this.activeCloud(),this.libraryEvidence,this.cloudLocalAllowed);
+    const changes=prior||this.hasAccount()&&!this.displayCloud()?undefined:this.personalLibraryIndex.updateRecords(this.mediaInput.recordsById(),this.mediaInput.libraryChangedIds(),
+      this.mediaInput.canApplyIncremental()&&!this.mediaInput.libraryOrderChanged(),this.displayCloud(),this.libraryEvidence,this.cloudLocalAllowed);
     if(changes){
       for(const change of changes){if(change.row){this.libraryIndex.set(change.id,change.row);}else{this.libraryIndex.delete(change.id);}}
     }else{this.personalLibraryIndex.clear();this.libraryIndex.clear();}
     this.pendingMediaDelta={changes:changes,movieQueryScope:movieQueryScope,movieAllScope:movieAllScope,
       collectionScope:collectionScope,now:now,utc:utc,version:this.mediaInput.version(),account:this.currentProgressScope(),
-      cloud:this.activeCloud(),evidence:this.libraryEvidence,localAllowed:this.cloudLocalAllowed};
+      cloud:this.displayCloud(),evidence:this.libraryEvidence,localAllowed:this.cloudLocalAllowed};
     this.mediaRecords=records;
     return true;
   }
@@ -1504,8 +1530,8 @@ struct Index {
     const pending=this.pendingMediaDelta;this.pendingMediaDelta=undefined;
     let handled=false;
     const scoped=!!pending?.changes&&pending.version===this.mediaInput.version()&&pending.account===this.currentProgressScope()&&
-      pending.cloud===this.activeCloud()&&pending.evidence===this.libraryEvidence&&pending.localAllowed===this.cloudLocalAllowed&&
-      (!this.signedIn||!!this.activeCloud());
+      pending.cloud===this.displayCloud()&&pending.evidence===this.libraryEvidence&&pending.localAllowed===this.cloudLocalAllowed&&
+      (!this.hasAccount()||!!this.displayCloud());
     this.collectionDependencies.observe(scoped&&pending?.changes?pending.changes.map((change:PersonalLibraryChange)=>change.id):[],!scoped);
     this.pageWorks.observe(JSON.stringify([this.currentProgressScope(),this.libraryRevision]),
       scoped&&pending?.changes?pending.changes.map((change:PersonalLibraryChange)=>change.id):[],!scoped);
@@ -1520,8 +1546,8 @@ struct Index {
   private updateSearchCandidatesForLibraryChanges(changes:PersonalLibraryChange[]):void{
     if(!this.searchController.source){return;}
     const scope=this.currentSearchAccount();
-    const priorKey=JSON.stringify([scope,this.libraryRevision-1,this.cloudLocalAllowed,this.activeCloud()?.generation??-1,
-      this.activeCloud()?.activity??'',this.presentationLanguage]);
+    const priorKey=JSON.stringify([scope,this.libraryRevision-1,this.cloudLocalAllowed,this.displayCloud()?.generation??-1,
+      this.displayCloud()?.activity??'',this.presentationLanguage]);
     if(this.searchController.key!==priorKey){return;}
     for(const change of changes){
       if(this.searchController.stored.has(change.id)){continue;}
@@ -1531,8 +1557,8 @@ struct Index {
           localized:this.presentationLanguage==='zh'?this.titleIndex.get(change.id)?.text.title??'':''});
       }else{this.searchController.titles.remove(change.id);}
     }
-    this.searchController.key=JSON.stringify([scope,this.libraryRevision,this.cloudLocalAllowed,this.activeCloud()?.generation??-1,
-      this.activeCloud()?.activity??'',this.presentationLanguage]);
+    this.searchController.key=JSON.stringify([scope,this.libraryRevision,this.cloudLocalAllowed,this.displayCloud()?.generation??-1,
+      this.displayCloud()?.activity??'',this.presentationLanguage]);
   }
   private applyMediaRecordDisplayDelta(pending:PendingMediaDelta):boolean{
     const changes=pending.changes??[],metadata=this.movieCalendarCurrent()?this.movieMetadataIndex():new Map<string,PersonalMovie>();
@@ -2088,7 +2114,7 @@ struct Index {
       if (this.sortJobs.pending(this.collectionSortSlot())) { return; }
       const summary: PageSummary = {key:this.collectionDisplayKey(),total:prepared.length,page:this.collectionPage,pages:Math.max(1,Math.ceil(prepared.length/this.collectionPageSize))};
       const rows: CollectionGroup[] = [];
-      if (!this.signedIn || this.activeCloud()) {
+      if (!this.hasAccount() || this.displayCloud()) {
         const label=this.collectionFilter==='hidden'?'隐藏影视':this.collectionFilter==='queue'?'待看清单':'全部';
         const step=this.collectionGrid?2:1;
         for(let i=0;i<prepared.length;i+=step){
@@ -3451,6 +3477,7 @@ struct Index {
   }
 
   private clearCloud(): void {
+    this.historyOwner.clear(); this.historyRows.replace([],[],[]);
     this.clearCollectionViews();
     this.movieTitleOrder.clear();this.movieAllTitleOrder.clear();this.showCollectionTitleOrder.clear();this.movieCollectionTitleOrder.clear();
     this.clearProgressCandidates();
@@ -3562,8 +3589,9 @@ struct Index {
       const account = await readSyncAccount(session);
       const current = (): boolean => this.clientId === clientId && traktAuth.isCurrent(clientId, session.generation);
       if (!current()) { throw new Error('Session changed'); }
-      if (this.cloudUuid !== account.uuid || this.cloud?.generation !== session.generation) {
-        this.clearCloud();
+      if (this.cloudUuid !== account.uuid) { this.clearCloud(); }
+      else if (this.cloud && this.cloud.generation!==session.generation) {
+        this.cloud={...this.cloud,generation:session.generation};
       }
       const bound = await store.boundAccount();
       if (!current()) { throw new Error('Session changed'); }
@@ -3580,8 +3608,8 @@ struct Index {
         const restored: CloudLibrary = { generation: session.generation, activity: cached.activity,
           observedAt: cached.observedAt, watchlist: cached.watchlist, watchedMovies: cached.watchedMovies,
           shows: cached.shows, moviePlays: cached.moviePlays, queueDates: cached.queueDates, movieDetails: cached.movieDetails, movieWatchedDetails: cached.movieWatchedDetails, movieQueuedDetails: cached.movieQueuedDetails, versions: cached.versions, verifiedAt: cached.verifiedAt };
-        this.cloud = restored;
         this.cloudUuid = account.uuid;
+        this.cloud = restored;
         this.publishMovieSource(restored);
         this.reloadProgressFlags();
         this.resetCollection();
@@ -3627,11 +3655,12 @@ struct Index {
         await store.saveRemoteObservation(account.uuid, persisted);
         if (!current()) { throw new Error('Session changed'); }
         snapshot = persisted;
-        this.cloud = snapshot;
         this.cloudUuid = account.uuid;
+        this.cloud = snapshot;
         this.publishMovieSource(snapshot);
-        if (changed) { this.clearLocalCalendar(); this.libraryEvidence = []; }
+        // Keep the committed display until the new projection is available.
         this.cloudFresh = true;
+        traktAuth.rememberAccount(clientId,session.generation,account.uuid);
         if (bound === account.uuid) { traktAuth.setBackgroundRead(clientId,account.uuid,true,true); }
       } catch (error) {
         if (!current() || !this.cloud || this.cloudUuid !== account.uuid) { throw new Error('读取云端失败'); }
@@ -3706,7 +3735,8 @@ struct Index {
       // Movie progress and calendar consume the already verified observation.
       // Optional rating reads run outside the cloudBusy gate.
     } catch (error) {
-      if (!this.cloud || !traktAuth.isCurrent(clientId, this.cloud.generation)) { this.clearCloud(); }
+      if (!this.displayCloud()) { this.clearCloud(); }
+      this.nextStatus=this.displayCloud()?'同步未完成，显示上次记录。':'个人库读取失败，请重试。';
       this.libraryNotice = '更新未完成，请重试。';
       this.cloudStatus = '读取未完成：' + safeSyncError(error as Error) + '；保留原记录。';
     } finally { this.cloudBusy = false; this.scheduleLazyRows(); }
@@ -4322,8 +4352,8 @@ struct Index {
         try { const repo=await this.searchRepository(); stored=await repo.catalog(scope); } catch (error) {}
         if (!current()) { continue; }
         const candidate=(row: SearchRecord): SearchCandidate=>({media:row.media,votes:row.votes,localized:language==='zh' ? this.titleIndex.get(row.media.id)?.text.title ?? '' : ''});
-        const key=JSON.stringify([scope,this.libraryRevision,this.cloudLocalAllowed,this.activeCloud()?.generation ?? -1,
-          this.activeCloud()?.activity ?? '',language]);
+        const key=JSON.stringify([scope,this.libraryRevision,this.cloudLocalAllowed,this.displayCloud()?.generation ?? -1,
+          this.displayCloud()?.activity ?? '',language]);
         if (this.searchController.source!==stored || this.searchController.key!==key) {
           const library:Media[]=scope&&scope===this.currentSearchAccount()?this.personalLibrary().filter((row:PersonalLibraryRow)=>isTraktMedia(row.media)).map((row:PersonalLibraryRow)=>row.media):[];
           this.searchController.seed(stored,key,library,candidate);
@@ -4501,7 +4531,7 @@ struct Index {
   private discoverPageResult(): DiscoverPage {
     // Public feed storage contains no personal membership or watch state.
     // Do not interpret an unverified account as an empty collection.
-    if (this.discoverOptions.hideCollection && (!this.ready || (this.signedIn && !this.activeCloud()))) { return discoverPage([],1); }
+    if (this.discoverOptions.hideCollection && (!this.ready || (this.hasAccount() && !this.displayCloud()))) { return discoverPage([],1); }
     const now = Date.now();
     const day = new Date(now).toISOString().substring(0,10);
     const key = JSON.stringify([this.discoverFeedKey,this.discoverFeed?.fetchedAt ?? 0,this.discoverMode,this.discoverOptions.hideCollection,
@@ -4573,7 +4603,7 @@ struct Index {
             .onClick(() => { this.applyDiscover({mode:this.discoverMode,genres:this.discoverOptions.genres,networks:this.discoverOptions.networks,hideCollection:!this.discoverOptions.hideCollection}); })
         }.width('100%')
         Text(this.discoverStatus).fontSize(12).width('100%')
-        if (this.discoverOptions.hideCollection && (!this.ready || (this.signedIn && !this.activeCloud()))) {
+        if (this.discoverOptions.hideCollection && (!this.ready || (this.hasAccount() && !this.displayCloud()))) {
           Text('正在核对个人库，暂不显示未验证的收藏筛选结果。').fontSize(12).width('100%')
         } else { Text('共 '+this.discoverTotal+' 部').fontSize(12).width('100%') }
         Button(this.discoverBusy ? '加载中…' : '刷新榜单')
@@ -4645,38 +4675,50 @@ struct Index {
     const store = this.episodeStore;
     if (!store || !this.episodeReady || this.localBusy || this.cloudBusy || this.syncBusy || this.backupBusy) { return; }
     this.localBusy = true;
-    this.nextStatus = '正在更新追剧进度…';
+    const clientId=this.clientId;
+    const expected=this.hasAccount();
+    const identity=traktAuth.cachedAccount(clientId);
+    const currentIdentity=():boolean=>this.clientId===clientId && this.hasAccount()===expected && traktAuth.cachedAccount(clientId)===identity;
+    this.nextStatus = '正在读取本机追剧进度…';
     try {
-      const snapshot = this.cloud;
-      const uuid = this.cloudUuid;
-      const clientId = this.clientId;
-      const signedIn = this.signedIn;
-      const active = snapshot && signedIn && traktAuth.isCurrent(clientId, snapshot.generation) ? snapshot : undefined;
-      if (signedIn && !active) { this.nextShows = []; this.clearLocalCalendar(); this.libraryEvidence = []; return; }
-      const result = await this.readLibraryProjection(store, active, uuid, clientId, false, false,
-        (): boolean => this.signedIn === signedIn && this.activeCloud() === active && this.cloudUuid === uuid && this.clientId === clientId);
-      if (this.activeCloud() !== active || this.cloudUuid !== uuid || (this.signedIn && !active)) { return; }
+      if (expected && !this.displayCloud() && identity) {
+        const cached=await store.readRemoteObservation(identity);
+        const bound=await store.boundAccount();
+        if (!currentIdentity()) { return; }
+        if (cached && cacheReadable(identity,identity,cached.verifiedAt ?? 0)) {
+          const restored:CloudLibrary={...cached,generation:-1};
+          this.cloudUuid=identity; this.cloudFresh=false; this.cloudLocalAllowed=allowLocalScope(true,bound,identity);
+          this.cloud=restored; this.publishMovieSource(restored); this.reloadProgressFlags();
+        }
+      }
+      if (!currentIdentity()) { return; }
+      const active=this.displayCloud(),uuid=this.cloudUuid;
+      if (expected && !active) { this.nextStatus='个人库尚无可验证缓存，请联网核对账户。'; return; }
+      const current=():boolean=>currentIdentity() && this.displayCloud()===active && this.cloudUuid===uuid;
+      const result=await this.readLibraryProjection(store,active,uuid,clientId,false,false,current);
+      if (!current()) { return; }
+      this.cloudLocalAllowed=result.localAllowed && !!active;
       this.retainProgressCandidates(result.next);
-      this.nextShows = result.next;
+      this.nextShows=result.next;
       this.reloadProgressFlags();
-      this.cloudLocalAllowed = result.localAllowed && !!active;
-      this.libraryEvidence = result.evidence;
+      this.libraryEvidence=result.evidence;
       this.publishLocalCalendar(result);
       this.resetCollection();
       await this.refreshEffectiveDetail();
-      if (this.tab === 'library' && this.collectionGrid && !this.selectedMedia) { this.loadCollectionPosters(); }
-      this.nextStatus = result.missing ? '部分剧集资料尚未补齐。' : '';
-      if (this.cloudFresh && active) { this.libraryNotice = result.repairTargets.length ? '部分剧集资料尚未补齐。' : ''; }
+      if (this.tab==='library' && this.collectionGrid && !this.selectedMedia) { this.loadCollectionPosters(); }
+      this.nextStatus=result.missing?'部分剧集资料尚未补齐。':'';
+      if (active && !this.cloudFresh) { this.libraryNotice='显示本账户上次已核对记录；尚未完成在线同步。'; }
     } catch (error) {
-      this.invalidateNextShows();
-      this.projectionPending = false;
-      this.nextStatus = '进度更新失败，请重试。';
-    } finally { this.localBusy = false; }
+      if (currentIdentity()) { this.nextStatus='进度读取失败，保留可读记录；请重试。'; }
+    } finally {
+      if (this.nextStatus==='正在读取本机追剧进度…') { this.nextStatus='进度读取已结束，请刷新核对。'; }
+      this.localBusy=false; this.scheduleLazyRows();
+    }
   }
 
   private currentProgressScope(): string {
-    if (!this.signedIn) { return 'device'; }
-    return this.activeCloud() && this.cloudUuid ? 'account:' + this.cloudUuid : '';
+    if (!this.hasAccount()) { return 'device'; }
+    return this.displayCloud() && this.cloudUuid ? 'account:' + this.cloudUuid : '';
   }
 
   private reloadProgressFlags(): void {
@@ -4763,7 +4805,7 @@ struct Index {
       this.progressPrefs.sort==='userRating' ? this.currentShowRatingKey() : '']);
   }
   private candidateScope(): string {
-    return JSON.stringify([this.clientId,this.currentProgressScope(),this.activeCloud()?.generation ?? -1,this.cloudLocalAllowed]);
+    return JSON.stringify([this.clientId,this.currentProgressScope(),this.displayCloud()?.generation ?? -1,this.cloudLocalAllowed]);
   }
   private progressCandidateActive(): boolean {
     return this.pageVisible && !this.selectedMedia && this.tab==='progress' && this.mediaMode==='show' && this.progressMode==='next';
@@ -4819,7 +4861,7 @@ struct Index {
     if (!token) { return; }
     const scope=this.candidateScope();
     const current=(): boolean=>this.sortJobs.current('show-candidates',token) && this.progressCandidateActive() &&
-      scope===this.candidateScope() && businessKey===this.progressBusinessKey() && (!this.signedIn || !!this.activeCloud());
+      scope===this.candidateScope() && businessKey===this.progressBusinessKey() && (!this.hasAccount() || !!this.displayCloud());
     try {
       this.candidateIndex.begin(scope);
       const inputs: CandidateInput[]=[];
@@ -4849,7 +4891,7 @@ struct Index {
     }
   }
   private progressData(query: string, live: boolean = false, prepare: boolean = false): ProgressRow[] {
-    if (this.signedIn && !this.activeCloud()) { return []; }
+    if (this.hasAccount() && !this.displayCloud()) { return []; }
     const now=Date.now();
     const businessKey=this.progressBusinessKey();
     const key=this.progressSortKey(query);
@@ -4872,7 +4914,7 @@ struct Index {
     return [];
   }
   private validateNextTarget(row: ProgressRow): boolean {
-    if (!this.progressCandidateActive() || (this.signedIn && !this.activeCloud()) || this.isHidden(row.media)) { return false; }
+    if (!this.progressCandidateActive() || (this.hasAccount() && !this.displayCloud()) || this.isHidden(row.media)) { return false; }
     const target=this.nextShows.find((item: NextShow)=>item.media.id===row.media.id);
     const source=target?.source;
     if (!source) { return false; }
@@ -4915,7 +4957,7 @@ struct Index {
     return entries;
   }
 
-  private watchScope():string{return JSON.stringify([this.currentProgressScope(),this.viewScope(),this.clientId,this.activeCloud()?.generation??-1,this.detailRevision]);}
+  private watchScope():string{return JSON.stringify([this.currentProgressScope(),this.viewScope(),this.clientId,this.displayCloud()?.generation??-1,this.detailRevision]);}
   private chooseWatchTime(release:string,commit:(at:number)=>void):void{
     const scope=this.watchScope(),token=this.watchSelection.begin(scope);
     const apply=(at:number):void=>{
@@ -5051,7 +5093,7 @@ struct Index {
   }
 
   private publishMovieSource(snapshot: CloudLibrary): void {
-    if (this.activeCloud() !== snapshot || !snapshot.movieDetails) { return; }
+    if (this.displayCloud() !== snapshot || !snapshot.movieDetails) { return; }
     if (this.movieCalendarCurrent()) { return; }
     this.movieRatingRequest.reset();this.movieCollectionRatingStatus='';
     this.movieRatingKey = '';
@@ -5102,11 +5144,11 @@ struct Index {
 
   private calendarAccountKey(): string {
     const scope=this.currentProgressScope();
-    return scope ? JSON.stringify([this.clientId,scope,this.activeCloud()?.generation ?? -1]) : '';
+    return scope ? JSON.stringify([this.clientId,scope,this.displayCloud()?.generation ?? -1]) : '';
   }
   private calendarScopeKey(): string {
     const account=this.calendarAccountKey();
-    return account ? JSON.stringify([account,this.activeCloud()?.activity ?? '']) : '';
+    return account ? JSON.stringify([account,this.displayCloud()?.activity ?? '']) : '';
   }
   private clearLocalCalendar(resetIndex: boolean = false): void {
     this.calendarSourceScope='';
@@ -5228,8 +5270,8 @@ struct Index {
       this.requestPresentation();
       return;
     }
-    if (!this.signedIn || !this.clientId) { return; }
-    const source=this.activeCloud();
+    if (!this.hasAccount() || !this.clientId) { return; }
+    const source=this.displayCloud();
     if (source?.movieDetails) {
       this.publishMovieSource(source);
       this.calendarStatus='使用已验证账户的个人电影资料，共 '+(this.movieCalendarData?.movies.length ?? 0)+' 部。';
@@ -5237,11 +5279,11 @@ struct Index {
   }
   private async repairDeviceCalendar(): Promise<void> {
     const store=this.episodeStore;
-    if (!store || this.signedIn || this.calendarBusy || this.localBusy || this.cloudBusy || this.saving || this.backupBusy) { return; }
+    if (!store || this.hasAccount() || this.calendarBusy || this.localBusy || this.cloudBusy || this.saving || this.backupBusy) { return; }
     const scope=this.calendarSourceScope, client=this.clientId, revision=++this.calendarRevision;
     const targets=this.calendarRepairTargets;
     this.calendarBusy=true; this.localBusy=true;
-    const current=(): boolean=>this.pageVisible && !this.signedIn && this.clientId===client && this.calendarRevision===revision &&
+    const current=(): boolean=>this.pageVisible && !this.hasAccount() && this.clientId===client && this.calendarRevision===revision &&
       this.calendarSourceScope===scope && this.calendarScopeKey()===scope && this.tab==='progress' && this.mediaMode==='show' &&
       this.progressMode==='calendar' && !this.selectedMedia && !this.backupBusy && !this.syncBusy && !this.authBusy && !this.setupBusy && !this.saving;
     try {
@@ -5254,7 +5296,7 @@ struct Index {
       }
     } catch (error) { if (current()) { this.calendarStatus='目录补齐暂停；保留已有日历，下次刷新继续。'; } }
     finally { this.localBusy=false; if (this.calendarRevision===revision) { this.calendarBusy=false; }
-      if (!this.signedIn && this.clientId===client) { this.requestProjection(); } }
+      if (!this.hasAccount() && this.clientId===client) { this.requestProjection(); } }
   }
   private changeShowCalendar(mode: string): void {
     if (mode!=='future' && mode!=='recent') { return; }
@@ -5452,13 +5494,15 @@ struct Index {
       if (this.nextShows.some((row: NextShow) => !row.source)) {
         Text('部分剧集缺少完整播出目录，暂不推荐。').fontSize(12).width('100%')
       }
-      if (this.showSummary.key === this.showDisplayKey()) {
+      if (this.hasAccount() && !this.displayCloud() && !this.authBusy && !this.localBusy && !this.cloudBusy) {
+        Text('个人库暂不可用，请重试账户核对。').fontSize(13).width('100%')
+      } else if (this.showSummary.key === this.showDisplayKey()) {
         Text('符合条件 ' + this.showSummary.total + ' 部').fontSize(13).width('100%')
         if (!this.showSummary.total && !this.cloudBusy && !this.localBusy) { Text('暂无符合条件的下一集。').fontSize(14).width('100%') }
       } else { Row({space:8}) { LoadingProgress().width(24).height(24); Text('正在更新列表…').fontSize(13) }.width('100%').justifyContent(FlexAlign.Center) }
         }.width('100%')
       }
-      if (!this.signedIn || this.activeCloud()) {
+      if (!this.hasAccount() || this.displayCloud()) {
         LazyForEach(this.showRows, (entry: ProgressEntry) => {
           ListItem() {
         if (entry.row) {
@@ -5479,10 +5523,9 @@ struct Index {
   }
 
   private movieCalendarCurrent(): boolean {
-    const active = this.activeCloud();
+    const active = this.displayCloud();
     return !!this.movieCalendarData && !!active && this.movieCalendarData.activity === active.activity &&
-      this.movieCalendarData.generation === active.generation &&
-      traktAuth.isCurrent(this.clientId, this.movieCalendarData.generation);
+      this.movieCalendarData.generation === active.generation;
   }
 
   private movieRows(mode: string = this.movieCalendarMode, query: string = this.movieCalendarQuery): PersonalMovie[] {
@@ -5553,7 +5596,7 @@ struct Index {
 
       Text('个人已看及待看电影的上映日期，不代表当地影院排期。')
         .fontSize(12).width('100%')
-      if (!this.signedIn) {
+      if (!this.hasAccount()) {
         Text('登录 Trakt 后读取个人电影库。').fontSize(13).width('100%')
         Button('连接 Trakt').onClick(() => { this.navigate('account'); })
       } else {
@@ -5576,7 +5619,7 @@ struct Index {
       }
         }.width('100%')
       }
-      if (this.signedIn && this.movieCalendarCurrent()) {
+      if (this.hasAccount() && this.movieCalendarCurrent()) {
           LazyForEach(this.movieCalendarRows, (row: MovieCalendarItem) => {
             ListItem() {
             Column({ space: 6 }) {
@@ -5680,7 +5723,7 @@ struct Index {
   }
 
   private movieSortKey(query: string, utc: string, includeTitles:boolean=true,includeBusiness:boolean=true): string {
-    return JSON.stringify([this.displayRevisions.movie,includeBusiness ? this.libraryRevision : 0,this.currentProgressScope(),this.activeCloud()?.generation ?? -1,
+    return JSON.stringify([this.displayRevisions.movie,includeBusiness ? this.libraryRevision : 0,this.currentProgressScope(),this.displayCloud()?.generation ?? -1,
       this.presentationLanguage,includeTitles && this.presentationLanguage==='zh' && (query || this.movieProgressOptions.sort==='title' || this.movieProgressOptions.sort==='userRating') ? this.titleVersion('movie') : 0,this.progressFlagScope,this.flagVersion('movie'),this.hiddenVersion('movie'),
       this.movieProgressOptions,this.movieRandomSeed,utc,query]);
   }
@@ -5798,7 +5841,7 @@ struct Index {
           if (this.repairStatus) { Text(this.repairStatus).fontSize(12).width('100%') }
       this.librarySyncNotice()
       Text('已上映或仅有年份、尚未观看的待看电影').fontSize(13).width('100%')
-      if (!this.signedIn) {
+      if (!this.hasAccount()) {
         Text('连接 Trakt 后可获取电影上映日期。待看电影仍可在收藏中管理。').fontSize(13).width('100%')
         Button('连接 Trakt').onClick(() => { this.navigate('account'); })
       } else {
@@ -5835,7 +5878,7 @@ struct Index {
       }
         }.width('100%')
       }
-      if (this.signedIn && this.movieCalendarCurrent()) {
+      if (this.hasAccount() && this.movieCalendarCurrent()) {
         LazyForEach(this.movieRowsSource, (row: PersonalLibraryRow) => {
           ListItem() {
             Row({ space: 8 }) {
@@ -5891,6 +5934,7 @@ struct Index {
       ListItem(){
         Column({space:8}){
           this.progressHeader()
+          this.librarySyncNotice()
           TextInput({placeholder:'搜索剧集、分集或日期',text:this.historyUi.query}).onChange((value:string)=>{this.historyUi={period:this.historyUi.period,query:value,loading:true,error:'',count:0};this.requestPresentation();})
           Button('时间范围 · '+(HISTORY_PERIODS.find((p:HistoryPeriodOption)=>p.key===this.historyUi.period)?.label??'全部时间')).fontSize(12).height(32).backgroundColor($r('app.color.showly_muted_surface')).fontColor($r('app.color.showly_text')).onClick(()=>{
             try{const choices:SheetInfo[]=HISTORY_PERIODS.map((p:HistoryPeriodOption):SheetInfo=>({title:p.label,action:()=>{if(this.scrollSlot()==='history'){this.selectHistoryPeriod(p.key);}}}));this.getUIContext().showActionSheet({title:'观看历史时间范围',message:'选择时间范围',alignment:DialogAlignment.Bottom,autoCancel:true,sheets:choices});}
@@ -5898,6 +5942,7 @@ struct Index {
           })
           Text('仅显示已知最后观看时间的分集；未知记录不补造。').fontSize(12).width('100%')
           if(this.historyUi.error){Text(this.historyUi.error).fontSize(13);Button('重试').onClick(()=>{this.historyOwner.clear();this.requestPresentation();})}
+          else if(this.hasAccount()&&!this.displayCloud()&&!this.authBusy&&!this.cloudBusy&&!this.localBusy){Text('个人库暂不可用，请重试同步。').fontSize(13)}
           else if(this.historyUi.loading||this.localBusy||this.cloudBusy){LoadingProgress().width(24).height(24)}
           else if(!this.historyUi.count){Text('暂无符合条件且日期可验证的观看记录。').fontSize(13)}
         }.width('100%')
@@ -5971,11 +6016,9 @@ struct Index {
   }
 
   private personalLibrary(): PersonalLibraryRow[] {
-    const snapshot = this.cloud;
-    const cloud = snapshot && this.signedIn && traktAuth.isCurrent(this.clientId, snapshot.generation) ?
-      snapshot : undefined;
-    if (this.signedIn && !cloud) { return []; }
-    const key = JSON.stringify([this.libraryRevision, this.signedIn, this.cloudLocalAllowed, this.clientId,
+    const cloud=this.displayCloud();
+    if (this.hasAccount() && !cloud) { return []; }
+    const key = JSON.stringify([this.libraryRevision, this.hasAccount(), this.cloudLocalAllowed, this.clientId,
       this.cloudUuid, cloud?.generation ?? -1, cloud?.activity ?? '']);
     const now = Date.now();
     const cached = this.libraryMemo.get(key, now);
@@ -6190,12 +6233,12 @@ struct Index {
       ['rating','runtime','newest'].includes(options.sort);
   }
   private collectionBase(): PersonalLibraryRow[] {
-    if (this.signedIn && !this.activeCloud()) { return []; }
+    if (this.hasAccount() && !this.displayCloud()) { return []; }
     return collectionMembers(this.personalLibrary(),this.currentCollectionState(),this.mediaMode,this.collectionFilter,this.collectionStatusFilter);
   }
   private movieMetadataIndex(): Map<string,PersonalMovie> {
     const now = Date.now();
-    const key = JSON.stringify([this.displayRevisions.movie,this.currentProgressScope(),this.movieCalendarCurrent(),this.activeCloud()?.activity ?? '']);
+    const key = JSON.stringify([this.displayRevisions.movie,this.currentProgressScope(),this.movieCalendarCurrent(),this.displayCloud()?.activity ?? '']);
     const cached = this.movieMetadataMemo.get(key,now);
     if (cached) { return cached; }
     const movies = new Map<string,PersonalMovie>();
@@ -6207,8 +6250,8 @@ struct Index {
   }
   private collectionIndexes(section: string): CollectionIndexes {
     const now = Date.now();
-    const key = JSON.stringify([this.collectionDependencies.source(this.mediaMode),this.currentProgressScope(),this.activeCloud()?.generation??-1,
-      this.activeCloud()?.activity??'',this.collectionScope,this.mediaMode,section,this.collectionRatingKey,this.movieRatingKey,this.movieCalendarCurrent()]);
+    const key = JSON.stringify([this.collectionDependencies.source(this.mediaMode),this.currentProgressScope(),this.displayCloud()?.generation??-1,
+      this.displayCloud()?.activity??'',this.collectionScope,this.mediaMode,section,this.collectionRatingKey,this.movieRatingKey,this.movieCalendarCurrent()]);
     const slot = this.mediaMode + ':' + section;
     let memo = this.collectionIndexMemos.get(slot);
     if (!memo) { memo = new RevisionMemo<CollectionIndexes>(); this.collectionIndexMemos.set(slot,memo); }
@@ -6218,7 +6261,7 @@ struct Index {
     const dates = section === 'mine' ? state.mine : section === 'queue' ? state.queue :
       state.hidden.map((h: HiddenEntry): CollectionDate => ({ id: h.media.id, at: h.at }));
     const times = new Map<string,number>();
-    if (section === 'queue') { for (const date of this.activeCloud()?.queueDates ?? []) { times.set(date.id,date.at); } }
+    if (section === 'queue') { for (const date of this.displayCloud()?.queueDates ?? []) { times.set(date.id,date.at); } }
     for (const date of dates) { times.set(date.id,date.at); }
     const recent = new Map<string,number>();
     for (const row of this.nextShows) { if (row.source?.recentAt) { recent.set(row.media.id,row.source.recentAt); } }
@@ -6292,7 +6335,7 @@ struct Index {
       includeTitles && this.presentationLanguage==='zh' && (this.collectionQuery.trim() || options.sort==='title' || options.sort==='userRating') ? this.titleVersion(this.mediaMode) : 0,this.collectionMetadataKey()]);
   }
   private collectionItems(prepare: boolean = false): PersonalLibraryRow[] {
-    if (this.signedIn && !this.activeCloud()) { return []; }
+    if (this.hasAccount() && !this.displayCloud()) { return []; }
     const now = Date.now();
     const options = this.collectionFilter === 'other' ? defaultCollection() : this.collectionOptions;
     const key = this.collectionSortKey();
@@ -6341,7 +6384,7 @@ struct Index {
       const rows = await collectionDisplay(input,this.sortJobs.consumer(slot,token));
       if (!this.sortJobs.current(slot,token) || !this.pageVisible || this.selectedMedia || this.tab !== 'library' ||
           epoch !== this.presentationEpoch || key !== this.collectionSortKey() ||
-          (this.signedIn && !this.activeCloud()) || Date.now() < input.now || Date.now() >= expiry) { return; }
+          (this.hasAccount() && !this.displayCloud()) || Date.now() < input.now || Date.now() >= expiry) { return; }
       this.collectionTitleOrder().seed(this.collectionSortKey(false),input.now,expiry,input.candidates,rows,this.collectionSortKey(false,false),
         (id:string)=>this.collectionFilter==='mine'||this.collectionFilter==='queue'?this.personalLibraryIndex.ordinal(id):undefined);
       this.collectionItemsMemo().put(key,rows,input.now,expiry);
@@ -6505,7 +6548,7 @@ struct Index {
       }
         }.width('100%')
       }
-      if ((!this.signedIn || this.activeCloud()) && this.collectionFilter !== 'lists') {
+      if ((!this.hasAccount() || this.displayCloud()) && this.collectionFilter !== 'lists') {
         if (this.mediaMode==='movie') {
           LazyForEach(this.movieCollectionRowsSource, (group: CollectionGroup) => {
             ListItem() { this.collectionGroupView(group) }
@@ -7033,7 +7076,7 @@ struct Index {
         Row({space:6}){Button('海报图库').fontSize(12).layoutWeight(1).onClick(()=>{this.openMediaGallery(item,'poster');});Button('背景图图库').fontSize(12).layoutWeight(1).onClick(()=>{this.openMediaGallery(item,'fanart');})}.width('100%')
         this.mediaStateView(item)
         ForEach([JSON.stringify([this.currentProgressScope(),item.id,this.detailRevision])],(_key:string)=>{
-          CustomListsPage({scope:this.currentProgressScope(),client:this.clientId,language:this.presentationLanguage,manage:true,selectedItem:item,
+          CustomListsPage({scope:this.currentProgressScope(),client:this.clientId,language:this.presentationLanguage,manage:true,selectedItem:item,writable:()=>!this.hasAccount()||!!this.activeCloud(),
             current:()=>this.pageVisible&&this.selectedMedia?.id===item.id&&JSON.stringify([this.currentProgressScope(),item.id,this.detailRevision])===_key})
         },(key:string)=>key)
       }
@@ -7078,8 +7121,11 @@ struct Index {
 
   @Builder
   librarySyncNotice() {
-    if (this.signedIn && !this.activeCloud()) {
-      Text('正在验证账户，暂不可编辑。').fontSize(12).width('100%')
+    if (this.hasAccount() && (!this.activeCloud() || !this.cloudFresh || this.cloudBusy)) {
+      Text(startupNotice(!!this.displayCloud(),this.authBusy||this.cloudBusy||this.localBusy)).fontSize(12).width('100%')
+      if (!this.authBusy && !this.cloudBusy && !this.localBusy) {
+        Button('重试账户与同步').fontSize(12).onClick(()=>{ if(this.signedIn){this.requestObservation();}else{traktAuth.restore(this.clientId,true);} })
+      }
     } else if (this.signedIn && !this.cloudLocalAllowed) {
       Button('完成账户设置以编辑收藏').fontSize(12).onClick(() => { this.navigate('account'); })
     }
@@ -7263,7 +7309,7 @@ struct Index {
           if(this.collectionFilter==='lists'){
             Column(){
               ForEach([this.currentProgressScope()],(scope:string)=>{
-                CustomListsPage({scope:scope,client:this.clientId,language:this.presentationLanguage,presentation:this.presentation,readRatings:()=>this.customListRatings(scope),
+                CustomListsPage({scope:scope,client:this.clientId,language:this.presentationLanguage,presentation:this.presentation,writable:()=>!this.hasAccount()||!!this.activeCloud(),readRatings:()=>this.customListRatings(scope),
                   current:()=>this.pageVisible&&this.currentProgressScope()===scope&&this.tab==='library'&&this.collectionFilter==='lists'&&!this.selectedMedia,
                   onBack:()=>{this.chooseCollection('mine');},onOpen:(item:Media)=>{this.openDetail(item);}})
               },(scope:string)=>scope)
@@ -7361,7 +7407,7 @@ struct Index {
           if (this.authBusy) {
             Button('取消当前操作').enabled(!this.setupBusy && !this.cloudBusy && !this.syncBusy).onClick(() => { traktAuth.cancel(); })
           } else {
-            if (this.signedIn) {
+            if (this.hasAccount()) {
               Button('断开本机登录').enabled(!this.setupBusy && !this.cloudBusy && !this.syncBusy).onClick(() => { this.disconnectSyncAccount(); })
             }
             Button('修改 Client ID').enabled(!this.setupBusy && !this.searching && !this.cloudBusy && !this.syncBusy).onClick(() => {
