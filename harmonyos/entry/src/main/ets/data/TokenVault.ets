@@ -1,3 +1,4 @@
+import { fileIo as fs } from '@kit.CoreFileKit';
 import { asset } from '@kit.AssetStoreKit';
 import { util } from '@kit.ArkTS';
 import { BusinessError } from '@kit.BasicServicesKit';
@@ -60,4 +61,24 @@ export function loadRefresh(clientId: string): string {
     }
     throw new Error('Cannot read secure token');
   }
+}
+
+// One stable inode for all token-mutating operations, never unlink or rotate.
+// The kernel releases the advisory lock when the owning process exits.
+let vaultDirectory: string = '';
+export function configureVaultLock(directory: string): void { vaultDirectory = directory; }
+export function tryVaultLock(): fs.File | undefined {
+  if (!vaultDirectory) { return undefined; }
+  let file: fs.File | undefined;
+  try {
+    file = fs.openSync(vaultDirectory + '/trakt-oauth.lock', fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE);
+    file.tryLock(true);
+    return file;
+  } catch (error) {
+    if (file) { try { fs.closeSync(file); } catch (failure) {} }
+    return undefined;
+  }
+}
+export function releaseVaultLock(file: fs.File): void {
+  try { file.unlock(); } finally { fs.closeSync(file); }
 }

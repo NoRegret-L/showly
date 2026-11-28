@@ -2,11 +2,13 @@ import { AbilityConstant, UIAbility, Want } from '@kit.AbilityKit';
 import { window } from '@kit.ArkUI';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 
+import { configureVaultLock } from '../data/TokenVault';
 import { traktAuth } from '../data/TraktAuth';
 import { memoryEvents } from '../model/CacheLifecycle';
 
 export default class EntryAbility extends UIAbility {
   onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): void {
+    configureVaultLock(this.context.filesDir);
     if (want.uri) {
       traktAuth.receive(want.uri);
     }

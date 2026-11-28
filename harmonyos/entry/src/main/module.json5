@@ -48,6 +48,10 @@
         "launchType": "singleton"
       }
     ],
+    "extensionAbilities": [
+      { "name": "SyncWorkAbility", "srcEntry": "./ets/workability/SyncWorkAbility.ets",
+        "type": "workScheduler", "exported": false }
+    ],
     "requestPermissions": [
       {
         "name": "ohos.permission.INTERNET"

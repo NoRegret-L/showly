@@ -1,3 +1,4 @@
+import { SyncStatusPanel } from './SyncStatusPanel';
 import { executeEpisodeQueue } from '../data/EpisodeQueueExecutor';
 import { SyncCoordinator, syncService } from '../model/SyncCoordinator';
 import { GalleryTarget } from '../model/GalleryRules';
@@ -7067,26 +7068,11 @@ struct Index {
       Text(this.signedIn ? '已连接' : '未连接').fontSize(14).width('100%')
       if (this.signedIn) {
         Text(this.autoActive() ? '快捷同步已开启；仅限已授权的新观看记录。' : '快捷同步未开启；需要上传的操作请在高级同步管理确认。').fontSize(12).width('100%')
-        if (this.cloudBusy || this.syncBusy) {
-          Row({ space: 8 }) {
-            LoadingProgress().width(22).height(22)
-            Text(this.cloudBusy ? '正在核对云端版本' : '正在处理同步任务').fontSize(13).layoutWeight(1)
-          }.width('100%')
-        }
-        Text(this.cloud && this.cloudFresh ? '云端版本已核对' :
-          this.cloud ? '显示上次缓存，尚未确认最新版本' : '尚未核对云端版本').fontSize(12).width('100%')
-        if (this.syncBound && this.syncAccount && traktAuth.isCurrent(this.clientId, this.syncAccount.generation)) {
-          Row({ space: 12 }) {
-            Text('待发送 ' + this.queueRows.filter((row: QueueEntry)=>!row.blocked).length).fontSize(14).layoutWeight(1)
-            Text('待核对/受保护 ' + this.queueRows.filter((row: QueueEntry)=>row.blocked).length).fontSize(14).layoutWeight(1)
-          }.width('100%')
-          if (this.lastEpisodeUpload > 0) {
-            Text('最近完整分集上传确认：' + new Date(this.lastEpisodeUpload).toLocaleString()).fontSize(12).width('100%')
-          }
-        }
-        if (this.cloud && this.cloud.verifiedAt) {
-          Text('上次成功核对云端：' + new Date(this.cloud.verifiedAt).toLocaleString()).fontSize(12).width('100%')
-        }
+        SyncStatusPanel({busy:this.syncBusy,cloudBusy:this.cloudBusy,
+          cloudText:this.cloud && this.cloudFresh ? '云端版本已核对' :
+            this.cloud ? '显示上次缓存，尚未确认最新版本' : '尚未核对云端版本',
+          bound:!!this.syncBound && !!this.syncAccount && traktAuth.isCurrent(this.clientId,this.syncAccount.generation),
+          rows:this.queueRows,lastUpload:this.lastEpisodeUpload,lastVerified:this.cloud?.verifiedAt ?? 0})
         if (this.autoStatus) { Text(this.autoStatus).fontSize(12).width('100%') }
         if (this.mediaSyncStatus) { Text(this.mediaSyncStatus).fontSize(12).width('100%') }
         Button(this.cloudBusy || this.syncBusy ? '同步处理中…' : '立即同步').width('100%')

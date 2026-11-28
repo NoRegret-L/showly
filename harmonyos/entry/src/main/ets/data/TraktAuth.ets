@@ -3,7 +3,7 @@ import { cryptoFramework } from '@kit.CryptoArchitectureKit';
 import { util } from '@kit.ArkTS';
 import { http } from '@kit.NetworkKit';
 import { TRAKT_REDIRECT_URI } from '../config/TraktConfig';
-import { loadRefresh, saveRefresh, removeRefresh } from './TokenVault';
+import { loadRefresh, saveRefresh, removeRefresh, tryVaultLock, releaseVaultLock } from './TokenVault';
 
 interface PendingLogin {
   state: string;
@@ -156,6 +156,8 @@ class TraktAuth {
       this.status('授权已取消或被拒绝。');
       return;
     }
+    const lease = tryVaultLock();
+    if (!lease) { this.busy = false; this.status('授权存储正在使用，请重新授权。'); return; }
     this.status('正在确认授权…');
     const request = http.createHttp();
     try {
@@ -194,6 +196,7 @@ class TraktAuth {
       }
     } finally {
       request.destroy();
+      releaseVaultLock(lease);
       if (pending.generation === this.generation) {
         this.busy = false;
         AppStorage.setOrCreate<boolean>('traktAuthBusy', false);
@@ -245,6 +248,8 @@ class TraktAuth {
     if (this.attemptedRestore && !manual && this.expiresAt === 0) {
       return;
     }
+    const lease = tryVaultLock();
+    if (!lease) { this.status('授权存储正在使用，保留本机记录。'); return; }
     this.attemptedRestore = true;
     this.clientId = clientId;
     const generation = ++this.generation;
@@ -306,6 +311,7 @@ class TraktAuth {
       if (request) {
         request.destroy();
       }
+      releaseVaultLock(lease);
       if (generation === this.generation) {
         this.busy = false;
         AppStorage.setOrCreate<boolean>('traktAuthBusy', false);
@@ -321,12 +327,14 @@ class TraktAuth {
   }
 
   disconnect(): boolean {
+    const lease = tryVaultLock();
+    if (!lease) { this.status('授权正在处理，请稍后断开。'); return false; }
     try {
       removeRefresh();
     } catch (error) {
       this.status('无法删除安全存储中的授权，请解锁设备后重试。');
       return false;
-    }
+    } finally { releaseVaultLock(lease); }
     ++this.generation;
     this.pending = undefined;
     this.accessToken = '';
