@@ -142,7 +142,11 @@ struct Index {
   private movieCalendarRows: PageStateOwner<MovieCalendarItem,MovieCalendarItem[]> = new PageStateOwner<MovieCalendarItem,MovieCalendarItem[]>((row: MovieCalendarItem)=>[row.movie.media.id]);
   private showRows: PageStateOwner<ProgressEntry,ProgressRow[]> = new PageStateOwner<ProgressEntry,ProgressRow[]>((entry: ProgressEntry)=>entry.row?[entry.row.media.id]:[]);
   private movieRowsSource: PageStateOwner<PersonalLibraryRow,PersonalLibraryRow[]> = new PageStateOwner<PersonalLibraryRow,PersonalLibraryRow[]>((row: PersonalLibraryRow)=>[row.media.id]);
-  private collectionRowsSource: PageStateOwner<CollectionGroup,PersonalLibraryRow[]> = new PageStateOwner<CollectionGroup,PersonalLibraryRow[]>((group: CollectionGroup)=>group.rows.map((row: PersonalLibraryRow)=>row.media.id));
+  private showCollectionRowsSource: PageStateOwner<CollectionGroup,PersonalLibraryRow[]> = new PageStateOwner<CollectionGroup,PersonalLibraryRow[]>((group: CollectionGroup)=>group.rows.map((row: PersonalLibraryRow)=>row.media.id));
+  private movieCollectionRowsSource: PageStateOwner<CollectionGroup,PersonalLibraryRow[]> = new PageStateOwner<CollectionGroup,PersonalLibraryRow[]>((group: CollectionGroup)=>group.rows.map((row: PersonalLibraryRow)=>row.media.id));
+  private get collectionRowsSource():PageStateOwner<CollectionGroup,PersonalLibraryRow[]>{return this.mediaMode==='movie'?this.movieCollectionRowsSource:this.showCollectionRowsSource;}
+  private collectionOwnerSlot():string{return this.mediaMode==='movie'?'libraryMovie':'libraryShow';}
+  private collectionSortSlot():string{return this.mediaMode==='movie'?'collection-movie':'collection-show';}
   private pageWorks:PageWorkSet=this.createPageWorks();
   private sortJobs:PageSortJobs=new PageSortJobs(this.pageWorks);
   private createPageWorks():PageWorkSet{
@@ -150,10 +154,12 @@ struct Index {
     pages.register('discover',this.discoverRows.work);pages.register('search',this.searchRows.work);
     pages.register('calendar',this.calendarRows.work);pages.register('movieCalendar',this.movieCalendarRows.work);
     pages.register('show',this.showRows.work);pages.register('movie',this.movieRowsSource.work);
-    pages.register('library',this.collectionRowsSource.work);
+    pages.register('libraryShow',this.showCollectionRowsSource.work);
+    pages.register('libraryMovie',this.movieCollectionRowsSource.work);
     return pages;
   }
-  private activePageWork():PageWork|undefined{return this.pageWorks.get(this.scrollSlot());}
+  private pageOwnerSlot():string{const slot=this.scrollSlot();return slot==='library'?this.collectionOwnerSlot():slot;}
+  private activePageWork():PageWork|undefined{return this.pageWorks.get(this.pageOwnerSlot());}
   private libraryRevision: number = 0;
   private mediaInput: MediaInputVersion=new MediaInputVersion();
   private displayRevisions: DisplayRevisions = new DisplayRevisions();
@@ -403,8 +409,8 @@ struct Index {
   @State collectionRuleStatus: string = '';
   private collectionOptionKey: string = '';
   private collectionRandomKeys: Map<string, number> = new Map<string, number>();
-  private collectionItemsMemo: RevisionMemo<PersonalLibraryRow[]> = this.collectionRowsSource.memo;
-  private recentCollectionMemo: RevisionMemo<PersonalLibraryRow[]> = this.collectionRowsSource.allMemo;
+  private get collectionItemsMemo():RevisionMemo<PersonalLibraryRow[]>{return this.collectionRowsSource.memo;}
+  private get recentCollectionMemo():RevisionMemo<PersonalLibraryRow[]>{return this.collectionRowsSource.allMemo;}
   @State @Watch('onCollectionRatingsChanged') collectionRatings: CollectionRating[] = [];
   private collectionRatingKey: string = '';
   private collectionRatingBusy: boolean = false;
@@ -439,7 +445,15 @@ struct Index {
   private searchStoredIds:Set<string>=new Set<string>();
   private movieTitleOrder=new StableDisplayOrder<MovieProgressSource>((x:MovieProgressSource)=>x.row);
   private movieAllTitleOrder=new StableDisplayOrder<MovieProgressSource>((x:MovieProgressSource)=>x.row);
-  private collectionTitleOrder=new StableDisplayOrder<CollectionCandidate>((x:CollectionCandidate)=>x.row);
+  private showCollectionTitleOrder=new StableDisplayOrder<CollectionCandidate>((x:CollectionCandidate)=>x.row);
+  private movieCollectionTitleOrder=new StableDisplayOrder<CollectionCandidate>((x:CollectionCandidate)=>x.row);
+  private get collectionTitleOrder():StableDisplayOrder<CollectionCandidate>{return this.mediaMode==='movie'?this.movieCollectionTitleOrder:this.showCollectionTitleOrder;}
+  private releaseCollectionOwner(kind:string):void{
+    const owner=kind==='movie'?this.movieCollectionRowsSource:this.showCollectionRowsSource;
+    owner.memo.clear();owner.allMemo.clear();owner.replace([],[],[]);
+    if(kind==='movie'){this.movieCollectionTitleOrder.clear();}else{this.showCollectionTitleOrder.clear();}
+  }
+  private clearCollectionOwners():void{this.releaseCollectionOwner('show');this.releaseCollectionOwner('movie');}
   private searchHistoryGeneration: SearchGeneration = new SearchGeneration();
   @State libraryStatus: string = '';
   @State searchStatus: string = '';
@@ -633,7 +647,7 @@ struct Index {
     this.collectionRatingKey = '';
     this.collectionRatings = [];
     this.collectionState = emptyCollectionState();
-    this.collectionRowsSource.replace([], [], []);
+    this.clearCollectionOwners();
     this.cancelCatalogRepair();
     this.showRows.replace([], [], []);
     this.movieRowsSource.replace([], [], []);
@@ -1407,7 +1421,8 @@ struct Index {
         this.titleSortRevision++; sortDirty.add(row.id);
         if(this.presentationLanguage==='zh'){
           this.searchTitleIndex.patch(row.id,row.text.title);
-          this.movieTitleOrder.dirty(row.id);this.movieAllTitleOrder.dirty(row.id);this.collectionTitleOrder.dirty(row.id);
+          this.movieTitleOrder.dirty(row.id);this.movieAllTitleOrder.dirty(row.id);
+          if(row.id.startsWith('movie:')){this.movieCollectionTitleOrder.dirty(row.id);}else{this.showCollectionTitleOrder.dirty(row.id);}
         }
         if (row.id.startsWith('movie:')) { this.movieTitleRevision++; } else { this.showTitleRevision++; }
       }
@@ -1638,7 +1653,7 @@ struct Index {
     const account=this.currentSearchAccount();
     if (this.scrollAccount!==account) { this.scrollAccount=account; this.scrollAnchors.clear(); this.scrollIndices.clear(); this.scrollScheduled=undefined; }
     if (!this.cacheLifecycle.transition(route,account)) { return; }
-    this.pageWorks.transition(this.scrollSlot(),route,account);
+    this.pageWorks.transition(this.pageOwnerSlot(),route,account);
     this.cancelPresentationReads();
     this.businessPresentationTasks=undefined;
     if (!this.pageVisible || this.selectedMedia || this.tab!=='discover' || !this.discoverRows.work.remote.snapshot().loading) { this.discoverBusy=false; }
@@ -1686,7 +1701,8 @@ struct Index {
     if (!residency.movieProgress) { this.movieMemo.clear(); this.movieAllMemo.clear(); this.movieTitleOrder.clear(); this.movieAllTitleOrder.clear(); this.movieRowsSource.replace([],[],[]); }
     if (!residency.movieCalendar) { this.movieCalendarRows.replace([],[],[]); }
     if (!residency.movieProgress && !residency.movieCalendar && !residency.collection) { this.movieMetadataMemo.clear(); }
-    if (!residency.collection) { this.collectionIndexMemos.clear(); this.collectionItemsMemo.clear(); this.collectionTitleOrder.clear(); this.recentCollectionMemo.clear(); this.collectionRowsSource.replace([],[],[]); }
+    if (!residency.collection) { this.collectionIndexMemos.clear(); this.clearCollectionOwners(); }
+    else { this.releaseCollectionOwner(this.mediaMode==='movie'?'show':'movie'); }
     if (!residency.discover) { this.discoverMemo.clear(); this.discoverRows.replace([],[],[]); }
     // Keep active detail/season data during foreground pressure; route changes
     // evict full payloads, but keep lightweight title/sort metadata.
@@ -1775,7 +1791,7 @@ struct Index {
     if (this.tab === 'library') {
       if (this.collectionOptions.sort === 'userRating') { this.loadCollectionRatings(); }
       const prepared = this.collectionItems(true);
-      if (this.sortJobs.pending('collection')) { return; }
+      if (this.sortJobs.pending(this.collectionSortSlot())) { return; }
       const summary: PageSummary = {key:this.collectionDisplayKey(),total:prepared.length,page:this.collectionPage,pages:Math.max(1,Math.ceil(prepared.length/this.collectionPageSize))};
       const rows: CollectionGroup[] = [];
       if (!this.signedIn || this.activeCloud()) {
@@ -3200,7 +3216,7 @@ struct Index {
   }
 
   private clearCloud(): void {
-    this.movieTitleOrder.clear();this.movieAllTitleOrder.clear();this.collectionTitleOrder.clear();
+    this.movieTitleOrder.clear();this.movieAllTitleOrder.clear();this.showCollectionTitleOrder.clear();this.movieCollectionTitleOrder.clear();
     this.clearProgressCandidates();
     this.resetSearchAccount();
     this.viewport.clear();
@@ -3210,7 +3226,7 @@ struct Index {
     this.collectionRatingKey = '';
     this.collectionRatings = [];
     this.collectionState = emptyCollectionState();
-    this.collectionRowsSource.replace([], [], []);
+    this.clearCollectionOwners();
     this.cancelCatalogRepair();
     this.showRows.replace([], [], []);
     this.movieRowsSource.replace([], [], []);
@@ -5937,7 +5953,7 @@ struct Index {
     const key = this.collectionSortKey();
     const cached = this.sortedViewRevision >= 0 ? this.collectionItemsMemo.get(key,now) : undefined;
     if (cached) { return cached; }
-    if (!prepare || this.sortJobs.matches('collection',JSON.stringify([this.presentationEpoch,key]))) { return []; }
+    if (!prepare || this.sortJobs.matches(this.collectionSortSlot(),JSON.stringify([this.presentationEpoch,key]))) { return []; }
     const delta=this.collectionTitleOrder.update(this.collectionSortKey(false),now,(x:CollectionCandidate):CollectionCandidate=>({row:x.row,translation:this.presentationLanguage==='zh'?this.titleIndex.get(x.row.media.id)?.text.title??'':'',meta:x.meta,added:x.added,recent:x.recent,userRating:x.userRating,randomOrder:x.randomOrder}),
       (x:CollectionCandidate)=>collectionSortEligible(x,options,this.collectionFilter,this.collectionQuery,now),
       (a:CollectionCandidate,b:CollectionCandidate)=>compareCollectionCandidates(a,b,options,this.collectionFilter));
@@ -5961,7 +5977,7 @@ struct Index {
     return [];
   }
   private async runCollectionSort(input: CollectionSortInput, key: string, expiry: number): Promise<void> {
-    const slot = 'collection';
+    const slot = this.collectionSortSlot();
     const epoch = this.presentationEpoch;
     const token = this.sortJobs.begin(slot,JSON.stringify([epoch,key]));
     if (!token) { return; }
@@ -6117,9 +6133,15 @@ struct Index {
         }.width('100%')
       }
       if ((!this.signedIn || this.activeCloud()) && this.collectionFilter !== 'lists') {
-        LazyForEach(this.collectionRowsSource, (group: CollectionGroup) => {
-          ListItem() { this.collectionGroupView(group) }
-        }, (group: CollectionGroup) => this.collectionRowsSource.keyFor(group.key))
+        if (this.mediaMode==='movie') {
+          LazyForEach(this.movieCollectionRowsSource, (group: CollectionGroup) => {
+            ListItem() { this.collectionGroupView(group) }
+          }, (group: CollectionGroup) => this.movieCollectionRowsSource.keyFor(group.key))
+        } else {
+          LazyForEach(this.showCollectionRowsSource, (group: CollectionGroup) => {
+            ListItem() { this.collectionGroupView(group) }
+          }, (group: CollectionGroup) => this.showCollectionRowsSource.keyFor(group.key))
+        }
         
       }
     }.width('100%').height('100%').padding(16)

@@ -20,10 +20,24 @@ const {ConsumerReadFlight}=require('./ReadFlight');
 (async()=>{
  for(const size of [393,10000]){
   const pages=new PageWorkSet(),owners=new Map();
-  for(const page of ['show','movie','calendar','movieCalendar','library','discover','search']){
+  for(const page of ['show','movie','calendar','movieCalendar','libraryShow','libraryMovie','discover','search']){
    const owner=new PageStateOwner(row=>[row.id]);owners.set(page,owner);pages.register(page,owner.work);
   }
   const show=owners.get('show'),movie=owners.get('movie'),jobs=new PageSortJobs(pages);
+  const collectionPages=new PageWorkSet(),collectionJobs=new PageSortJobs(collectionPages);
+  const showLibrary=new PageStateOwner(row=>[row.id]),movieLibrary=new PageStateOwner(row=>[row.id]);
+  collectionPages.register('libraryShow',showLibrary.work);collectionPages.register('libraryMovie',movieLibrary.work);
+  const movieLibraryTicket=movieLibrary.work.begin();
+  const movieLibraryJob=collectionJobs.begin('collection-movie','sort');
+  for(let i=0;i<100;i++){
+   const ticket=showLibrary.work.begin();
+   collectionPages.observe('collection:'+i,['show:'+i],false);
+   assert(!showLibrary.work.current(ticket));assert(movieLibrary.work.current(movieLibraryTicket));
+   assert(collectionJobs.current('collection-movie',movieLibraryJob));
+  }
+  assert.equal(movieLibrary.work.snapshot().dependencyVersion,0);
+  collectionPages.observe('unknown',[],true);assert(!movieLibrary.work.current(movieLibraryTicket));assert(!collectionJobs.current('collection-movie',movieLibraryJob));
+  collectionPages.reset();
   const rows=Array.from({length:size},(_,i)=>({id:'show:'+i,value:0}));
   const ids=rows.map(x=>x.id),keys=rows.map(x=>String(x.value));
   show.activate('A');show.replace(rows,ids,keys);
@@ -99,7 +113,7 @@ const {ConsumerReadFlight}=require('./ReadFlight');
 """)
     subprocess.run(["node","test.cjs"],cwd=work,check=True)
 page=(root/"pages"/"Index.ets").read_text()
-assert page.count("new PageStateOwner<")==7
+assert page.count("new PageStateOwner<")==8
 assert "this.pageWorks.observe(" in page
 assert "work.current(ticket)" in page
 assert "this.activePresentationRoute()" in page
@@ -113,10 +127,15 @@ assert "interface DisplaySummary" not in page
 assert page.count("Summary: PageSummary =")==4
 assert page.count("const summary: PageSummary =")==4
 
-assert "this.pageWorks.transition(this.scrollSlot(),route,account)" in page
+assert "this.pageWorks.transition(this.pageOwnerSlot(),route,account)" in page
 assert "this.activePageWork()?.changePresentation(route)" in page
 assert "this.searchRows.work.remote" in page and "this.searchRows.work.local" in page
 assert "this.discoverRows.work.remote" in page and "this.calendarRows.work.hydrate" in page
 assert "this.viewport.clear(); this.sortJobs.clear(); this.viewportRouteKey" not in page
 
 assert "this.pageWorks.resetDisplay();" in page
+
+assert "pages.register('libraryShow',this.showCollectionRowsSource.work)" in page
+assert "pages.register('libraryMovie',this.movieCollectionRowsSource.work)" in page
+assert "LazyForEach(this.showCollectionRowsSource" in page and "LazyForEach(this.movieCollectionRowsSource" in page
+assert "this.releaseCollectionOwner(this.mediaMode==='movie'?'show':'movie')" in page

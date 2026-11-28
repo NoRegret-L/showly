@@ -96,8 +96,8 @@ export class PageStateOwner<T,R> extends PageDisplayRows<T>{
 export function pageAffected(page:string,ids:string[],full:boolean):boolean{
   if(full){return true;}
   if(!ids.length){return false;}
-  if(page==='show'||page==='calendar'){return ids.some((id:string)=>!id.startsWith('movie:'));}
-  if(page==='movie'||page==='movieCalendar'){return ids.some((id:string)=>!id.startsWith('show:'));}
+  if(page==='show'||page==='calendar'||page==='libraryShow'){return ids.some((id:string)=>!id.startsWith('movie:'));}
+  if(page==='movie'||page==='movieCalendar'||page==='libraryMovie'){return ids.some((id:string)=>!id.startsWith('show:'));}
   return true;
 }
 export class PageWorkSet{
@@ -123,7 +123,7 @@ export class PageSortJobs{
   private pages:PageWorkSet;
   constructor(pages:PageWorkSet){this.pages=pages;}
   private owner(slot:string):LatestDisplayJobs{
-    const page=slot.startsWith('show-')?'show':slot.startsWith('movie-')?'movie':slot==='collection'?'library':slot;
+    const page=slot.startsWith('show-')?'show':slot.startsWith('movie-')?'movie':slot==='collection-show'?'libraryShow':slot==='collection-movie'?'libraryMovie':slot==='collection'?'library':slot;
     const work=this.pages.get(page);
     if(!work){throw new Error('Unknown display job owner: '+slot);}
     return work.jobs;
@@ -134,5 +134,5 @@ export class PageSortJobs{
   pending(slot:string):boolean{return this.owner(slot).pending(slot);}
   matches(slot:string,key:string):boolean{return this.owner(slot).matches(slot,key);}
   finish(slot:string,token:number):boolean{return this.owner(slot).finish(slot,token);}
-  clear():void{for(const page of ['show','movie','calendar','library','search','discover','movieCalendar']){this.pages.get(page)?.jobs.clear();}}
+  clear():void{for(const page of ['show','movie','calendar','library','libraryShow','libraryMovie','search','discover','movieCalendar']){this.pages.get(page)?.jobs.clear();}}
 }
