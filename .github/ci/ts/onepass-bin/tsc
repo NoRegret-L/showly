@@ -1,0 +1,27 @@
+#!/usr/bin/env python3
+"""Capture a live fixture compile request; the coordinator provides its JS."""
+import json,os,pathlib,re,shutil,subprocess,sys,tempfile,time
+real=os.environ["SHOWLY_REAL_TSC"]
+cwd=pathlib.Path.cwd();args=sys.argv[1:]
+prefix=["--strict","--target","ES2020","--module","commonjs"]
+roots=args[len(prefix):]
+if (args[:len(prefix)]!=prefix or not roots or not all(re.fullmatch(r"[A-Za-z0-9_.-]+\.ts",r) for r in roots)
+    or (cwd/"tsconfig.json").exists() or any(p.is_dir() for p in cwd.iterdir()) or any(cwd.glob("*.js"))
+    or not all((cwd/r).is_file() for r in roots)):
+    print("ONEPASS_DIRECT_FALLBACK",flush=True)
+    sys.exit(subprocess.call([real,*args]))
+dest=pathlib.Path(tempfile.mkdtemp(dir=os.environ["SHOWLY_ONEPASS_QUEUE"]))
+(dest/"sources").mkdir();(dest/"outputs").mkdir()
+for p in cwd.glob("*.ts"): shutil.copyfile(p,dest/"sources"/p.name)
+(dest/"roots.json").write_text(json.dumps(roots))
+(dest/"test.txt").write_text(os.environ["SHOWLY_ONEPASS_TEST"])
+(dest/"ready").touch()
+while not (dest/"done").exists(): time.sleep(0.05)
+if (dest/"fallback").exists():
+    print("ONEPASS_GROUP_FALLBACK",flush=True)
+    result=subprocess.call([real,*args])
+    if result==0:
+        for p in cwd.glob("*.js"): shutil.copyfile(p,dest/"outputs"/p.name)
+    sys.exit(result)
+for p in (dest/"outputs").glob("*.js"): shutil.copyfile(p,cwd/p.name)
+print("ONEPASS_GROUP_HIT",flush=True)

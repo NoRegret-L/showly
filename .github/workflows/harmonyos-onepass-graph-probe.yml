@@ -1,0 +1,45 @@
+name: HarmonyOS cold one-pass regression graph probe
+on:
+  push:
+    branches: [harmonyos-bootstrap]
+    paths:
+      - '.github/workflows/harmonyos-onepass-graph-probe.yml'
+      - '.github/ci/ts/onepass-bin/**'
+      - '.github/ci/ts/onepass_graph.py'
+      - '.github/ci/ts/project_outputs.cjs'
+      - '.github/ci/ts/compare_onepass.py'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  compare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Install pinned compiler
+        run: npm ci --ignore-scripts --no-audit --no-fund --prefix .github/ci/ts
+      - name: Cold graph execution (no prior compiler artifacts)
+        run: |
+          set -euo pipefail
+          export SHOWLY_REAL_TSC="$GITHUB_WORKSPACE/.github/ci/ts/node_modules/.bin/tsc"
+          export SHOWLY_ONEPASS_QUEUE="$RUNNER_TEMP/onepass"
+          export PATH="$GITHUB_WORKSPACE/.github/ci/ts/node_modules/.bin:$PATH"
+          python3 .github/ci/ts/onepass_graph.py | tee "$RUNNER_TEMP/onepass.log"
+      - name: Independent complete reference suite
+        run: |
+          set -euo pipefail
+          export SHOWLY_REAL_TSC="$GITHUB_WORKSPACE/.github/ci/ts/node_modules/.bin/tsc"
+          export SHOWLY_GRAPH_CAPTURE="$RUNNER_TEMP/independent"
+          mkdir -p "$SHOWLY_GRAPH_CAPTURE"
+          export PATH="$GITHUB_WORKSPACE/.github/ci/ts/graph-bin:$GITHUB_WORKSPACE/.github/ci/ts/node_modules/.bin:$PATH"
+          python3 harmonyos/tools/run_regressions.py | tee "$RUNNER_TEMP/independent.log"
+      - name: Verify every captured compiler project and test exit
+        run: |
+          set -euo pipefail
+          export SHOWLY_ONEPASS_QUEUE="$RUNNER_TEMP/onepass"
+          export SHOWLY_GRAPH_CAPTURE="$RUNNER_TEMP/independent"
+          python3 .github/ci/ts/compare_onepass.py | tee -a "$GITHUB_STEP_SUMMARY"
+          grep -E '^34/34 passed in ' "$RUNNER_TEMP/onepass.log" "$RUNNER_TEMP/independent.log" | tee -a "$GITHUB_STEP_SUMMARY"

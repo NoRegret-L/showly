@@ -1,0 +1,67 @@
+name: HarmonyOS cross-commit HAP invalidation probe
+on:
+  push:
+    branches: [harmonyos-bootstrap]
+    paths: ['.github/workflows/harmonyos-cross-commit-hap-probe.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+          sparse-checkout: harmonyos
+      - name: Fetch exact prior native source
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin 0d4716b0ed69402cff1fa24e8ac84fafa87d968b
+          git diff --stat 0d4716b0ed69402cff1fa24e8ac84fafa87d968b "$GITHUB_SHA" -- harmonyos
+          test -n "$(git diff --name-only 0d4716b0ed69402cff1fa24e8ac84fafa87d968b "$GITHUB_SHA" -- harmonyos/entry/src/main/ets)"
+      - name: Pinned SDK setup
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: ErBWs/setup-ohos
+          ref: 4dbb63025116eb6165ceac58a4bf47cbdc5ac721
+          path: .ci-sdk-setup
+          persist-credentials: false
+      - name: Prepare verified SDK
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash .ci-sdk-setup/setup.sh -v '6.1.1.280'
+      - name: Build prior commit then current commit with retained native build state
+        run: |
+          set -euo pipefail
+          export DEVECO_SDK_HOME="$HOS_SDK_HOME"
+          build() {
+            (cd harmonyos; ohpm install --all
+             start=$(date +%s)
+             hvigorw assembleHap --mode module -p module=entry@default -p product=default -p buildMode=debug --no-daemon
+             echo "$1_hap_seconds=$(( $(date +%s)-start ))" | tee -a "$GITHUB_STEP_SUMMARY"
+             hap="$(find entry/build -name '*.hap' -type f -print -quit)"
+             test -s "$hap"
+             cp "$hap" "$RUNNER_TEMP/$1.hap")
+          }
+          git checkout --detach 0d4716b0ed69402cff1fa24e8ac84fafa87d968b
+          build prior
+          git checkout --detach "$GITHUB_SHA"
+          build retained
+          # Disposable runner only; remove every ignored/untracked native build
+          # artifact before the independent current-source reference build.
+          git clean -fdx -- harmonyos
+          build clean
+          python3 - "$RUNNER_TEMP/prior.hap" "$RUNNER_TEMP/retained.hap" "$RUNNER_TEMP/clean.hap" <<'PY'
+          import hashlib,sys,zipfile
+          def entries(path):
+              with zipfile.ZipFile(path) as z:
+                  assert z.testzip() is None
+                  return {n:hashlib.sha256(z.read(n)).hexdigest() for n in z.namelist() if not n.endswith('/')}
+          prior,retained,clean=map(entries,sys.argv[1:])
+          assert prior!=clean,"Fixture did not change the package"
+          assert retained==clean, f"Cross-commit stale output: {sorted(k for k in set(retained)|set(clean) if retained.get(k)!=clean.get(k))}"
+          print(f"Cross-commit invalidation and cold HAP payload equality: {len(clean)} entries")
+          PY
+          echo "No persistent cache or release reuse authorized by this experiment." >> "$GITHUB_STEP_SUMMARY"
