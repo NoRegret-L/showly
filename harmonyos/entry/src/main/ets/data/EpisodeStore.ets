@@ -830,11 +830,30 @@ export class EpisodeStore {
     try {
       while (done.goToNextRow()) { completed.add(done.getLong(0) + ':' + done.getLong(1)); }
     } finally { done.close(); }
+    // One account-scoped join instead of per-episode guard and receipt queries.
+    // This is display/queue selection evidence only; reserveUpload and POST
+    // preflight independently recheck the authoritative guard.
+    const guards = await this.queryRead('SELECT g.episode_id,r.history_id,r.watched_at,r.removal_state FROM sync_upload_guard g LEFT JOIN sync_play_receipt r ON r.account_uuid=g.account_uuid AND r.episode_id=g.episode_id WHERE g.account_uuid=?', [uuid]);
+    const protectedIds = new Set<number>();
+    try {
+      while (guards.goToNextRow()) {
+        const id = guards.getLong(0);
+        if (guards.isColumnNull(1)) { protectedIds.add(id); continue; }
+        const receiptId = guards.getLong(1);
+        const at = guards.getString(2);
+        const state = guards.getLong(3);
+        if (!validId(receiptId) || !Number.isFinite(Date.parse(at)) || (state !== 0 && state !== 1 && state !== 2)) {
+          throw new Error('Invalid history receipt');
+        }
+        if (state !== 2) { protectedIds.add(id); }
+      }
+    } finally { guards.close(); }
     const intents = await this.journalIntents();
+    if (await this.boundAccount() !== uuid) { throw new Error('Account mismatch'); }
     const result: QueueEntry[] = [];
     for (const intent of intents) {
       if (!intent.watched || intent.autoUuid !== uuid || completed.has(intent.seq + ':' + intent.episodeId)) { continue; }
-      const guard = await this.hasUploadAttempt(uuid, intent.episodeId);
+      const guard = protectedIds.has(intent.episodeId);
       result.push({ episodeId: intent.episodeId, seq: intent.seq, label: intent.label,
         watchedAt: new Date(intent.changedAt).toISOString(),
         blocked: !intent.catalogKnown || guard,
@@ -961,6 +980,16 @@ export class EpisodeStore {
     if (await this.boundAccount() !== uuid) { throw new Error('Account mismatch'); }
     await this.db.executeSql('INSERT INTO sync_run_log(account_uuid,mode,episode_ids,status,created_at) VALUES(?,?,?,?,?)',
       [uuid, mode, JSON.stringify(ids), status, Date.now()]);
+  }
+
+  async lastConfirmedEpisodeUpload(uuid: string): Promise<number> {
+    if (!uuid || await this.boundAccount() !== uuid) { throw new Error('Account mismatch'); }
+    const rows = await this.queryRead("SELECT MAX(created_at) FROM sync_run_log WHERE account_uuid=? AND mode='episode-upload-confirmed'", [uuid]);
+    try {
+      if (!rows.goToFirstRow() || rows.isColumnNull(0)) { return 0; }
+      const value = rows.getLong(0);
+      return Number.isSafeInteger(value) && value > 0 ? value : 0;
+    } finally { rows.close(); }
   }
 
   async syncLogs(uuid: string): Promise<string[]> {

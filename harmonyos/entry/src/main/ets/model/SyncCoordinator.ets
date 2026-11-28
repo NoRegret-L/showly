@@ -20,6 +20,24 @@ export class SyncCoordinator {
     return '';
   }
 }
+// Process-wide owner. A page is a consumer, not the owner of pending intents.
+// Still no cross-process or background authorization.
+export class SyncService {
+  readonly coordinator: SyncCoordinator = new SyncCoordinator();
+  private active: string = '';
+  private serial: number = 0;
+  acquire(scope: string): number {
+    if (!scope || this.active) { return 0; }
+    this.active = scope;
+    this.serial++;
+    return this.serial;
+  }
+  release(ticket: number): void {
+    if (ticket === this.serial) { this.active = ''; }
+  }
+  busy(): boolean { return this.active !== ''; }
+}
+export const syncService = new SyncService();
 export function queueIdentity(episodeId: number, seq: number): string {
   return episodeId + ':' + seq;
 }

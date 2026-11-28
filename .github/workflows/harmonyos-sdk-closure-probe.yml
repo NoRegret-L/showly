@@ -46,10 +46,10 @@ jobs:
           build=(hvigorw assembleHap --mode module -p module=entry@default -p product=default -p buildMode=debug --no-daemon --optimization-strategy=performance)
           parent="$RUNNER_TEMP/parent-source"
           mkdir "$parent"
-          baseline=540c56642c50a1310785785fd8b09e7ff724adab
+          baseline=810af06e12b0207111a7db4e26d3934aa2d4d5bb
           git cat-file -e "$baseline^{commit}" 2>/dev/null || git fetch --no-tags --depth=1 origin "$baseline"
           git archive "$baseline" harmonyos | tar -xf - -C "$parent"
-          echo "Closure parent=$(git rev-parse 540c56642c50a1310785785fd8b09e7ff724adab) current=$(git rev-parse HEAD)" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "Closure parent=$(git rev-parse "$baseline") current=$(git rev-parse HEAD)" | tee -a "$GITHUB_STEP_SUMMARY"
           (cd "$parent/harmonyos"
            ohpm install --all
            strace -ff -yy -s 4096 -e trace=%file,getdents64 -o "$RUNNER_TEMP/sdktrace-parent" "${build[@]}")
@@ -59,7 +59,14 @@ jobs:
            strace -ff -yy -s 4096 -e trace=%file,getdents64 -o "$RUNNER_TEMP/sdktrace" "${build[@]}"
            hap="$(find entry/build -type f -name '*.hap' -print -quit)"
            test -s "$hap"; cp "$hap" "$RUNNER_TEMP/full.hap")
+          # Union both revision traces; also test the previous revision's
+          # independent exclusion list against the current source.
+          python3 harmonyos/tools/sdk_trace_closure.py "$dir" "$RUNNER_TEMP/sdktrace-parent" "$RUNNER_TEMP/sdk-parent-excludes.txt" | tee -a "$GITHUB_STEP_SUMMARY"
           python3 harmonyos/tools/sdk_trace_closure.py "$dir" "$RUNNER_TEMP/sdktrace" "$RUNNER_TEMP/sdk-excludes.txt" | tee -a "$GITHUB_STEP_SUMMARY"
+          sort "$RUNNER_TEMP/sdk-parent-excludes.txt" > "$RUNNER_TEMP/parent-sorted"
+          sort "$RUNNER_TEMP/sdk-excludes.txt" > "$RUNNER_TEMP/current-sorted"
+          comm -12 "$RUNNER_TEMP/parent-sorted" "$RUNNER_TEMP/current-sorted" > "$RUNNER_TEMP/sdk-excludes.txt"
+          echo "Cross-version conservative exclusion lines=$(wc -l < "$RUNNER_TEMP/sdk-excludes.txt")" | tee -a "$GITHUB_STEP_SUMMARY"
           test -s "$RUNNER_TEMP/sdk-excludes.txt" || { echo "No conservative exclusions found"; exit 1; }
           git clean -fdx -- harmonyos
           (cd "$dir"

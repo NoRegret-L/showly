@@ -8,7 +8,9 @@ with tempfile.TemporaryDirectory() as tmp:
     subprocess.run(["tsc","--strict","--target","ES2020","--module","commonjs","SyncCoordinator.ts"],cwd=w,check=True)
     (w/"test.cjs").write_text("""
 const assert=require('node:assert/strict');
-const {SyncCoordinator,queueIdentity}=require('./SyncCoordinator');
+const {SyncCoordinator,SyncService,queueIdentity}=require('./SyncCoordinator');
+const service=new SyncService();
+for(let i=0;i<100;i++){const a=service.acquire('account-A');assert(a>0);assert.equal(service.acquire('account-B'),0);service.release(a-1);assert(service.busy());service.release(a);assert(!service.busy());}
 const c=new SyncCoordinator();
 for(let cycle=0;cycle<100;cycle++){
   for(const lane of ['titles','observation','media','episodes']){

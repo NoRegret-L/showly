@@ -1,5 +1,5 @@
 import { executeEpisodeQueue } from '../data/EpisodeQueueExecutor';
-import { SyncCoordinator } from '../model/SyncCoordinator';
+import { SyncCoordinator, syncService } from '../model/SyncCoordinator';
 import { GalleryTarget } from '../model/GalleryRules';
 import { GalleryPage } from './GalleryPage';
 import { CommentTarget } from '../model/CommentRules';
@@ -410,7 +410,7 @@ struct Index {
   @State autoConsent?: AutoConsent = undefined;
   @State queueRows: QueueEntry[] = [];
   private pageVisible: boolean = false;
-  private syncCoordinator: SyncCoordinator = new SyncCoordinator();
+  private syncCoordinator: SyncCoordinator = syncService.coordinator;
   private get recoveryPending(): boolean { return this.syncCoordinator.has('episodes'); }
   private set recoveryPending(value: boolean) { this.syncCoordinator.mark('episodes', value); }
   private get mediaRecoveryPending(): boolean { return this.syncCoordinator.has('media'); }
@@ -430,6 +430,7 @@ struct Index {
   @State queueConfirm: boolean = false;
   @State autoStatus: string = '';
   @State syncLogs: string[] = [];
+  @State lastEpisodeUpload: number = 0;
   @State uploadStatus: string = '';
   @State episodeReady: boolean = false;
   @State episodeInitStatus: string = '';
@@ -857,6 +858,7 @@ struct Index {
   // Coalesce to a single pending event, not a periodic retry loop.
   private onObservationAuthChanged(): void {
     this.syncCoordinator.reset();
+    this.lastEpisodeUpload = 0;
     this.clearCollectionViews();
     this.clearProgressCandidates();
     this.resetSearchAccount();
@@ -1076,6 +1078,8 @@ struct Index {
     if (!media || !binding || !consent || !session || !this.titleQuickActive() ||
         !this.pageVisible || this.syncBusy || this.saving || this.localBusy || this.cloudBusy ||
         this.authBusy || this.setupBusy || this.backupBusy) { return; }
+    const ticket = syncService.acquire(JSON.stringify([clientId,consent.uuid,'titles']));
+    if (!ticket) { return; }
     this.syncBusy = true;
     this.titleQuickStatus = '正在同步影视操作…';
     try {
@@ -1092,7 +1096,7 @@ struct Index {
     } catch (error) {
       this.titleQuickStatus = '快捷同步暂未完成，已保留操作。' + safeSyncError(error as Error);
       this.libraryNotice = '同步暂未完成，观看记录已保留。';
-    } finally { this.syncBusy = false; }
+    } finally { syncService.release(ticket); this.syncBusy = false; }
   }
 
   private requestMediaRecovery(): void {
@@ -1112,6 +1116,8 @@ struct Index {
         !traktAuth.isCurrent(clientId, account.generation)) { return; }
     const session = traktAuth.session(clientId);
     if (!session) { return; }
+    const ticket = syncService.acquire(JSON.stringify([clientId,account.uuid,'media']));
+    if (!ticket) { return; }
     this.syncBusy = true;
     try {
       if (!(await store.pendingTargets(account.uuid)).length) { return; }
@@ -1133,6 +1139,7 @@ struct Index {
           this.mediaLogs = await store.operationLogs(account.uuid);
         }
       } catch (error) {}
+      syncService.release(ticket);
       this.syncBusy = false;
     }
   }
@@ -2809,7 +2816,11 @@ struct Index {
     const store = this.episodeStore;
     if (!store) { return; }
     const uuid = await store.boundAccount();
-    this.queueRows = uuid ? await store.queueEntries(uuid) : [];
+    const rows = uuid ? await store.queueEntries(uuid) : [];
+    const confirmed = uuid ? await store.lastConfirmedEpisodeUpload(uuid) : 0;
+    if (await store.boundAccount() !== uuid) { return; }
+    this.queueRows = rows;
+    this.lastEpisodeUpload = confirmed;
   }
 
   private async setAuto(enabled: boolean): Promise<void> {
@@ -2866,6 +2877,8 @@ struct Index {
     if (manual && (!this.syncAccount || !this.syncBound || !this.queueConfirm)) { return; }
     const expected = manual ? this.syncAccount?.uuid : consent?.uuid;
     if (!expected) { return; }
+    const ticket = syncService.acquire(JSON.stringify([clientId,expected,'episodes']));
+    if (!ticket) { return; }
     this.syncBusy = true;
     this.queueConfirm = false;
     this.autoStatus = '正在读取待同步队列…';
@@ -2883,6 +2896,7 @@ struct Index {
         this.autoStatus += '；本机队列或日志刷新失败：' + safeSyncError(error as Error);
       }
       this.syncPreview = undefined;
+      syncService.release(ticket);
       this.syncBusy = false;
     }
   }
@@ -7062,7 +7076,13 @@ struct Index {
         Text(this.cloud && this.cloudFresh ? '云端版本已核对' :
           this.cloud ? '显示上次缓存，尚未确认最新版本' : '尚未核对云端版本').fontSize(12).width('100%')
         if (this.syncBound && this.syncAccount && traktAuth.isCurrent(this.clientId, this.syncAccount.generation)) {
-          Text('分集待处理：' + this.queueRows.length + ' 条（含需只读核对）').fontSize(13).width('100%')
+          Row({ space: 12 }) {
+            Text('待发送 ' + this.queueRows.filter((row: QueueEntry)=>!row.blocked).length).fontSize(14).layoutWeight(1)
+            Text('待核对/受保护 ' + this.queueRows.filter((row: QueueEntry)=>row.blocked).length).fontSize(14).layoutWeight(1)
+          }.width('100%')
+          if (this.lastEpisodeUpload > 0) {
+            Text('最近完整分集上传确认：' + new Date(this.lastEpisodeUpload).toLocaleString()).fontSize(12).width('100%')
+          }
         }
         if (this.cloud && this.cloud.verifiedAt) {
           Text('上次成功核对云端：' + new Date(this.cloud.verifiedAt).toLocaleString()).fontSize(12).width('100%')

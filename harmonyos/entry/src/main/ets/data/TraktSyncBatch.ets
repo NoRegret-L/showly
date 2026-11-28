@@ -145,6 +145,11 @@ export async function uploadBatch(store: EpisodeStore, session: TraktSession,
       ' 发送结果：' + postStatus + (readErrors ? '；回读/保存异常 ' + readErrors + ' 次：' + firstReadError : '');
     stage = '保存批量结果日志';
     await store.logSync(uuid, mode, send, message);
+    // Only an accepted POST with every exact readback and durable receipt
+    // qualifies. Merely observing a pre-existing record is not upload success.
+    if (accepted && present === send.length && receipts === send.length && readErrors === 0) {
+      await store.logSync(uuid, 'episode-upload-confirmed', send, '分集上传及回执全部确认');
+    }
     return { message: message, completedIds: completedIds };
   } catch (error) {
     if (!sent) {
