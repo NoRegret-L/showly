@@ -36,7 +36,7 @@ console.log('Observation domain masks: 100 rounds, paired watchlist dependencies
 lib=(root/"data/TraktLibrary.ets").read_text()
 page=(root/"pages/Index.ets").read_text()
 assert "before.all !== after.all || before.movies !== after.movies || before.shows !== after.shows" in lib
-assert "readObservationCollections(session,mask)" in lib
+assert "readObservationCollections(session,mask,readPermit)" in lib
 assert "validateObservation(snapshot)" in lib
 assert "readCloudLibraryIncremental(session,snapshot)" in page
 assert "await store.saveRemoteObservation(account.uuid, persisted)" in page

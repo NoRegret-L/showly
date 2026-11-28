@@ -1,3 +1,4 @@
+import { readPreparedObservation } from '../data/BackgroundObservation';
 import { SyncStatusPanel } from './SyncStatusPanel';
 import { lastScheduleWake } from '../data/SyncSchedule';
 import { executeEpisodeQueue } from '../data/EpisodeQueueExecutor';
@@ -940,6 +941,19 @@ struct Index {
     if (!this.pageVisible || !this.signedIn || !this.clientId || (passive && this.cloudBusy)) { return; }
     this.observationPending = true;
     this.onRecoveryGateChanged();
+  }
+
+  private async changeBackgroundRead(enabled: boolean): Promise<boolean> {
+    const store=this.episodeStore, account=this.syncAccount, client=this.clientId;
+    const session=traktAuth.session(client);
+    if (!store || !account || !session || !this.syncBound || this.syncBusy || this.cloudBusy || this.backupBusy || this.authBusy || this.setupBusy) { return false; }
+    if (!enabled) { return traktAuth.setBackgroundRead(client,account.uuid,false); }
+    try {
+      const verified=await readSyncAccount(session);
+      if (verified.uuid !== account.uuid || await store.boundAccount() !== verified.uuid ||
+          !traktAuth.isCurrent(client,session.generation) || this.clientId !== client || this.syncAccount?.uuid !== verified.uuid) { return false; }
+      return traktAuth.setBackgroundRead(client,verified.uuid,true);
+    } catch (error) { return false; }
   }
 
   private requestSyncNow(): void {
@@ -3554,7 +3568,9 @@ struct Index {
       const bound = await store.boundAccount();
       if (!current()) { throw new Error('Session changed'); }
       this.cloudLocalAllowed = allowLocalScope(true, bound, account.uuid);
-      const cached = this.activeCloud() && this.cloudUuid === account.uuid ? undefined : await store.readRemoteObservation(account.uuid);
+      let cached = this.activeCloud() && this.cloudUuid === account.uuid ? undefined : await store.readRemoteObservation(account.uuid);
+      const prepared = bound === account.uuid ? readPreparedObservation(this.context().filesDir,account.uuid,clientId,session.generation) : undefined;
+      if (prepared && (prepared.verifiedAt ?? 0) > (cached?.verifiedAt ?? this.cloud?.verifiedAt ?? 0)) { cached = prepared; }
       if (!current()) { throw new Error('Session changed'); }
       let initialProjection: LibraryProjection | undefined;
       let initialSnapshot: CloudLibrary | undefined;
@@ -3616,6 +3632,7 @@ struct Index {
         this.publishMovieSource(snapshot);
         if (changed) { this.clearLocalCalendar(); this.libraryEvidence = []; }
         this.cloudFresh = true;
+        if (bound === account.uuid) { traktAuth.setBackgroundRead(clientId,account.uuid,true,true); }
       } catch (error) {
         if (!current() || !this.cloud || this.cloudUuid !== account.uuid) { throw new Error('读取云端失败'); }
         snapshot = this.cloud;
@@ -7079,7 +7096,8 @@ struct Index {
           cloudText:this.cloud && this.cloudFresh ? '云端版本已核对' :
             this.cloud ? '显示上次缓存，尚未确认最新版本' : '尚未核对云端版本',
           bound:!!this.syncBound && !!this.syncAccount && traktAuth.isCurrent(this.clientId,this.syncAccount.generation),
-          rows:this.queueRows,lastUpload:this.lastEpisodeUpload,lastVerified:this.cloud?.verifiedAt ?? 0})
+          rows:this.queueRows,lastUpload:this.lastEpisodeUpload,lastVerified:this.cloud?.verifiedAt ?? 0,
+          uuid:this.syncAccount?.uuid ?? '',clientId:this.clientId,onBackgroundRead:(enabled:boolean)=>this.changeBackgroundRead(enabled)})
         if (this.autoStatus) { Text(this.autoStatus).fontSize(12).width('100%') }
         if (this.mediaSyncStatus) { Text(this.mediaSyncStatus).fontSize(12).width('100%') }
         Button(this.cloudBusy || this.syncBusy ? '同步处理中…' : '立即同步').width('100%')

@@ -29,15 +29,15 @@ let maximum=0;
 export function scenario(change:boolean=false,fail:boolean=false) { requests=[];activity='revision';changed=change;stopped=fail;active=0;maximum=0; }
 let watchedShows:string|undefined,queuedShows:string|undefined,watchedMovies:string|undefined,queuedMovies:string|undefined;
 export function setVersions(m:string,s:string,w?:string,q?:string,wm?:string,qm?:string){movies=m;shows=s;watchedShows=w;queuedShows=q;watchedMovies=wm;queuedMovies=qm;activity='changed-revision';}
-async function readActivityVersions(session:TraktSession):Promise<ObservationVersions> { return {all:await readActivity(session),movies,shows,watchedShows,queuedShows,watchedMovies,queuedMovies}; }
+async function readActivityVersions(session:TraktSession,permit?:()=>boolean):Promise<ObservationVersions> { ensureCurrent(session,permit); return {all:await readActivity(session),movies,shows,watchedShows,queuedShows,watchedMovies,queuedMovies}; }
 export function stats(){return {requests,maximum,active};}
-function ensureCurrent(session:TraktSession):void { if(session.generation!==1)throw Error('session'); }
+function ensureCurrent(session:TraktSession,permit?:()=>boolean):void { if(permit?!permit():session.generation!==1)throw Error('session'); }
 async function readActivity(session:TraktSession):Promise<string> {
  ensureCurrent(session); requests.push('activity');
  return changed && requests.filter(x=>x==='activity').length>1?'new-revision':activity;
 }
-async function readAll(session:TraktSession,path:string,allowed?:()=>boolean):Promise<SyncItem[]> {
- ensureCurrent(session);if(allowed&&!allowed())throw Error('stopped');requests.push(path);active++;maximum=Math.max(maximum,active);
+async function readAll(session:TraktSession,path:string,allowed?:()=>boolean,permit?:()=>boolean):Promise<SyncItem[]> {
+ ensureCurrent(session,permit);if(allowed&&!allowed())throw Error('stopped');requests.push(path);active++;maximum=Math.max(maximum,active);
  try {
   await Promise.resolve();
   if(stopped&&path.includes('watched/shows'))throw Error('HTTP 429');

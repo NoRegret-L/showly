@@ -103,6 +103,7 @@ class TraktAuth {
       if (!session || !uuid) { return false; }
       const old = readBackgroundGrant();
       if (renew && (!old || old.uuid !== uuid || old.clientId !== clientId)) { return false; }
+      if (renew && old && old.token === session.token && old.expiresAt === this.expiresAt) { return true; }
       const id = old && old.uuid === uuid && old.clientId === clientId ? old.id : newBackgroundGrantId();
       const grant: BackgroundGrant = {uuid:uuid,clientId:clientId,token:session.token,expiresAt:this.expiresAt,id:id};
       writeBackgroundGrant(grant);
