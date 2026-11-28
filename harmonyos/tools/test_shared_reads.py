@@ -14,18 +14,21 @@ with tempfile.TemporaryDirectory() as tmp:
     for name in ("Media","ShowCatalog","RemoteObservation","ReadFlight","MediaPresentation"):
         shutil.copyfile(root/"model"/(name+".ets"),work/(name+".ts"))
     harness="""import { Media, CollectionDate, PersonalMovie, validReleaseDate } from './Media';
-import { RemoteLibraryObservation, RemoteMovieObservation, RemoteShowObservation, RemotePlayPosition, validateObservation } from './RemoteObservation';
+import { RemoteLibraryObservation, RemoteMovieObservation, RemoteShowObservation, RemotePlayPosition, validateObservation, ObservationVersions, observationReadMask } from './RemoteObservation';
 type ShowProgress=RemoteShowObservation;
 type CloudLibrary=RemoteLibraryObservation;
 interface TraktSession { clientId:string; generation:number; token:string; }
 """+section(lib,"interface Ids {","export type ShowProgress")+"""
 let requests:string[]=[];
 let activity='revision';
+let movies='movie-revision',shows='show-revision';
 let changed=false;
 let stopped=false;
 let active=0;
 let maximum=0;
 export function scenario(change:boolean=false,fail:boolean=false) { requests=[];activity='revision';changed=change;stopped=fail;active=0;maximum=0; }
+export function setVersions(m:string,s:string){movies=m;shows=s;activity='changed-revision';}
+async function readActivityVersions(session:TraktSession):Promise<ObservationVersions> { return {all:await readActivity(session),movies,shows}; }
 export function stats(){return {requests,maximum,active};}
 function ensureCurrent(session:TraktSession):void { if(session.generation!==1)throw Error('session'); }
 async function readActivity(session:TraktSession):Promise<string> {
@@ -90,6 +93,19 @@ const {mergeText}=require('./MediaPresentation.js');
  assert.throws(()=>validateObservation(bad),/Invalid movie details/);
  assert.throws(()=>validateObservation({...snap,movieDetails:[]}),/Incomplete movie details/);
  assert.throws(()=>validateObservation({...snap,movieDetails:[...snap.movieDetails,snap.movieDetails[0]]}),/Invalid movie details/);
+ h.scenario();
+ const baseline=await h.readCloudLibraryIncremental(session);
+ h.scenario();h.setVersions('movie-revision','new-show');
+ const delta=await h.readCloudLibraryIncremental(session,baseline);
+ assert.equal(h.stats().requests.length,4);
+ assert.equal(delta.movieDetails,baseline.movieDetails);
+ assert.deepEqual(delta.watchlist,baseline.watchlist);
+ assert.deepEqual(delta.queueDates,baseline.queueDates);
+ assert.deepEqual(delta.shows,baseline.shows);
+ h.scenario();h.setVersions('new-movie','new-show');
+ const moviesOnly=await h.readCloudLibraryIncremental(session,delta);
+ assert.equal(h.stats().requests.length,6); // global revision identical but domain inconsistent -> full
+ assert.deepEqual(moviesOnly.movieDetails,baseline.movieDetails);
  const legacy={...snap};delete legacy.movieDetails;validateObservation(legacy);
  h.scenario(true);
  await assert.rejects(h.readCloudLibrary(session),/activity changed/);

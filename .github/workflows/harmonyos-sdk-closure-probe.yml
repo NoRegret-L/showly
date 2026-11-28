@@ -17,7 +17,7 @@ jobs:
         with:
           persist-credentials: false
           sparse-checkout: harmonyos
-          fetch-depth: 2
+          fetch-depth: 4
       - name: Prepare verified streaming SDK
         run: |
           set -euo pipefail
@@ -46,8 +46,8 @@ jobs:
           build=(hvigorw assembleHap --mode module -p module=entry@default -p product=default -p buildMode=debug --no-daemon --optimization-strategy=performance)
           parent="$RUNNER_TEMP/parent-source"
           mkdir "$parent"
-          git archive HEAD^ harmonyos | tar -xf - -C "$parent"
-          echo "Closure parent=$(git rev-parse HEAD^) current=$(git rev-parse HEAD)" | tee -a "$GITHUB_STEP_SUMMARY"
+          git archive 540c56642c50a1310785785fd8b09e7ff724adab harmonyos | tar -xf - -C "$parent"
+          echo "Closure parent=$(git rev-parse 540c56642c50a1310785785fd8b09e7ff724adab) current=$(git rev-parse HEAD)" | tee -a "$GITHUB_STEP_SUMMARY"
           (cd "$parent/harmonyos"
            ohpm install --all
            strace -ff -yy -s 4096 -e trace=%file,getdents64 -o "$RUNNER_TEMP/sdktrace-parent" "${build[@]}")
