@@ -195,7 +195,7 @@ const {ConsumerReadFlight}=require('./ReadFlight');
 """)
     subprocess.run(["node","test.cjs"],cwd=work,check=True)
 page=(root/"pages"/"Index.ets").read_text()
-assert page.count("new PageStateOwner<")==8
+assert page.count("new PageStateOwner<")==9
 assert "this.pageWorks.observe(" in page
 assert "work.current(ticket)" in page
 assert "this.activePresentationRoute()" in page

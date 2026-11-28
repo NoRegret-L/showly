@@ -53,23 +53,42 @@ jobs:
         run: |
           python3 -c 'import sys; from pathlib import Path; sys.path.insert(0, "harmonyos/tools"); from prepare_preview_release import validate_source; validate_source(Path("harmonyos")); print("Source release version checks passed")'
 
-      - name: Install Linux dependencies
+      - name: Check out pinned SDK setup
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: ErBWs/setup-ohos
+          ref: 4dbb63025116eb6165ceac58a4bf47cbdc5ac721
+          path: .ci-sdk-setup
+          persist-credentials: false
+
+      # Independent preparation. The pinned script verifies the SDK archive.
+      # Both child processes must succeed before toolchain verification.
+      - name: Prepare SDK and Linux dependencies in parallel
+        id: sdk
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          if dpkg-query -W -f='${Status}' libgl1-mesa-dev 2>/dev/null | grep -qx 'install ok installed'; then
-            echo 'libgl1-mesa-dev already installed; skipping apt network work'
-          else
-            sudo apt-get update
-            sudo apt-get install -y libgl1-mesa-dev
-          fi
-
-      # Third-party SDK distribution. No signing or API secrets in this job.
-      - name: Set up HarmonyOS CLI
-        id: sdk
-        uses: ErBWs/setup-ohos@4dbb63025116eb6165ceac58a4bf47cbdc5ac721
-        with:
-          version: '6.1.1.280'
-          cache: false
+          (
+            set -euo pipefail
+            start=$(date +%s)
+            if ! dpkg-query -W -f='${Status}' libgl1-mesa-dev 2>/dev/null | grep -qx 'install ok installed'; then
+              sudo apt-get update
+              sudo apt-get install -y libgl1-mesa-dev
+            fi
+            echo "Linux dependency seconds=$(( $(date +%s)-start ))"
+          ) > "$RUNNER_TEMP/linux-dependencies.log" 2>&1 &
+          linux_pid=$!
+          start=$(date +%s)
+          bash .ci-sdk-setup/setup.sh -v '6.1.1.280' > "$RUNNER_TEMP/sdk-setup.log" 2>&1 &
+          sdk_pid=$!
+          linux_status=0; sdk_status=0
+          wait "$linux_pid" || linux_status=$?
+          wait "$sdk_pid" || sdk_status=$?
+          cat "$RUNNER_TEMP/linux-dependencies.log" "$RUNNER_TEMP/sdk-setup.log"
+          echo "Parallel setup seconds=$(( $(date +%s)-start ))"
+          test "$linux_status" -eq 0
+          test "$sdk_status" -eq 0
 
       - name: Verify toolchain
         run: |

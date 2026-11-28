@@ -4,7 +4,7 @@ import shutil, subprocess, tempfile
 root=Path(__file__).resolve().parents[1]/"entry/src/main/ets"
 with tempfile.TemporaryDirectory() as tmp:
     work=Path(tmp)
-    names=("Media","ShowCatalog","ThreeWay","RemoteObservation","EffectiveState","MediaPresentation","ProgressRules")
+    names=("Media","ShowCatalog","ThreeWay","RemoteObservation","EffectiveState","MediaPresentation","ProgressRules","HistoryOwner")
     for name in names: shutil.copyfile(root/"model"/(name+".ets"),work/(name+".ts"))
     subprocess.run(["tsc","--strict","--target","ES2020","--module","commonjs",*[n+".ts" for n in names]],cwd=work,check=True)
     (work/"test.cjs").write_text("""
@@ -19,6 +19,17 @@ const first=sel.begin('A');assert(sel.current('A',first));assert(!sel.consume('B
 const stale=sel.begin('A'),fresh=sel.begin('B');assert(!sel.consume('A',stale));assert(sel.consume('B',fresh));
 assert(validWatchTime(now,now));assert(!validWatchTime(now+1,now));assert(!validWatchTime(NaN,now));assert.equal(releaseWatchTime('',now),0);
 const rel=releaseWatchTime('2025-01-01',now);assert.equal(new Date(rel).getHours(),20);assert.equal(new Date(rel).getMinutes(),0);
+const {HistoryOwner,historyRange,historyDay}=require('./HistoryOwner.js');
+const history=new HistoryOwner();
+const hs={...source,episodes:[ep(1,-2,true,now-day),ep(2,-2,true,0),ep(3,-2,false,now-day)]};
+history.update('A',[{media,source:hs,sourceStateKey:'1',sourceCatalogKey:'1'}]);
+assert.equal(history.rows('all','',now,r=>r.media.title,r=>r.title).length,2);
+history.update('A',[{media,source:hs,sourceStateKey:'1',sourceCatalogKey:'1'}]);
+assert.equal(history.computations(),1);
+assert.equal(history.rows('all','missing',now,r=>r.media.title,r=>r.title).length,0);
+history.update('B',[]);assert.equal(history.rows('all','',now,r=>r.media.title,r=>r.title).length,0);
+assert.equal(new Date(historyRange('thisWeek',now).start).getDay(),1);
+assert.equal(new Date(historyRange('lastMonth',now).start).getDate(),1);
 const p=defaultProgress();
 assert.equal(p.days,30);
 assert.equal(selectProgress(source,p,[],now).episode.id,4);
@@ -84,3 +95,7 @@ store=(root/"data"/"EpisodeStore.ets").read_text()
 assert "await this.markBody(intent.showId, [episodeId], value, '', Date.now());" in store
 assert "watched ? watchedAt : Date.now(), authorized" in store
 assert "this.markBody(showId,ids,watched,autoUuid,watchedAt)" in store
+
+assert "this.historyOwner.update(account,account?this.nextShows:[])" in source
+assert "current.intentSeq!==selected.intentSeq" in (root/"data"/"TraktSyncUpload.ets").read_text()
+assert "row.watchIntentSeq!==selected.watchIntentSeq" in (root/"data"/"TraktMediaSync.ets").read_text()

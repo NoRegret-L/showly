@@ -1,3 +1,4 @@
+import { TitleIntent } from '../model/TitleQuickState';
 import { Media } from '../model/Media';
 import { CommonEntry, classifyThreeWay } from '../model/ThreeWay';
 import { MediaRecord, isTraktMedia } from '../model/MediaState';
@@ -17,6 +18,8 @@ export interface MediaDifference {
   operation: string;
   operationNote: string;
   operationSeq: number;
+  watchedAt?:string;
+  watchIntentSeq?:number;
   baseline: string;
   threeWay: string;
 }
@@ -77,11 +80,15 @@ export async function buildMediaPreview(store: EpisodeStore, session: TraktSessi
     if (row.threeWay === 'remote' || row.threeWay === 'divergent') { row.category = 'remote'; }
   }
   if (mediaStore) {
+    const latest=new Map<string,TitleIntent>();
+    for(const intent of await mediaStore.titleIntents(expectedUuid)){if(intent.domain==='movie'){latest.set(intent.id,intent);}}
     for (const row of rows) {
       if (row.local === 'unknown') { continue; }
       const prior = await mediaStore.latestOperation(expectedUuid, row.domain, row.id);
       row.operationSeq = prior?.seq ?? 0;
       row.operation = mediaAction(row, prior);
+      const intent=latest.get(row.id);
+      if(row.domain==='movie'&&row.operation==='add'&&intent?.value==='yes'&&intent.operationSeq===row.operationSeq){row.watchedAt=intent.watchedAt;row.watchIntentSeq=intent.seq;}
       if (prior?.state === 'pending') { row.operationNote = '已有未确认操作；仅允许只读核对，不重发。'; }
       else if (row.category === 'remote') { row.operationNote = '仅云端变化；暂停反向写入，可确认采用云端状态。'; }
       else if (row.category === 'conflict' && row.domain === 'movie' && !row.operation) {

@@ -88,7 +88,7 @@ assert "this.listRevision" not in page
 assert "this.displayRevisions.showsChanged()" in page and "this.displayRevisions.moviesChanged()" in page
 assert "this.displayRevisions.collectionChanged()" in page
 assert "this.flagVersion('show')" in page and "this.hiddenVersion('show')" in page
-assert page.count("differ,current)")==7
+assert page.count("differ,current)")==8
 # Three successful publication guards plus an independent collection error guard.
 assert page.count("if (!this.sortJobs.current(slot,token)")==3
 collection_sort=page.split("  private async runCollectionSort(",1)[1].split("  private collectionEntries()",1)[0]

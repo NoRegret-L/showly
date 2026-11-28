@@ -15,6 +15,7 @@ interface WatchedPage { items: WatchedRow[]; pages: number; total: number; }
 export interface SyncDifference {
   episodeId: number;
   intentSeq: number;
+  watchedAt?:string;
   baseline: string;
   threeWay: string;
   label: string;
@@ -182,7 +183,7 @@ export async function buildSyncPreview(store: EpisodeStore, session: TraktSessio
     else if (kind === 'remote') { remoteChanges++; }
     else { unknown++; }
     const receipt = kind === 'conflict' ? await store.undoReceipt(account.uuid, intent.episodeId) : undefined;
-    rows.push({ episodeId: intent.episodeId, intentSeq: intent.seq, baseline: base ? (base.value ? 'yes' : 'no') : 'unknown',
+    rows.push({ episodeId: intent.episodeId, intentSeq: intent.seq, watchedAt: intent.watched&&intent.changedAt>0?new Date(intent.changedAt).toISOString():undefined, baseline: base ? (base.value ? 'yes' : 'no') : 'unknown',
       threeWay: threeWay, label: intent.label, localWatched: intent.watched,
       cloudWatched: remote, kind: kind, undoHistoryId: receipt?.historyId ?? 0,
       undoWatchedAt: receipt?.watchedAt ?? '', undoState: receipt?.removalState ?? -1,

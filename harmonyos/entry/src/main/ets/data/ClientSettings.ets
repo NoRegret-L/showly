@@ -102,6 +102,12 @@ export class ClientSettings {
     await this.storage.put('movie_progress_options', JSON.stringify(value));
     await this.storage.flush();
   }
+  loadHistoryPeriod():string{return this.storage.getSync('history_period','all').toString();}
+  async saveHistoryPeriod(value:string):Promise<void>{await this.storage.put('history_period',value);await this.storage.flush();}
+  loadProgressRatingHidden():boolean{return this.storage.getSync('progress_rating_hidden',false)===true;}
+  loadProgressTapReveal():boolean{return this.storage.getSync('progress_tap_reveal',false)===true;}
+  async saveProgressRatingHidden(value:boolean):Promise<void>{await this.storage.put('progress_rating_hidden',value);await this.storage.flush();}
+  async saveProgressTapReveal(value:boolean):Promise<void>{await this.storage.put('progress_tap_reveal',value);await this.storage.flush();}
   loadProgressWatchMode():string{return this.storage.getSync('progress_watch_mode','ask')==='now'?'now':'ask';}
   async saveProgressWatchMode(mode:string):Promise<void>{
     if(mode!=='ask'&&mode!=='now'){throw new Error('Invalid watch mode');}

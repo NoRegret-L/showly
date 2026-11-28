@@ -146,6 +146,7 @@ export async function syncSelectedMedia(store: MediaStore, binding: EpisodeStore
       row.operation !== selected.operation || row.operationSeq !== selected.operationSeq) {
     return { message: '本机或云端状态已变化，未发送；请重新预览并确认。' };
   }
+  if(row.domain==='movie'&&row.operation==='add'&&(row.watchIntentSeq!==selected.watchIntentSeq||row.watchedAt!==selected.watchedAt||(row.watchedAt!==undefined&&Date.parse(watchedAt)!==Date.parse(row.watchedAt)))){return {message:'观看时间或本机意图已变化，未发送；请重新预览。'};}
   // Watching may automatically remove the movie from the Trakt watchlist.
   // If watchlist membership changed since review, require another review.
   if (row.domain === 'movie' && row.operation === 'add') {

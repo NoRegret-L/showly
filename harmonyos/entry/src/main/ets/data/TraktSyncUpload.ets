@@ -64,7 +64,7 @@ export async function uploadSelectedEpisode(store: EpisodeStore, session: TraktS
   if (current.cloudWatched && current.kind === 'match') {
     return { status: 'skipped', message: '云端已存在该集观看记录，已跳过，未重复上传。' };
   }
-  if (current.kind !== 'addition') { throw new Error('Selection no longer eligible'); }
+  if (current.kind !== 'addition'||current.intentSeq!==selected.intentSeq||!selected.watchedAt||current.watchedAt!==selected.watchedAt||Date.parse(watchedAt)!==Date.parse(selected.watchedAt)) { throw new Error('Selection or watch time changed'); }
   if (await store.hasUploadAttempt(account.uuid, episodeId)) {
     return { status: 'blocked', message: '该集已有上传尝试凭证，禁止再次写入。请在 Trakt 检查历史；本版不解除保护。' };
   }

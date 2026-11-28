@@ -36,6 +36,7 @@ import { syncSelectedMedia, reconcilePendingMedia } from '../data/TraktMediaSync
 import { checkpointEpisodes, checkpointMedia, adoptEpisodeCloud, adoptMediaCloud } from '../data/ThreeWaySync';
 import { threeWayLabel } from '../model/ThreeWay';
 import { NextShow } from '../data/NextShows';
+import { HistoryOwner, HistoryEntry, HistoryEpisode, HistorySnapshot, HistoryPeriodOption, HISTORY_PERIODS, initialHistory, validHistoryPeriod } from '../model/HistoryOwner';
 import { RevisionMemo, projectionKey } from '../model/ReadModelCache';
 import { CandidateInput, CandidateBatch, CandidateResult, ProgressCandidateIndex } from '../model/ProgressCandidates';
 import { CacheLifecycle, cacheResidency, memoryEvents } from '../model/CacheLifecycle';
@@ -149,6 +150,10 @@ struct Index {
   private collectionRowsSource():PageStateOwner<CollectionGroup,PersonalLibraryRow[]>{return this.mediaMode==='movie'?this.movieCollectionRowsSource:this.showCollectionRowsSource;}
   private collectionOwnerSlot():string{return this.mediaMode==='movie'?'libraryMovie':'libraryShow';}
   private collectionSortSlot():string{return this.mediaMode==='movie'?'collection-movie':'collection-show';}
+  private historyRows:PageStateOwner<HistoryEntry,HistoryEntry[]>=new PageStateOwner<HistoryEntry,HistoryEntry[]>((row:HistoryEntry)=>row.episode?[row.episode.media.id]:[]);
+  private historyScroller:Scroller=new Scroller();
+  private historyOwner:HistoryOwner=new HistoryOwner();
+  @State historyUi:HistorySnapshot=initialHistory();
   private pageWorks:PageWorkSet=this.createPageWorks();
   private sortJobs:PageSortJobs=new PageSortJobs(this.pageWorks);
   private createPageWorks():PageWorkSet{
@@ -158,6 +163,7 @@ struct Index {
     pages.register('show',this.showRows.work);pages.register('movie',this.movieRowsSource.work);
     pages.register('libraryShow',this.showCollectionRowsSource.work);
     pages.register('libraryMovie',this.movieCollectionRowsSource.work);
+    pages.register('history',this.historyRows.work);
     return pages;
   }
   private pageOwnerSlot():string{const slot=this.scrollSlot();return slot==='library'?this.collectionOwnerSlot():slot;}
@@ -179,6 +185,9 @@ struct Index {
   private watchSelection:ProgressWatchSelection=new ProgressWatchSelection();
   @State progressWatchMode:string='ask';
   @State progressEpisodeHidden:boolean=false;
+  @State progressRatingHidden:boolean=false;
+  @State progressTapReveal:boolean=false;
+  private progressRevealed:Set<string>=new Set<string>();
   private showCollectionRecovery:CollectionRecoveryOwner=new CollectionRecoveryOwner();
   private movieCollectionRecovery:CollectionRecoveryOwner=new CollectionRecoveryOwner();
   private collectionStage:string='初始化';
@@ -312,7 +321,6 @@ struct Index {
   @State @Watch('onDetailViewChanged') localSeason: number = -1;
   @State @Watch('onRecoveryGateChanged') localBusy: boolean = false;
   @State localStatus: string = '';
-  @State localRecent: Media[] = [];
   @State @Watch('onPresentationChanged') progressMode: string = 'next';
   @State @Watch('onShowsChanged') nextShows: NextShow[] = [];
   @State nextStatus: string = '';
@@ -366,13 +374,10 @@ struct Index {
   @State themeBusy: boolean = false;
   private appearance?: AppearanceStore;
   @State refreshing: boolean = false;
-  @State trackingPage: number = 1;
-  @State trackingQuery: string = '';
   private translationCache: Map<string, ChineseText> = new Map<string, ChineseText>();
   @State @Watch('onCollectionViewChanged') collectionFilter: string = 'mine';
   @State @Watch('onCollectionViewChanged') collectionPage: number = 1;
   @State collectionGrid: boolean = true;
-  @State collectionCards: DiscoverItem[] = [];
   @State collectionBusy: boolean = false;
   @State collectionStatus: string = '';
   private collectionRevision: number = 0;
@@ -577,6 +582,8 @@ struct Index {
       this.presentationLanguage = this.settings.loadLanguage();
       this.progressPrefs = this.settings.loadProgress();
       this.progressWatchMode=this.settings.loadProgressWatchMode();this.progressEpisodeHidden=this.settings.loadProgressEpisodeHidden();
+      this.progressRatingHidden=this.settings.loadProgressRatingHidden();this.progressTapReveal=this.settings.loadProgressTapReveal();
+      const period=this.settings.loadHistoryPeriod();this.historyUi=initialHistory(validHistoryPeriod(period)?period:'all');
       this.movieProgressOptions = this.settings.loadMovieProgress();
       this.progressDaysInput = this.progressPrefs.days.toString();
       this.nextFilter = effectiveProgressFilter(this.progressPrefs);
@@ -1020,7 +1027,6 @@ struct Index {
   private async initializeEpisodes(context: common.UIAbilityContext): Promise<void> {
     try {
       this.episodeStore = await EpisodeStore.open(context);
-      this.localRecent = await this.episodeStore.recent();
       this.episodeReady = true;
       const consent = await this.episodeStore.autoConsent();
       if (consent && consent.clientId === this.clientId) { this.autoConsent = consent; }
@@ -1169,7 +1175,6 @@ struct Index {
       this.invalidateNextShows(item.id);
       saved = true;
       this.requestProjection();
-      this.localRecent = await store.recent();
       await this.reloadQueue();
       if (revision === this.detailRevision) {
         await this.refreshEffectiveDetail();
@@ -1459,7 +1464,7 @@ struct Index {
   private onShowsChanged(): void {
     this.displayRevisions.showsChanged();this.collectionDependencies.sourceChanged('show');
     const slot=this.scrollSlot();
-    if(!slot||slot==='show'||slot==='calendar'||slot==='library'||slot==='discover'||slot==='search'){this.onPresentationChanged();}
+    if(!slot||slot==='show'||slot==='history'||slot==='calendar'||slot==='library'||slot==='discover'||slot==='search'){this.onPresentationChanged();}
   }
   private onMoviesChanged(): void {
     this.displayRevisions.moviesChanged();this.collectionDependencies.sourceChanged('movie');
@@ -1584,6 +1589,7 @@ struct Index {
       case 'search': return this.searchRows.refreshDependencies(ids,(row: Media)=>this.searchRowKey(row));
       case 'show': return this.showRows.refreshDependencies(ids,(row: ProgressEntry)=>this.showRowKey(row));
       case 'movie': return this.movieRowsSource.refreshDependencies(ids,(row: PersonalLibraryRow)=>this.movieRowKey(row));
+      case 'history': return this.historyRows.refreshDependencies(ids,(row:HistoryEntry)=>this.historyRowKey(row));
       case 'calendar': return this.calendarRows.refreshDependencies(ids,(row: CalendarEntry)=>this.calendarRowKey(row));
       case 'movieCalendar': return this.movieCalendarRows.refreshDependencies(ids,(row: MovieCalendarItem)=>this.movieCalendarKey(row));
       case 'library': return this.collectionRowsSource().refreshDependencies(ids,(row: CollectionGroup)=>this.collectionGroupKey(row));
@@ -1629,6 +1635,7 @@ struct Index {
     if (this.tab==='discover' || this.tab==='search' || this.tab==='library') { return this.tab; }
     if (this.tab==='progress' && this.progressMode==='next') { return this.mediaMode==='movie'?'movie':'show'; }
     if (this.tab==='progress' && this.progressMode==='calendar') { return this.mediaMode==='movie'?'movieCalendar':'calendar'; }
+    if(this.tab==='progress'&&this.progressMode==='history'&&this.mediaMode==='show'){return 'history';}
     return '';
   }
   private scrollSource(slot: string): ScrollRows | undefined {
@@ -1637,6 +1644,7 @@ struct Index {
       case 'search': return this.searchRows;
       case 'show': return this.showRows;
       case 'movie': return this.movieRowsSource;
+      case 'history': return this.historyRows;
       case 'calendar': return this.calendarRows;
       case 'movieCalendar': return this.movieCalendarRows;
       case 'library': return this.collectionRowsSource();
@@ -1649,6 +1657,7 @@ struct Index {
       case 'search': return this.searchScroller;
       case 'show': return this.showScroller;
       case 'movie': return this.movieScroller;
+      case 'history': return this.historyScroller;
       case 'calendar': return this.calendarScroller;
       case 'movieCalendar': return this.movieCalendarScroller;
       case 'library': return this.collectionScroller;
@@ -1772,6 +1781,8 @@ struct Index {
   }
   private releaseInactiveCaches(pressure: boolean): void {
     if(pressure||!this.pageVisible||this.tab!=='library'||this.selectedMedia){this.clearCollectionFanart();}
+    if(pressure||this.scrollSlot()!=='history'){this.historyOwner.clear();this.historyRows.replace([],[],[]);}
+    if(this.scrollSlot()!=='show'){this.progressRevealed.clear();}
     const residency=cacheResidency(this.pageVisible,this.tab,this.mediaMode,this.progressMode,!!this.selectedMedia);
     const generation=this.cacheLifecycle.generation();
     const scope=residency.search ? this.currentSearchAccount() : '';
@@ -1841,6 +1852,7 @@ struct Index {
       case 'search': this.searchRows.activate(scope); break;
       case 'show': this.showRows.activate(scope); break;
       case 'movie': this.movieRowsSource.activate(scope); break;
+      case 'history': this.historyRows.activate(scope); break;
       case 'calendar': this.calendarRows.activate(scope); break;
       case 'movieCalendar': this.movieCalendarRows.activate(scope); break;
       case 'library': this.collectionRowsSource().activate(scope); break;
@@ -1860,6 +1872,16 @@ struct Index {
     if(this.tab==='library'){this.collectionStage='数据源初始化';}
     this.activateDisplayOwner(JSON.stringify([account,scope]));
     const current = (): boolean => this.pageVisible && work.current(ticket) && this.activePageWork()===work && scope === this.viewScope() && account === this.currentProgressScope() && !this.selectedMedia;
+    if(this.scrollSlot()==='history'){
+      try{
+        const ui=this.historyUi;
+        this.historyOwner.update(account,account?this.nextShows:[]);
+        const rows=this.historyOwner.rows(ui.period,ui.query,Date.now(),(r:HistoryEpisode)=>this.displayTitle(r.media),(r:HistoryEpisode)=>this.displayEpisode(r.media,r.season,r.id,r.title));
+        const committed=await this.historyRows.submit(rows,rows.map((r:HistoryEntry)=>r.key),rows.map((r:HistoryEntry)=>this.historyRowKey(r)),differ,current);
+        if(committed&&current()&&ui.period===this.historyUi.period&&ui.query===this.historyUi.query){this.historyUi={period:ui.period,query:ui.query,loading:false,error:'',count:rows.filter((r:HistoryEntry)=>!!r.episode).length};this.restoreScroll('history');}
+      }catch(error){if(current()){this.historyUi={period:this.historyUi.period,query:this.historyUi.query,loading:false,error:'历史读取失败，点击重试。',count:0};}}
+      return;
+    }
     if (this.tab === 'discover') {
       const items = this.visibleDiscover();
       const result = this.discoverPageResult();
@@ -1949,7 +1971,7 @@ struct Index {
       row?.episode.season ?? 0,row?.episode.number ?? 0,row?.episode.firstAired ?? '',row?.total ?? 0,
       row?.completed ?? 0,row?.upcoming ?? false,row?.fresh ?? false,row?.pinned ?? false,row?.held ?? false,
       row?.dateUnknown ?? false,row ? this.artwork(row.media) : '',row ? this.displayTitle(row.media) : '',
-      row ? this.progressEpisodeLabel(row) : '']);
+      row ? this.progressEpisodeLabel(row) : '',row?this.progressRatingLabel(row):'']);
   }
 
   private collectionGroupKey(group: CollectionGroup): string {
@@ -2376,7 +2398,6 @@ struct Index {
         this.migrationStatus = '收藏数据库已就绪 · ' + records.length + ' 部；旧版 Preferences 保留。';
         this.resetCollection();
         this.invalidateNextShows();
-        this.localRecent = await episodes.recent();
         this.localSeries = undefined;
         this.localCatalogNeedsVerification = false;
         this.invalidateSync();
@@ -2911,7 +2932,9 @@ struct Index {
         !traktAuth.isCurrent(clientId, preview.account.generation)) { return; }
     const session = traktAuth.session(clientId);
     if (!session) { return; }
-    const watchedAt = new Date().toISOString();
+    const selected=preview.rows.find((row:SyncDifference)=>row.episodeId===episodeId);
+    if(!selected?.watchedAt){this.uploadStatus='观看时间未知，未发送。';return;}
+    const watchedAt=selected.watchedAt;
     this.syncBusy = true;
     this.uploadSelectedId = 0;
     this.removeSelectedId = 0;
@@ -3035,7 +3058,6 @@ struct Index {
       await adoptEpisodeCloud(store, session, preview, row);
       this.invalidateNextShows();
       this.threeWayStatus = '已采用云端分集状态并保存共同基线；仅修改本机，不上传或删除云端历史。';
-      this.localRecent = await store.recent();
       this.localSeries = undefined;
       await this.reloadQueue();
     } catch (error) {
@@ -3272,7 +3294,7 @@ struct Index {
                   .fontSize(12).enabled(!this.syncBusy && !this.localBusy && !this.cloudBusy)
                   .onClick(() => { this.batchIds = []; this.batchConfirm = false; this.importConfirm = false; this.removeSelectedId = 0; this.uploadSelectedId = this.uploadSelectedId === row.episodeId ? 0 : row.episodeId; })
                 if (this.uploadSelectedId === row.episodeId) {
-                  Text('确认将 ' + row.label + ' 的一次观看记录新增至当前已绑定 Trakt 账户？观看时间为确认时刻。')
+                  Text('确认将 ' + row.label + ' 的一次观看记录新增至当前已绑定 Trakt 账户？观看时间为本机记录时间：' + (row.watchedAt??'未知，禁止上传') + '。')
                     .fontSize(13).width('100%')
                   Text('不会删除旧历史；Trakt 可能自动更新追剧进度或待看列表。其他设备同时写入仍可能产生重复。')
                     .fontSize(12).width('100%')
@@ -3382,8 +3404,6 @@ struct Index {
     this.nextShows = [];
     this.clearLocalCalendar(); this.libraryEvidence = [];
     this.cloudStatus = '';
-    this.trackingPage = 1;
-    this.trackingQuery = '';
     this.resetCollection();
   }
 
@@ -3868,7 +3888,7 @@ struct Index {
   private selectMediaOperation(row: MediaDifference): void {
     if (this.syncBusy || this.saving || !this.mediaPreview || !row.operation) { return; }
     this.mediaSelected = row;
-    this.mediaWatchTime = new Date().toISOString();
+    this.mediaWatchTime = row.watchedAt??new Date().toISOString();
     this.mediaSyncStatus = '';
   }
 
@@ -4060,7 +4080,7 @@ struct Index {
                   .fontSize(14).width('100%')
                 Text('目标账户：上方已验证的 Trakt 账户。只处理此条记录。').fontSize(12).width('100%')
                 if (row.domain === 'movie' && row.operation === 'add') {
-                  Text('仅在确实已观看时确认。本次观看时间使用确认准备时间：' + new Date(this.mediaWatchTime).toLocaleString() +
+                  Text('仅在确实已观看时确认。本次观看时间：' + new Date(this.mediaWatchTime).toLocaleString() +
                     '。Trakt 可能自动移出云端待看；本机待看不改变，也不会自动补加。')
                     .fontSize(12).width('100%')
                 }
@@ -4506,24 +4526,6 @@ struct Index {
       .onClick(() => { this.changeTheme(mode); })
   }
 
-  private trackingItems(): ShowProgress[] {
-    const snapshot = this.cloud;
-    if (!snapshot || !this.signedIn || !traktAuth.isCurrent(this.clientId, snapshot.generation)) {
-      return [];
-    }
-    const query = this.trackingQuery.trim().toLowerCase();
-    return snapshot.shows.filter((show: ShowProgress) => show.title.toLowerCase().includes(query));
-  }
-
-  private trackingSlice(): ShowProgress[] {
-    const start = (this.trackingPage - 1) * this.collectionPageSize;
-    return this.trackingItems().slice(start, start + this.collectionPageSize);
-  }
-
-  private trackingPages(): number {
-    return Math.max(1, Math.ceil(this.trackingItems().length / this.collectionPageSize));
-  }
-
   private invalidateNextShows(showId: string = ''): void {
     this.projectionMemo.clear();
     if (showId) {
@@ -4843,7 +4845,24 @@ struct Index {
     try{await this.settings?.saveProgressEpisodeHidden(next);this.progressEpisodeHidden=next;this.requestPresentation(false);}catch(error){this.progressOptionStatus='剧透设置保存失败。';}
   }
   private progressEpisodeLabel(row:ProgressRow):string{
-    return collectionSpoilerText(this.displayEpisode(row.media,row.episode.season,row.episode.id,row.episode.title),this.progressEpisodeHidden,false);
+    return collectionSpoilerText(this.displayEpisode(row.media,row.episode.season,row.episode.id,row.episode.title),this.progressEpisodeHidden,this.progressRevealed.has(row.media.id+':'+row.episode.id+':title'));
+  }
+  private progressRatingLabel(row:ProgressRow):string{
+    if(row.fresh||row.upcoming){return '';}
+    if(this.progressPrefs.sort==='userRating'){return row.userRating===undefined?'':row.userRating.toString();}
+    if(this.progressPrefs.sort!=='rating'||row.rating===undefined||!Number.isFinite(row.rating)){return '';}
+    return collectionSpoilerText(row.rating.toFixed(1),this.progressRatingHidden,this.progressRevealed.has(row.media.id+':'+row.episode.id+':rating'),true);
+  }
+  private revealProgress(row:ProgressRow,field:string):void{
+    if(!this.progressTapReveal){return;}
+    this.progressRevealed.add(row.media.id+':'+row.episode.id+':'+field);
+    this.refreshPresentationRows([row.media.id]);
+  }
+  private async toggleProgressSpoiler(field:string):Promise<void>{
+    try{if(field==='rating'){const value=!this.progressRatingHidden;await this.settings?.saveProgressRatingHidden(value);this.progressRatingHidden=value;}
+      else{const value=!this.progressTapReveal;await this.settings?.saveProgressTapReveal(value);this.progressTapReveal=value;}
+      this.progressRevealed.clear();this.requestPresentation(false);
+    }catch(error){this.progressOptionStatus='剧透设置保存失败。';}
   }
   private async markNext(row: ProgressRow,watchedAt:number=Date.now()): Promise<void> {
     if(!validWatchTime(watchedAt,Date.now())){return;}
@@ -4895,7 +4914,6 @@ struct Index {
       saved = true;
       this.invalidateNextShows(row.media.id);
       this.requestProjection();
-      this.localRecent = await store.recent();
       await this.reloadQueue();
       this.nextStatus = '观看状态已更新。';
     } catch (error) {
@@ -5150,6 +5168,7 @@ struct Index {
       if (this.mediaMode === 'movie' && !this.movieCalendarCurrent()) { this.loadCalendar(); }
     }
     if (mode === 'calendar') { if (!this.calendarCurrent()) { this.loadCalendar(); } else { this.requestPresentation(); } }
+    if(mode==='history'){this.requestPresentation();if(this.signedIn){this.requestObservation();}else{this.loadNextShows();}}
   }
 
   @Builder
@@ -5194,6 +5213,10 @@ struct Index {
   progressOptionsView() {
     Column({ space: 7 }) {
       Button(this.progressEpisodeHidden?'分集标题：隐藏':'分集标题：显示').fontSize(12).height(32).backgroundColor($r('app.color.showly_muted_surface')).fontColor($r('app.color.showly_text')).onClick(()=>{this.toggleEpisodeHidden();})
+      Row({space:4}){
+        Button(this.progressRatingHidden?'评分：隐藏':'评分：显示').fontSize(12).height(32).layoutWeight(1).backgroundColor($r('app.color.showly_muted_surface')).fontColor($r('app.color.showly_text')).onClick(()=>{this.toggleProgressSpoiler('rating');})
+        Button(this.progressTapReveal?'点击揭示：开':'点击揭示：关').fontSize(12).height(32).layoutWeight(1).backgroundColor($r('app.color.showly_muted_surface')).fontColor($r('app.color.showly_text')).onClick(()=>{this.toggleProgressSpoiler('reveal');})
+      }.width('100%')
       Text('下一集策略').fontSize(14).width('100%')
       Row({ space: 6 }) {
         this.progressOptionButton('最后观看之后', 'strategy', 'last', this.progressPrefs.strategy === 'last')
@@ -5274,7 +5297,8 @@ struct Index {
       Text(this.displayTitle(row.media)).fontSize(17).fontWeight(FontWeight.Medium).width('100%')
       Text((row.pinned ? '置顶 · ' : row.held ? '暂缓 · ' : '') +
         (row.fresh ? '新集 · ' : '') + 'S' + row.episode.season + 'E' + row.episode.number +
-        (this.progressEpisodeLabel(row) ? ' · ' + this.progressEpisodeLabel(row) : '')).fontSize(14).width('100%')
+        (this.progressEpisodeLabel(row) ? ' · ' + this.progressEpisodeLabel(row) : '')).fontSize(14).width('100%').onClick(()=>{this.revealProgress(row,'title');})
+      if(this.progressRatingLabel(row)){Text('★ '+this.progressRatingLabel(row)).fontSize(12).fontColor($r('app.color.showly_accent')).onClick(()=>{this.revealProgress(row,'rating');})}
       Text((row.upcoming ? '待播 · ' : '播出 · ') + row.episode.firstAired.substring(0,10)).fontSize(12).width('100%')
       Text('已看 ' + row.completed + ' / ' + row.total + ' 集 · 剩余 ' + (row.total - row.completed) + ' 集')
         .fontSize(12).width('100%')
@@ -5751,14 +5775,50 @@ struct Index {
     }.width('100%')
   }
 
+  private historyRowKey(row:HistoryEntry):string{
+    const ep=row.episode;return ep?JSON.stringify([row.key,ep.at,this.displayTitle(ep.media),this.displayEpisode(ep.media,ep.season,ep.id,ep.title),this.artwork(ep.media)]):row.key;
+  }
+  private async selectHistoryPeriod(value:string):Promise<void>{
+    if(!validHistoryPeriod(value)){return;}
+    try{await this.settings?.saveHistoryPeriod(value);this.historyUi={period:value,query:this.historyUi.query,loading:true,error:'',count:0};this.requestPresentation();}
+    catch(error){this.historyUi={period:this.historyUi.period,query:this.historyUi.query,loading:false,error:'筛选保存失败。',count:0};}
+  }
   @Builder
-  progressView() {
-    Column({ space: 12 }) {
-      this.progressHeader()
-      if (this.progressMode === 'history' && this.mediaMode === 'show') {
-        Text('逐集观看历史尚未实现。现有观看记录不受影响。').fontSize(14).width('100%')
+  progressView(){
+    List({space:8,scroller:this.historyScroller}){
+      ListItem(){
+        Column({space:8}){
+          this.progressHeader()
+          TextInput({placeholder:'搜索剧集、分集或日期',text:this.historyUi.query}).onChange((value:string)=>{this.historyUi={period:this.historyUi.period,query:value,loading:true,error:'',count:0};this.requestPresentation();})
+          Button('时间范围 · '+(HISTORY_PERIODS.find((p:HistoryPeriodOption)=>p.key===this.historyUi.period)?.label??'全部时间')).fontSize(12).height(32).backgroundColor($r('app.color.showly_muted_surface')).fontColor($r('app.color.showly_text')).onClick(()=>{
+            try{const choices:SheetInfo[]=HISTORY_PERIODS.map((p:HistoryPeriodOption):SheetInfo=>({title:p.label,action:()=>{if(this.scrollSlot()==='history'){this.selectHistoryPeriod(p.key);}}}));this.getUIContext().showActionSheet({title:'观看历史时间范围',alignment:DialogAlignment.Bottom,autoCancel:true,sheets:choices});}
+            catch(error){this.historyUi={period:this.historyUi.period,query:this.historyUi.query,loading:false,error:'无法打开时间筛选。',count:this.historyUi.count};}
+          })
+          Text('仅显示已知最后观看时间的分集；未知记录不补造。').fontSize(12).width('100%')
+          if(this.historyUi.error){Text(this.historyUi.error).fontSize(13);Button('重试').onClick(()=>{this.historyOwner.clear();this.requestPresentation();})}
+          else if(this.historyUi.loading||this.localBusy||this.cloudBusy){LoadingProgress().width(24).height(24)}
+          else if(!this.historyUi.count){Text('暂无符合条件且日期可验证的观看记录。').fontSize(13)}
+        }.width('100%')
       }
-    }.width('100%')
+      LazyForEach(this.historyRows,(row:HistoryEntry)=>{
+        ListItem(){
+          if(row.episode){this.historyEpisodeCard(row.episode)}
+          else{Text(row.day).fontSize(17).fontWeight(FontWeight.Medium).width('100%')}
+        }
+      },(row:HistoryEntry)=>this.historyRows.keyFor(row.key))
+    }.width('100%').height('100%').padding(16).onScrollIndex((start:number,end:number,center:number)=>{this.onListScroll('history',start);})
+  }
+  @Builder
+  historyEpisodeCard(row:HistoryEpisode){
+    Row({space:10}){
+      this.posterImage(row.media,64,96)
+      Column({space:5}){
+        Text(this.displayTitle(row.media)).fontSize(16).fontWeight(FontWeight.Medium).width('100%')
+        Text('S'+row.season+'E'+row.number+' · '+this.displayEpisode(row.media,row.season,row.id,row.title)).fontSize(13).width('100%')
+        Text(new Date(row.at).toLocaleString()).fontSize(12).fontColor($r('app.color.showly_secondary')).width('100%')
+      }.layoutWeight(1)
+    }.width('100%').padding(8).borderRadius(8).backgroundColor($r('app.color.showly_surface')).onClick(()=>{this.openDetail(row.media,false,row.season);})
+    .onVisibleAreaChange([0],(visible:boolean,ratio:number)=>{this.viewportChanged(row.media,row.season,[],visible&&ratio>0,'progress','history','history:'+row.id);})
   }
 
   private async refreshPage(): Promise<void> {
@@ -5804,7 +5864,6 @@ struct Index {
   private resetCollection(): void {
     ++this.collectionRevision;
     this.collectionPage = 1;
-    this.collectionCards = [];
     this.collectionBusy = false;
     this.collectionStatus = '';
   }
@@ -6764,7 +6823,7 @@ struct Index {
       if (this.signedIn) { this.requestObservation(); }
       else if (!this.libraryEvidence.length) { this.loadNextShows(); }
     }
-    if (value === 'library' && this.collectionGrid && this.collectionCards.length === 0 && !this.collectionBusy) {
+    if (value === 'library' && this.collectionGrid && !this.collectionBusy) {
       this.loadCollectionPosters();
     }
   }
@@ -7019,6 +7078,8 @@ struct Index {
           this.searchView()
         } else if (!this.selectedMedia && this.tab === 'progress' && this.progressMode === 'calendar') {
           if (this.mediaMode === 'movie') { this.personalMovieCalendarView() } else { this.calendarView() }
+        } else if (!this.selectedMedia && this.tab==='progress' && this.progressMode==='history' && this.mediaMode==='show') {
+          this.progressView()
         } else if (this.selectedMedia && this.episodePage) {
           this.episodeDetailPage(this.selectedMedia)
         } else {
