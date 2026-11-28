@@ -237,8 +237,9 @@ async function validPosterFile(path: string,scope?: ReadCancel): Promise<boolean
     } finally { await fileIo.close(file); }
   } catch (error) { scope?.check(); return false; }
 }
+function canReadArtwork(item:Media,type:string):boolean{return canReadDetails(item)||(type==='fanart'&&item.kind==='person'&&/^person:[1-9][0-9]*$/.test(item.id));}
 export async function cachedPoster(cacheDir: string, item: Media, candidates: string[],scope?: ReadCancel,type:string='poster'): Promise<string> {
-  if (!canReadDetails(item)) { return ''; }
+  if (!canReadArtwork(item,type)) { return ''; }
   const urls=Array.from(new Set<string>(candidates.map((candidate: string)=>normalizePoster(candidate)).filter((url: string)=>!!url)));
   for (const url of urls) {
     scope?.check();
@@ -262,7 +263,7 @@ export async function cachePoster(cacheDir: string, item: Media, candidates: str
   return posterFlights.run(key,(scope: ReadCancel)=>downloadPoster(cacheDir,item,candidates,scope,type),consumer);
 }
 async function downloadPoster(cacheDir: string, item: Media, candidates: string[], scope: ReadCancel,type:string): Promise<PosterResult> {
-  if (!canReadDetails(item) || candidates.length === 0) {
+  if (!canReadArtwork(item,type) || candidates.length === 0) {
     return { uri: '', status: 'Trakt API 未返回海报地址（images.poster 为空）' };
   }
   let url = '';

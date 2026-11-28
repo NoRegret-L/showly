@@ -1,16 +1,16 @@
 import { Media } from './Media';
 import { ReadCancel } from './ReadFlight';
-export interface CreditPerson { id:number; tmdb?:number; name:string; }
+export interface CreditPerson { id:number; tmdb?:number; name:string; headshots?:string[]; }
 export interface CreditRow { person:CreditPerson; character?:string; characters?:string[]; job?:string; jobs?:string[]; }
 export interface CreditCrew { directing?:CreditRow[]; writing?:CreditRow[]; sound?:CreditRow[]; }
 export interface CreditResponse { cast?:CreditRow[]; crew?:CreditCrew; }
-export interface PersonRow { key:string; personId:number; tmdb?:number; name:string; department:string; roles:string[]; }
+export interface PersonRow { key:string; personId:number; tmdb?:number; name:string; department:string; roles:string[]; headshots?:string[]; }
 export interface RelatedRow { media:Media; votes:number; rating?:number; posters:string[]; }
 interface RelatedIds { trakt:number; }
 interface RelatedImages { poster?:string[]; }
 export interface RelatedWire { ids:RelatedIds; title:string; year?:number; votes?:number; rating?:number; images?:RelatedImages; }
 function distinct(values:string[]):string[]{return Array.from(new Set<string>(values.filter((v:string)=>typeof v==='string'&&!!v.trim())));}
-function credits(rows:CreditRow[],department:string):PersonRow[]{
+function credits(rows:CreditRow[],department:string,full:boolean):PersonRow[]{
   const result:Map<number,PersonRow>=new Map<number,PersonRow>();
   for(const row of rows){
     const p=row.person;
@@ -20,13 +20,13 @@ function credits(rows:CreditRow[],department:string):PersonRow[]{
     if(department!=='Acting'&&!allowed.length){continue;}
     const old=result.get(p.id);
     if(old){old.roles=distinct(old.roles.concat(allowed));continue;}
-    result.set(p.id,{key:department+':'+p.id,personId:p.id,tmdb:p.tmdb,name:p.name,department:department,roles:allowed});
+    result.set(p.id,{key:department+':'+p.id,personId:p.id,tmdb:p.tmdb,name:p.name,department:department,roles:allowed,headshots:p.headshots});
   }
   // Original repository limits, not new tuning parameters.
-  return Array.from(result.values()).slice(0,department==='Acting'?30:20);
+  const all=Array.from(result.values());return full?all:all.slice(0,department==='Acting'?30:20);
 }
-export function projectPeople(data:CreditResponse):PersonRow[]{
-  return credits(data.cast??[],'Acting').concat(credits(data.crew?.directing??[],'Directing'),credits(data.crew?.writing??[],'Writing'),credits(data.crew?.sound??[],'Sound'));
+export function projectPeople(data:CreditResponse,full:boolean=false):PersonRow[]{
+  return credits(data.cast??[],'Acting',full).concat(credits(data.crew?.directing??[],'Directing',full),credits(data.crew?.writing??[],'Writing',full),credits(data.crew?.sound??[],'Sound',full));
 }
 export function parseRelated(rows:RelatedWire[],kind:string):RelatedRow[]{
   const result:RelatedRow[]=[];const seen:Set<string>=new Set<string>();

@@ -328,7 +328,7 @@ struct Index {
     await this.seasonExtras.load(item,client,scope,consumer,this.presentation,refresh,()=>this.activeCloud(),()=>this.partRatingScope(),
       ()=>this.cloudFresh&&!!this.currentProgressScope(),()=>this.pageVisible&&this.selectedMedia?.id===item.id&&revision===this.detailRevision&&scope===this.seasonScope(item)&&client===this.clientId,
       ()=>{this.publishSeasonPresentation();});
-    if(this.currentProgressScope()==='device'){await this.reloadPartRatingRows(item);}
+    await this.reloadPartRatingRows(item);
   }
   private presentationReaders: Map<string, ReadCancel>=new Map<string, ReadCancel>();
   private presentationReaderTasks: Map<string, PresentationTask>=new Map<string, PresentationTask>();
@@ -7012,7 +7012,7 @@ struct Index {
         spoilers:this.detailUi.spoilers,ratingRevealed:this.detailUi.ratingRevealed,descriptionRevealed:this.detailUi.descriptionRevealed,
         onTranslate:()=>{this.translateDetail(item);},onToggle:(field:string)=>{this.toggleDetailSpoiler(item,field);},onReveal:(field:string)=>{this.revealDetail(field);}})
       ForEach([JSON.stringify([this.currentSearchAccount(),item.id,this.detailRevision])],(_key:string)=>{
-        DetailPeopleSection({item:item,client:this.clientId,scope:this.currentSearchAccount(),repository:this.presentation})
+        DetailPeopleSection({item:item,client:this.clientId,scope:this.currentSearchAccount(),repository:this.presentation,cacheDir:this.context().cacheDir,language:this.presentationLanguage,members:()=>{const ids=new Set<string>();for(const row of this.personalLibrary()){if(isPersonalMember(row)){ids.add(row.media.id);}}return ids;},onOpen:(work:Media)=>{this.openRelatedDetail(work);}})
         DetailRelatedSection({item:item,client:this.clientId,scope:this.currentSearchAccount(),cacheDir:this.context().filesDir,repository:this.presentation,
           hiddenKey:this.hiddenVersion('show'),onOpen:(related:Media)=>{this.openRelatedDetail(related);}})
       },(key:string)=>key)

@@ -6,7 +6,8 @@ import { CreditResponse, CreditRow, CreditCrew, PersonRow, RelatedRow, RelatedWi
 import { checkPresentationService, presentationHttpError, traktPresentationService } from './PresentationHttp';
 import { canReadDetails } from './TraktDetails';
 interface PersonIds {trakt:number;tmdb?:number;}
-interface WirePerson {name:string;ids:PersonIds;}
+interface PersonImages {headshot?:string[];}
+interface WirePerson {name:string;ids:PersonIds;images?:PersonImages;}
 interface WireCredit {person:WirePerson;character?:string;characters?:string[];job?:string;jobs?:string[];}
 interface WireCrew {directing?:WireCredit[];writing?:WireCredit[];sound?:WireCredit[];}
 interface WirePeople {cast?:WireCredit[];crew?:WireCrew;}
@@ -14,7 +15,7 @@ const peopleFlights=new ConsumerReadFlight<PersonRow[]>();
 const relatedFlights=new ConsumerReadFlight<RelatedRow[]>();
 const seasonFlights=new ConsumerReadFlight<string>();
 function mapCredits(rows:WireCredit[]):CreditRow[]{
-  return rows.filter((r:WireCredit)=>!!r.person?.ids).map((r:WireCredit):CreditRow=>({person:{id:r.person.ids.trakt,tmdb:r.person.ids.tmdb,name:r.person.name},character:r.character,characters:r.characters,job:r.job,jobs:r.jobs}));
+  return rows.filter((r:WireCredit)=>!!r.person?.ids).map((r:WireCredit):CreditRow=>({person:{id:r.person.ids.trakt,tmdb:r.person.ids.tmdb,name:r.person.name,headshots:r.person.images?.headshot},character:r.character,characters:r.characters,job:r.job,jobs:r.jobs}));
 }
 async function fetchPublic(item:Media,client:string,section:string,scope:ReadCancel):Promise<string>{
   if(!canReadDetails(item)||!client||!['people','related','seasons'].includes(section)){throw new Error('Invalid detail section');}
@@ -36,7 +37,7 @@ export function readPeople(item:Media,client:string,consumer:ReadCancel):Promise
     const data=JSON.parse(await fetchPublic(item,client,'people',scope)) as WirePeople;
     if(!data||(!Array.isArray(data.cast)&&!data.crew)){throw new Error('Invalid people response');}
     const crew:CreditCrew={directing:mapCredits(data.crew?.directing??[]),writing:mapCredits(data.crew?.writing??[]),sound:mapCredits(data.crew?.sound??[])};
-    const input:CreditResponse={cast:mapCredits(data.cast??[]),crew:crew};return projectPeople(input);
+    const input:CreditResponse={cast:mapCredits(data.cast??[]),crew:crew};return projectPeople(input,true);
   },consumer);
 }
 export function readRelated(item:Media,client:string,consumer:ReadCancel):Promise<RelatedRow[]>{

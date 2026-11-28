@@ -75,24 +75,37 @@ jobs:
           set -euo pipefail
           start=$(date +%s)
           dpkg-query -W libgl1-mesa-dev libgl1 || true
-          # Patch exactly the pinned Linux extraction call; checksum and exports unchanged.
+          # Same pinned setup and exports. Verify the complete concatenated
+          # byte stream before extraction; never execute an unverified SDK.
           python3 - <<'PY'
           from pathlib import Path
           p=Path('.ci-sdk-setup/setup.sh')
           s=p.read_text()
-          old='        tar -xzf $FILENAME'
-          assert s.count(old)==1
-          s=s.replace('    gh release download $VERSION -p "$FILENAME.*" -R ErBWs/ohos-sdk','    phase_start=$(date +%s)\n    gh release download $VERSION -p "$FILENAME.*" -R ErBWs/ohos-sdk\n    echo "SDK download seconds=$(( $(date +%s)-phase_start ))" | tee -a "$GITHUB_STEP_SUMMARY"\n    phase_start=$(date +%s)')
-          s=s.replace('    echo Extracting...','    echo "SDK assemble and checksum seconds=$(( $(date +%s)-phase_start ))" | tee -a "$GITHUB_STEP_SUMMARY"\n    phase_start=$(date +%s)\n    echo Extracting...')
-          s=s.replace('    rm $FILENAME.*','    echo "SDK extract seconds=$(( $(date +%s)-phase_start ))" | tee -a "$GITHUB_STEP_SUMMARY"\n    rm $FILENAME.*')
-          p.write_text(s.replace(old,'''        if command -v pigz >/dev/null && (set -o pipefail; pigz -dc "$FILENAME" | tar -xf -); then
-              echo "SDK extraction: pigz"
-          else
-              echo "SDK extraction: traditional tar fallback"
-              # Never retain a partially extracted toolchain.
+          start=s.index('    gh release download $VERSION')
+          end=s.index('    rm $FILENAME.*',start)+len('    rm $FILENAME.*')
+          old=s[start:end]
+          assert 'sha256sum -c $FILENAME.sha256' in old and 'cat $FILENAME.aa $FILENAME.ab > $FILENAME' in old
+          s=s[:start]+'''    set -o pipefail
+              phase_start=$(date +%s)
+              gh release download "$VERSION" -p "$FILENAME.*" -R ErBWs/ohos-sdk
+              echo "SDK download seconds=$(( $(date +%s)-phase_start ))" | tee -a "$GITHUB_STEP_SUMMARY"
+              phase_start=$(date +%s)
+              digest="$(awk 'NR==1 {print $1}' "$FILENAME.sha256")"
+              [[ "$digest" =~ ^[a-fA-F0-9]{64}$ ]]
+              actual="$(cat "$FILENAME.aa" "$FILENAME.ab" | sha256sum | cut -d' ' -f1)"
+              [[ "$actual" == "$digest" ]] || { echo "Checksum failed"; exit 1; }
+              echo "SDK assemble and checksum seconds=$(( $(date +%s)-phase_start ))" | tee -a "$GITHUB_STEP_SUMMARY"
+              phase_start=$(date +%s)
               rm -rf command-line-tools
-              tar -xzf "$FILENAME"
-          fi'''))
+              if command -v pigz >/dev/null && (cat "$FILENAME.aa" "$FILENAME.ab" | pigz -dc | tar -xf -); then
+                echo "SDK extraction: verified stream + pigz"
+              else
+                rm -rf command-line-tools
+                cat "$FILENAME.aa" "$FILENAME.ab" | gzip -dc | tar -xf -
+              fi
+              echo "SDK extract seconds=$(( $(date +%s)-phase_start ))" | tee -a "$GITHUB_STEP_SUMMARY"
+              rm "$FILENAME".*'''+s[end:]
+          p.write_text(s)
           PY
           bash .ci-sdk-setup/setup.sh -v '6.1.1.280'
           echo "SDK setup seconds=$(( $(date +%s)-start ))" | tee -a "$GITHUB_STEP_SUMMARY"
@@ -174,7 +187,8 @@ jobs:
           python3 harmonyos/tools/test_statistics.py
           python3 harmonyos/tools/test_list_persistence.py
           python3 harmonyos/tools/test_ratings.py
-          echo '34 historical regressions and custom-list, statistics, list persistence and rating specialist gates passed' >> "$GITHUB_STEP_SUMMARY"
+          python3 harmonyos/tools/test_people.py
+          echo '34 historical regressions and custom-list, statistics, list persistence, rating and people specialist gates passed' >> "$GITHUB_STEP_SUMMARY"
 
   publish-preview:
     needs: [verify, regressions]
