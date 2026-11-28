@@ -1,5 +1,5 @@
 import { StableDisplayOrder, StableOrderChange } from '../model/StableDisplayOrder';
-import { PageDisplayRows } from '../model/PageDisplayRows';
+import { PageStateOwner, PageWork, PageWorkSet, PageSortJobs } from '../model/PageStateOwner';
 import { ProgressTitleOrder } from '../model/ProgressTitleOrder';
 import { PresentationQueues, FramePublication } from '../model/PresentationQueue';
 import { ArtworkImage } from './ArtworkImage';
@@ -13,7 +13,7 @@ import { ScrollRows, ScrollAnchor, ScrollAnchors, captureAnchor, resolveAnchor }
 import { ReadCancel, ReadCancelled } from '../model/ReadFlight';
 import { common } from '@kit.AbilityKit';
 import { LazyRows } from '../model/LazyRows';
-import { DisplayRevisions, LatestDisplayJobs } from '../model/DisplayJobs';
+import { DisplayRevisions } from '../model/DisplayJobs';
 import { ProgressSortInput, MovieSortInput, CollectionSortInput } from '../model/DisplaySort';
 import { diffDisplay, showDisplay, movieDisplay, collectionDisplay } from '../data/DisplayTasks';
 import { ViewportTasks, addPresentationTask } from '../model/ViewportTasks';
@@ -137,15 +137,31 @@ struct Index {
   private presentationPublished: number = -1;
   private titleIndex: Map<string, TitlePresentation> = new Map<string, TitlePresentation>();
   private episodeNameIndex: Map<string, string> = new Map<string, string>();
+  private discoverRows: PageStateOwner<DiscoverItem[],DiscoverItem[]> = new PageStateOwner<DiscoverItem[],DiscoverItem[]>((row: DiscoverItem[])=>row.map((item: DiscoverItem)=>item.media.id));
+  private searchRows: PageStateOwner<Media,Media[]> = new PageStateOwner<Media,Media[]>((row: Media)=>[row.id]);
+  private calendarRows: PageStateOwner<CalendarEntry,CalendarEntry[]> = new PageStateOwner<CalendarEntry,CalendarEntry[]>((row: CalendarEntry)=>[row.media.id]);
+  private movieCalendarRows: PageStateOwner<MovieCalendarItem,MovieCalendarItem[]> = new PageStateOwner<MovieCalendarItem,MovieCalendarItem[]>((row: MovieCalendarItem)=>[row.movie.media.id]);
+  private showRows: PageStateOwner<ProgressEntry,ProgressRow[]> = new PageStateOwner<ProgressEntry,ProgressRow[]>((entry: ProgressEntry)=>entry.row?[entry.row.media.id]:[]);
+  private movieRowsSource: PageStateOwner<PersonalLibraryRow,PersonalLibraryRow[]> = new PageStateOwner<PersonalLibraryRow,PersonalLibraryRow[]>((row: PersonalLibraryRow)=>[row.media.id]);
+  private collectionRowsSource: PageStateOwner<CollectionGroup,PersonalLibraryRow[]> = new PageStateOwner<CollectionGroup,PersonalLibraryRow[]>((group: CollectionGroup)=>group.rows.map((row: PersonalLibraryRow)=>row.media.id));
+  private pageWorks:PageWorkSet=this.createPageWorks();
+  private sortJobs:PageSortJobs=new PageSortJobs(this.pageWorks);
+  private createPageWorks():PageWorkSet{
+    const pages=new PageWorkSet();
+    pages.register('discover',this.discoverRows.work);pages.register('search',this.searchRows.work);
+    pages.register('calendar',this.calendarRows.work);pages.register('movieCalendar',this.movieCalendarRows.work);
+    pages.register('show',this.showRows.work);pages.register('movie',this.movieRowsSource.work);
+    pages.register('library',this.collectionRowsSource.work);
+    return pages;
+  }
+  private activePageWork():PageWork|undefined{return this.pageWorks.get(this.scrollSlot());}
   private libraryRevision: number = 0;
   private mediaInput: MediaInputVersion=new MediaInputVersion();
   private displayRevisions: DisplayRevisions = new DisplayRevisions();
-  private sortJobs: LatestDisplayJobs = new LatestDisplayJobs();
   @State sortedViewRevision: number = 0;
   @State showSummary: DisplaySummary = {key:'',total:0,page:1,pages:1};
   @State movieSummary: DisplaySummary = {key:'',total:0,page:1,pages:1};
   @State collectionSummary: DisplaySummary = {key:'',total:0,page:1,pages:1};
-  private lazyRevision: number = 0;
   private showTitleRevision: number = 0;
   private movieTitleRevision: number = 0;
   private showMetaRevision: number = 0;
@@ -180,7 +196,6 @@ struct Index {
   @State seasonSummaries: SeasonSummary[]=[];
   private discoverConsumer: ReadCancel=new ReadCancel();
   private searchLocalConsumer: ReadCancel=new ReadCancel();
-  private lazyConsumer: ReadCancel=new ReadCancel();
   private presentationReaders: Map<string, ReadCancel>=new Map<string, ReadCancel>();
   private presentationReaderTasks: Map<string, PresentationTask>=new Map<string, PresentationTask>();
   private businessPresentationTasks?: Map<string,PresentationTask>;
@@ -196,17 +211,13 @@ struct Index {
   private showRatingVersion: number = 0;
   private viewport: ViewportTasks = new ViewportTasks();
   private viewportRouteKey: string = '';
-  private discoverRows: PageDisplayRows<DiscoverItem[]> = new PageDisplayRows<DiscoverItem[]>((row: DiscoverItem[])=>row.map((item: DiscoverItem)=>item.media.id));
-  private searchRows: PageDisplayRows<Media> = new PageDisplayRows<Media>((row: Media)=>[row.id]);
-  private calendarRows: PageDisplayRows<CalendarEntry> = new PageDisplayRows<CalendarEntry>((row: CalendarEntry)=>[row.media.id]);
-  private movieCalendarRows: PageDisplayRows<MovieCalendarItem> = new PageDisplayRows<MovieCalendarItem>((row: MovieCalendarItem)=>[row.movie.media.id]);
   private libraryMemo: RevisionMemo<PersonalLibraryRow[]> = new RevisionMemo<PersonalLibraryRow[]>();
   private progressTitleOrder=new ProgressTitleOrder();
   private progressAllTitleOrder=new ProgressTitleOrder();
-  private progressMemo: RevisionMemo<ProgressRow[]> = new RevisionMemo<ProgressRow[]>();
-  private progressAllMemo: RevisionMemo<ProgressRow[]> = new RevisionMemo<ProgressRow[]>();
-  private movieMemo: RevisionMemo<PersonalLibraryRow[]> = new RevisionMemo<PersonalLibraryRow[]>();
-  private movieAllMemo: RevisionMemo<PersonalLibraryRow[]> = new RevisionMemo<PersonalLibraryRow[]>();
+  private progressMemo: RevisionMemo<ProgressRow[]> = this.showRows.memo;
+  private progressAllMemo: RevisionMemo<ProgressRow[]> = this.showRows.allMemo;
+  private movieMemo: RevisionMemo<PersonalLibraryRow[]> = this.movieRowsSource.memo;
+  private movieAllMemo: RevisionMemo<PersonalLibraryRow[]> = this.movieRowsSource.allMemo;
   @State updateBusy: boolean = false;
   @State updateStatus: string = '';
   @State availableUpdate?: UpdateInfo = undefined;
@@ -297,7 +308,7 @@ struct Index {
   private calendarSources: CalendarSource[] = [];
   private calendarRepairTargets: Media[] = [];
   private calendarIndex: CalendarIndex = new CalendarIndex();
-  private calendarMemo: RevisionMemo<CalendarEntry[]> = new RevisionMemo<CalendarEntry[]>();
+  private calendarMemo: RevisionMemo<CalendarEntry[]> = this.calendarRows.memo;
   private calendarHydrationKey: string = '';
   @State @Watch('onMoviesChanged') movieCalendarData?: PersonalMovieSnapshot = undefined;
   private movieRatingKey: string = '';
@@ -348,7 +359,7 @@ struct Index {
   private discoverRepo?: Promise<DiscoverRead>;
   private discoverFeed?: DiscoverFeed;
   private discoverFeedKey: string = '';
-  private discoverMemo: RevisionMemo<DiscoverItem[]> = new RevisionMemo<DiscoverItem[]>();
+  private discoverMemo: RevisionMemo<DiscoverItem[]> = this.discoverRows.memo;
   @State @Watch('onDiscoverViewChanged') discoverItems: DiscoverItem[] = [];
   @State discoverPage: number = 1;
   @State discoverPages: number = 0;
@@ -388,9 +399,6 @@ struct Index {
   private repairEpoch: number = 0;
   @State repairStatus: string = '';
   private lazyPending: boolean = false;
-  private showRows: PageDisplayRows<ProgressEntry> = new PageDisplayRows<ProgressEntry>((entry: ProgressEntry)=>entry.row?[entry.row.media.id]:[]);
-  private movieRowsSource: PageDisplayRows<PersonalLibraryRow> = new PageDisplayRows<PersonalLibraryRow>((row: PersonalLibraryRow)=>[row.media.id]);
-  private collectionRowsSource: PageDisplayRows<CollectionGroup> = new PageDisplayRows<CollectionGroup>((group: CollectionGroup)=>group.rows.map((row: PersonalLibraryRow)=>row.media.id));
   @State @Watch('onCollectionStateChanged') collectionState: CollectionState = emptyCollectionState();
   @State collectionScope: string = '';
   @State @Watch('onCollectionViewChanged') collectionOptions: CollectionOptions = defaultCollection();
@@ -401,8 +409,8 @@ struct Index {
   @State collectionRuleStatus: string = '';
   private collectionOptionKey: string = '';
   private collectionRandomKeys: Map<string, number> = new Map<string, number>();
-  private collectionItemsMemo: RevisionMemo<PersonalLibraryRow[]> = new RevisionMemo<PersonalLibraryRow[]>();
-  private recentCollectionMemo: RevisionMemo<PersonalLibraryRow[]> = new RevisionMemo<PersonalLibraryRow[]>();
+  private collectionItemsMemo: RevisionMemo<PersonalLibraryRow[]> = this.collectionRowsSource.memo;
+  private recentCollectionMemo: RevisionMemo<PersonalLibraryRow[]> = this.collectionRowsSource.allMemo;
   @State @Watch('onCollectionRatingsChanged') collectionRatings: CollectionRating[] = [];
   private collectionRatingKey: string = '';
   private collectionRatingBusy: boolean = false;
@@ -1225,9 +1233,12 @@ struct Index {
     this.libraryRevision++;this.libraryMemo.clear();
     const pending=this.pendingMediaDelta;this.pendingMediaDelta=undefined;
     let handled=false;
-    if(pending?.changes&&pending.version===this.mediaInput.version()&&pending.account===this.currentProgressScope()&&
+    const scoped=!!pending?.changes&&pending.version===this.mediaInput.version()&&pending.account===this.currentProgressScope()&&
       pending.cloud===this.activeCloud()&&pending.evidence===this.libraryEvidence&&pending.localAllowed===this.cloudLocalAllowed&&
-      (!this.signedIn||!!this.activeCloud())){
+      (!this.signedIn||!!this.activeCloud());
+    this.pageWorks.observe(JSON.stringify([this.currentProgressScope(),this.libraryRevision]),
+      scoped&&pending?.changes?pending.changes.map((change:PersonalLibraryChange)=>change.id):[],!scoped);
+    if(scoped&&pending?.changes){
       this.updateSearchCandidatesForLibraryChanges(pending.changes);
       handled=this.applyMediaRecordDisplayDelta(pending);
       this.mediaInput.acknowledgeLibrary(pending.version);
@@ -1345,16 +1356,19 @@ struct Index {
 
   private onShowsChanged(): void {
     this.displayRevisions.showsChanged();
-    this.onPresentationChanged();
+    const slot=this.scrollSlot();
+    if(!slot||slot==='show'||slot==='calendar'||slot==='library'){this.onPresentationChanged();}
   }
   private onMoviesChanged(): void {
     this.displayRevisions.moviesChanged();
-    this.onPresentationChanged();
+    const slot=this.scrollSlot();
+    if(!slot||slot==='movie'||slot==='movieCalendar'||slot==='library'){this.onPresentationChanged();}
   }
   private onCollectionRatingsChanged(): void {
     this.showRatingVersion++;
     this.displayRevisions.collectionChanged();
-    this.onPresentationChanged();
+    const slot=this.scrollSlot();
+    if(!slot||slot==='show'||slot==='library'){this.onPresentationChanged();}
   }
   private onCollectionStateChanged(): void {
     this.displayRevisions.collectionChanged();
@@ -1596,6 +1610,18 @@ struct Index {
   private onDetailViewChanged(): void { if (this.pageVisible && this.selectedMedia) { this.onPresentationChanged(); } }
   private onDiscoverViewChanged(): void { if (this.pageVisible && !this.selectedMedia && this.tab==='discover') { this.onPresentationChanged(); } }
   private onSearchViewChanged(): void { if (this.searchActive()) { this.onPresentationChanged(); } }
+  private activePresentationRoute():string{
+    const common=JSON.stringify([this.currentSearchAccount(),this.clientId,this.tab,this.mediaMode,this.progressMode,this.selectedMedia?.id??'',this.presentationLanguage]);
+    if(this.selectedMedia){return JSON.stringify([common,this.schedulePage,this.localSeason]);}
+    switch(this.scrollSlot()){
+      case 'show':return JSON.stringify([common,this.nextPage,this.nextQuery]);
+      case 'movie':return JSON.stringify([common,this.movieProgressPage,this.movieProgressQuery]);
+      case 'library':return JSON.stringify([common,this.collectionPage,this.collectionQuery,this.collectionFilter,this.collectionStatusFilter,this.collectionOptions]);
+      case 'calendar':return JSON.stringify([common,this.calendarPage,this.showCalendarMode,this.calendarPremieres,this.calendarQuery,this.calendarProtect]);
+      case 'movieCalendar':return JSON.stringify([common,this.movieCalendarQuery,this.movieCalendarMode]);
+      default:return common;
+    }
+  }
   private onPresentationChanged(): void {
     this.updateCacheLifecycle();
     this.updateSearchContext();
@@ -1603,10 +1629,7 @@ struct Index {
     if (!this.progressCandidateActive()) { this.cancelCandidateWake(); }
     if (scope !== this.viewportRouteKey) { this.viewport.clear(); this.sortJobs.clear(); this.viewportRouteKey = scope; }
     this.reloadCollectionOptions();
-    const route = JSON.stringify([this.clientId, this.tab, this.mediaMode, this.progressMode, this.selectedMedia?.id ?? '',
-      this.nextPage, this.nextQuery, this.movieProgressPage, this.movieProgressQuery, this.collectionPage,
-      this.collectionQuery, this.collectionFilter, this.collectionStatusFilter, this.calendarPage, this.showCalendarMode,this.calendarPremieres,this.calendarQuery,this.calendarProtect,this.movieCalendarQuery,
-      this.movieCalendarMode, this.schedulePage, this.localSeason, this.presentationLanguage, this.collectionOptions]);
+    const route = this.activePresentationRoute();
     if (route !== this.presentationRoute) {
       this.presentationRoute = route;
       this.cancelPresentationReads();
@@ -1690,7 +1713,9 @@ struct Index {
   }
 
   private scheduleLazyRows(): void {
-    this.invalidateLazyWork();
+    const work=this.activePageWork();
+    if(!work){return;}
+    work.invalidate();
     if (this.lazyPending) { return; }
     this.lazyPending = true;
     this.updateLazyRows();
@@ -1711,13 +1736,15 @@ struct Index {
     await Promise.resolve();
     this.lazyPending = false;
     if (!this.pageVisible || this.selectedMedia) { return; }
-    const revision = this.lazyRevision;
-    const consumer=this.lazyConsumer;
+    const work=this.activePageWork();
+    if(!work){return;}
+    const ticket=work.begin();
+    const consumer=ticket.consumer;
     const differ=(input: ListDiffInput)=>diffDisplay(input,consumer);
     const scope = this.viewScope();
     const account = this.currentProgressScope();
     this.activateDisplayOwner(JSON.stringify([account,scope]));
-    const current = (): boolean => this.pageVisible && revision === this.lazyRevision && scope === this.viewScope() && account === this.currentProgressScope() && !this.selectedMedia;
+    const current = (): boolean => this.pageVisible && work.current(ticket) && this.activePageWork()===work && scope === this.viewScope() && account === this.currentProgressScope() && !this.selectedMedia;
     if (this.tab === 'discover') {
       const items = this.visibleDiscover();
       const result = this.discoverPageResult();
@@ -1725,7 +1752,7 @@ struct Index {
       for (let i=0;i<items.length;i+=2) { rows.push(items.slice(i,i+2)); }
       const committed = await this.discoverRows.submit(rows,rows.map((row: DiscoverItem[]) => row.map((item: DiscoverItem) => item.media.id).join(',')),
         rows.map((row: DiscoverItem[]) => this.discoverRowKey(row)),differ,current);
-      if (committed && current()) { this.discoverTotal = result.total; this.discoverShownPage = result.page; this.discoverPages = result.pages; this.restoreScroll('discover'); }
+      if (committed && current()) { if(this.discoverTotal!==result.total){this.discoverTotal=result.total;} if(this.discoverShownPage!==result.page){this.discoverShownPage=result.page;} if(this.discoverPages!==result.pages){this.discoverPages=result.pages;} this.restoreScroll('discover'); }
       return;
     }
     if (this.tab === 'search') {
@@ -1745,7 +1772,7 @@ struct Index {
         const summary: DisplaySummary = {key:this.calendarDisplayKey(),total:prepared.length,page:Math.min(this.calendarPage,pages),pages:pages};
         const rows = prepared;
         const committed = await this.calendarRows.submit(rows,rows.map((row: CalendarEntry) => row.key),rows.map((row: CalendarEntry) => this.calendarRowKey(row)),differ,current);
-        if (committed && current()) { this.calendarSummary = summary; }
+        if (committed && current() && this.calendarRows.work.publishSummary(summary,this.calendarSummary)) { this.calendarSummary = summary; }
       if (committed && current()) { this.restoreScroll('calendar'); }
       }
       return;
@@ -1766,7 +1793,7 @@ struct Index {
       }
       const committed = await this.collectionRowsSource.submit(rows, rows.map((group: CollectionGroup) => group.key),
         rows.map((group: CollectionGroup) => this.collectionGroupKey(group)),differ,current);
-      if (committed && current()) { this.collectionSummary = summary; }
+      if (committed && current() && this.collectionRowsSource.work.publishSummary(summary,this.collectionSummary)) { this.collectionSummary = summary; }
       if (committed && current()) { this.restoreScroll('library'); }
       return;
     }
@@ -1780,7 +1807,7 @@ struct Index {
       const summary: DisplaySummary = {key:this.movieDisplayKey(),total:prepared.length,page:this.movieProgressPage,pages:Math.max(1,Math.ceil(prepared.length/this.collectionPageSize))};
       const committed = await this.movieRowsSource.submit(rows, rows.map((row: PersonalLibraryRow) => row.media.id),
         rows.map((row: PersonalLibraryRow) => this.movieRowKey(row)),differ,current);
-      if (committed && current()) { this.movieSummary = summary; }
+      if (committed && current() && this.movieRowsSource.work.publishSummary(summary,this.movieSummary)) { this.movieSummary = summary; }
       if (committed && current()) { this.restoreScroll('movie'); }
     } else {
       if (this.progressPrefs.sort==='userRating') { this.loadCollectionRatings(); }
@@ -1792,7 +1819,7 @@ struct Index {
       const summary: DisplaySummary = {key:this.showDisplayKey(),total:this.nextFiltered().length,page:Math.min(this.nextPage,pages),pages:pages};
       const committed = await this.showRows.submit(rows, rows.map((entry: ProgressEntry) => entry.key),
         rows.map((entry: ProgressEntry) => this.showRowKey(entry)),differ,current);
-      if (committed && current()) { this.showSummary = summary; }
+      if (committed && current() && this.showRows.work.publishSummary(summary,this.showSummary)) { this.showSummary = summary; }
       if (committed && current()) { this.restoreScroll('show'); }
     }
   }
@@ -4116,8 +4143,7 @@ struct Index {
     this.searchLocalVersion++;
   }
   private invalidateLazyWork(): void {
-    this.lazyConsumer.cancel(); this.lazyConsumer=new ReadCancel();
-    this.lazyRevision++;
+    this.pageWorks.reset();
   }
   private resetDiscover(): void {
     this.cancelDiscoverRead();
