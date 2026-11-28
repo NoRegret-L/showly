@@ -219,3 +219,16 @@ assert "this.tab === 'library' && value !== 'library'" in page
 assert "this.collectionOptionsOpen=false;" in page
 assert "this.settings.loadCollectionRecentAmount()" in page
 assert "this.showRatingRequest.finish(ticket)" in page and "this.movieRatingRequest.finish(ticket)" in page
+
+# Collection render must consume published snapshots, not mutate business caches.
+collection_view=page.split("  collectionView() {",1)[1].split("  collectionSortButton(",1)[0]
+assert "this.recentCollectionRows()" not in collection_view
+assert "this.personalLibrary()" not in collection_view
+assert "ForEach(this.collectionRecentRows," in collection_view
+assert "this.publishCollectionHeader();" in page
+assert "this.updateLazyRows().catch(" in page
+sort=page.split("  private async runCollectionSort(",1)[1].split("  private collectionEntries()",1)[0]
+assert "throw new Error" not in sort
+assert "this.reportCollectionFailure(key,'排序')" in sort
+assert "this.collectionFailureKey!==key" in sort
+assert "this.retryCollectionDisplay();" in collection_view
