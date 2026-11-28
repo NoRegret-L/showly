@@ -39,6 +39,7 @@ export class PresentationRepository {
     await db.executeSql('CREATE TABLE IF NOT EXISTS presentation_title (id TEXT PRIMARY KEY,payload TEXT NOT NULL)');
     await db.executeSql('CREATE TABLE IF NOT EXISTS presentation_season (show_id TEXT NOT NULL,season INTEGER NOT NULL,payload TEXT NOT NULL,PRIMARY KEY(show_id,season))');
     await db.executeSql('CREATE TABLE IF NOT EXISTS presentation_detail (id TEXT PRIMARY KEY,payload TEXT NOT NULL)');
+    await db.executeSql('CREATE TABLE IF NOT EXISTS presentation_section (id TEXT NOT NULL,section TEXT NOT NULL,payload TEXT NOT NULL,PRIMARY KEY(id,section))');
     const repo = new PresentationRepository(db, context.filesDir, context.cacheDir);
     const titles = await db.querySql('SELECT id,payload FROM presentation_title');
     try {
@@ -61,6 +62,15 @@ export class PresentationRepository {
   private lightTitle(row: TitlePresentation): TitlePresentation {
     return {id:row.id,text:{title:row.text.title,overview:''},translatedAt:row.translatedAt,
       posterUrls:[],posterUri:row.posterUri,collection:row.collection};
+  }
+  async readDetailSection(item:Media,section:string,consumer:ReadCancel):Promise<string>{
+    if(!canReadDetails(item)||!['people-trakt','related-trakt'].includes(section)){return '';}
+    consumer.check();const rows=await this.db.querySql('SELECT payload FROM presentation_section WHERE id=? AND section=?',[item.id,section]);
+    try{consumer.check();return rows.goToFirstRow()?rows.getString(0):'';}finally{rows.close();}
+  }
+  async saveDetailSection(item:Media,section:string,payload:string,consumer:ReadCancel):Promise<void>{
+    if(!canReadDetails(item)||!['people-trakt','related-trakt'].includes(section)){return;}
+    consumer.check();await this.db.executeSql('INSERT OR REPLACE INTO presentation_section(id,section,payload) VALUES(?,?,?)',[item.id,section,payload]);
   }
   async readCachedDetail(item:Media,consumer:ReadCancel):Promise<MediaDetail|undefined>{
     if(!canReadDetails(item)){return undefined;}

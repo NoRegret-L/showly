@@ -12,7 +12,7 @@ with tempfile.TemporaryDirectory() as tmp:
     work=Path(tmp)
     for path in (root/"model").glob("*.ets"):
         shutil.copyfile(path,work/(path.stem+".ts"))
-    subprocess.run(["tsc","--strict","--target","ES2020","--module","commonjs","DetailSession.ts","EffectiveState.ts","DetailViewOwner.ts"],cwd=work,check=True)
+    subprocess.run(["tsc","--strict","--target","ES2020","--module","commonjs","DetailSession.ts","EffectiveState.ts","DetailViewOwner.ts","DetailSections.ts"],cwd=work,check=True)
     (work/"test.cjs").write_text("""
 const assert=require('node:assert/strict'),{DetailSession,summarizeSeasons}=require('./DetailSession'),{resolveEpisodes}=require('./EffectiveState');
 const {DetailViewOwner}=require('./DetailViewOwner');
@@ -36,6 +36,15 @@ for(let i=0;i<100;i++){
  assert(!owner.current(token,'A','show:1'));
 }
 console.log('100 detail UI lifecycles: independent lanes, no-op snapshots, scoped stale rejection and spoiler isolation passed');
+const {SectionOwner,projectPeople,parseRelated,projectRelated}=require('./DetailSections');
+const credits=projectPeople({cast:[{person:{id:1,name:'A'},characters:['x']},{person:{id:1,name:'A'},character:'y'}],crew:{directing:[{person:{id:2,name:'B'},job:'Director'},{person:{id:3,name:'C'},job:'Unknown'}]}});
+assert.deepEqual(credits.map(r=>[r.department,r.roles]),[['Acting',['x','y']],['Directing',['Director']]]);
+const rows=parseRelated([{ids:{trakt:1},title:'parent',votes:20,rating:9},{ids:{trakt:2},title:'hidden',votes:50,rating:9},{ids:{trakt:3},title:'B',votes:30,rating:7},{ids:{trakt:4},title:'C',votes:30,rating:8},{ids:{trakt:3},title:'duplicate',votes:99}], 'show');
+assert.deepEqual(projectRelated(rows,'show:1',new Set(['show:2'])).map(r=>r.media.id),['show:4','show:3']);
+assert.equal(rows.length,4);
+const sections=new SectionOwner();
+for(let i=0;i<100;i++){const a=sections.begin(),signal=sections.consumer();assert(sections.publish(a,credits,true,'',true));const snapshot=sections.snapshot();assert(!sections.publish(a,credits,true,'',true));assert.strictEqual(snapshot,sections.snapshot());const b=sections.begin();assert(signal.cancelled());assert(!sections.publish(a,[],false,'stale',true));assert(sections.publish(b,credits,false,'',true));}
+console.log('Detail sections: 100 cancellation cycles, credit grouping and roles, related sort, hidden exclusion and identity dedup passed');
 const session=new DetailSession();
 const full={media:{id:'show:1',title:'Long show',year:2020,kind:'show',watched:false},status:'returning series',fetchedAt:Date.now(),seasons:Array.from({length:20},(_,s)=>({number:s+1,firstAired:'2020-01-01T00:00:00Z',episodes:Array.from({length:100},(_,e)=>({id:s*100+e+1,season:s+1,number:e+1,title:'Episode',firstAired:'2020-01-01T00:00:00Z'}))}))};
 let reads=0;
@@ -115,3 +124,8 @@ with tempfile.TemporaryDirectory() as tmp:
 assert "row.id!==item.id" in repo and "consumer.check()" in repo
 assert "readCachedDetail(item,consumer)" in page and "if(cached)" in page
 print("Public detail cache: exact SQL cold reopen, show/movie identity separation and offline snapshot retention passed (host)")
+
+assert "presentation_section" in repo and "WHERE id=? AND section=?" in repo
+assert "DetailPeopleSection({" in page and "DetailRelatedSection({" in page
+assert "this.backFromDetail()" in page
+assert "LazyForEach(this.source" in (root/"pages/DetailRelatedSection.ets").read_text()

@@ -151,6 +151,15 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+          sparse-checkout: |
+            harmonyos/AppScope/app.json5
+            harmonyos/package.json
+            harmonyos/entry/oh-package.json5
+            harmonyos/build-profile.json5
+            harmonyos/upstream-baseline.txt
+            harmonyos/entry/src/main/ets/config/BuildInfo.ets
+            harmonyos/tools/prepare_preview_release.py
+          sparse-checkout-cone-mode: false
 
       # No SDK setup, app credentials, or build scripts run in the write job.
       - name: Download successful build artifacts

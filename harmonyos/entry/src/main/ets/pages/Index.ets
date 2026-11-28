@@ -1,3 +1,6 @@
+import { DetailSummarySection } from './DetailSummarySection';
+import { DetailPeopleSection } from './DetailPeopleSection';
+import { DetailRelatedSection } from './DetailRelatedSection';
 import { DetailViewOwner, DetailSnapshot, emptyDetail } from '../model/DetailViewOwner';
 import { DetailHeader } from './DetailHeader';
 import { CollectionViewOwner, CollectionNetworkGroup, CollectionGenreOption, COLLECTION_NETWORK_GROUPS, COLLECTION_GENRES, toggleCollectionSelection, COLLECTION_RECENT_AMOUNTS, CollectionDependencyVersions, CollectionMetadataVersions, CollectionRatingRequest, CollectionRecoveryOwner, CollectionUiSnapshot, emptyCollectionUi, collectionUiNext, CollectionSpoilers, defaultCollectionSpoilers, collectionSpoilerText, progressRatingSpoilerText, collectionEmptyText } from '../model/CollectionViewOwner';
@@ -238,6 +241,8 @@ struct Index {
   private detailResumePending: boolean=false;
   private detailScroller: Scroller=new Scroller();
   private detailScrollOffset: number=0;
+  private relatedBack:Media[]=[];
+  private relatedOffsets:number[]=[];
   @State episodePage: boolean=false;
   private episodeRowOwner=new EpisodeRowsOwner();
   @State episodeRowCount: number=0;
@@ -3400,7 +3405,7 @@ struct Index {
     this.movieUndoStatus = '';
     this.cloudLocalAllowed = false;
     this.detailSession.clear(); this.detailConsumer=this.detailSession.consumer();
-    this.detailRevision++; this.detailResumePending=!!this.selectedMedia; this.resetDetailUi();
+    this.detailRevision++; this.detailResumePending=!!this.selectedMedia; this.relatedBack=[];this.relatedOffsets=[];this.resetDetailUi();
     this.episodeRowOwner.clear(); this.episodeRowCount=0; this.seasonSummaries=[];
     this.localSeries = undefined;
     this.effectiveEditable = false;
@@ -6681,7 +6686,8 @@ struct Index {
     if (item.kind==='show') { this.loadLocalEpisodes(item); }
     this.loadDetailRating(item); this.loadDetailFanart(item); this.loadDetailSummary(item);
   }
-  private closeDetail(): void {
+  private closeDetail(preserveRelated:boolean=false): void {
+    if(!preserveRelated){this.relatedBack=[];this.relatedOffsets=[];}
     this.detailSession.clear(); this.detailConsumer=this.detailSession.consumer();
     this.detailResumePending=false;
     this.episodePage=false; this.episodeRowOwner.clear(); this.episodeRowCount=0; this.seasonSummaries=[];
@@ -6702,9 +6708,19 @@ struct Index {
     this.selectedMedia = undefined;
   }
 
+  private openRelatedDetail(item:Media):void{
+    if(!this.selectedMedia||this.detailUi.summaryBusy||this.localBusy||this.setupBusy||!this.clientId||!canReadDetails(item)){return;}
+    this.relatedBack.push(this.selectedMedia);let offset=0;try{offset=this.detailScroller.currentOffset().yOffset;}catch(error){}this.relatedOffsets.push(offset);this.openDetail(item);
+  }
+  private backFromDetail():boolean{
+    const previous=this.relatedBack.pop(),offset=this.relatedOffsets.pop()??0;
+    if(!previous){return false;}
+    this.openDetail(previous).then(()=>{const revision=this.detailRevision;this.getUIContext().postFrameCallback(new RestoreScrollFrame(()=>{if(revision===this.detailRevision&&this.selectedMedia?.id===previous.id){try{this.detailScroller.scrollTo({xOffset:0,yOffset:offset,animation:false});}catch(error){}}}));});return true;
+  }
   onBackPress(): boolean {
     if (this.episodePage && this.selectedMedia) { this.closeSeasonPage(); return true; }
     if (this.selectedMedia) {
+      if(this.backFromDetail()){return true;}
       this.closeDetail();
       if ((this.tab === 'library' || (this.tab === 'progress' && this.progressMode === 'next')) && !this.nextShows.length) { this.loadNextShows(); }
       return true;
@@ -6721,7 +6737,7 @@ struct Index {
       return;
     }
     if (!this.selectedMedia) { this.rememberScroll(); }
-    this.closeDetail();
+    this.closeDetail(true);
     if (preferredSeason > 0 && item.kind === 'show') { this.localSeason = preferredSeason; this.episodePage=true; }
     this.detailRevision++;
     this.detailSession.begin(this.currentSearchAccount(),item.id); this.detailConsumer=this.detailSession.consumer();
@@ -6898,33 +6914,19 @@ struct Index {
   detailPage(item: Media) {
     Column({space:12}){
       DetailHeader({title:this.displayTitle(item),subtitle:this.detailSubtitle(item),poster:this.artwork(item),fanart:this.detailUi.fanart,
-        onBack:()=>{this.closeDetail();if((this.tab==='library'||(this.tab==='progress'&&this.progressMode==='next'))&&!this.nextShows.length){this.loadNextShows();}},
+        onBack:()=>{if(this.backFromDetail()){return;}this.closeDetail();if((this.tab==='library'||(this.tab==='progress'&&this.progressMode==='next'))&&!this.nextShows.length){this.loadNextShows();}},
         onPosterFailure:(uri:string)=>{this.artworkFailed(item,uri);},
         onFanartFailure:(uri:string)=>{if(this.detailFanart.failed(item.id,uri)){this.detailOwner.artwork(this.detailOwner.token(),'',false,'背景图读取失败');this.publishDetail();}}})
       if(isTraktMedia(item)){this.mediaStateView(item)}
       if(item.kind==='show'){this.localEpisodesView(item)}
-      if(this.detailUi.summary){
-        Column({space:6}){
-          Text('影视资料').fontSize(19).fontWeight(FontWeight.Medium).width('100%')
-          if(this.detailUi.summary.collection?.release){Text('日期：'+this.detailUi.summary.collection?.release).fontSize(13).width('100%')}
-          if(this.detailUi.summary.collection?.network){Text('电视网：'+this.detailUi.summary.collection?.network).fontSize(13).width('100%')}
-          if(this.detailUi.summary.genres){Text(this.detailUi.summary.genres).fontSize(13).width('100%')}
-          if(this.detailUi.summary.certification){Text('分级：'+this.detailUi.summary.certification).fontSize(13).width('100%')}
-          if(this.detailUi.summary.country){Text('国家：'+this.detailUi.summary.country).fontSize(13).width('100%')}
-          if(this.detailUi.summary.language){Text('语言：'+this.detailUi.summary.language).fontSize(13).width('100%')}
-          if(item.kind==='show'&&this.detailUi.summary.airedEpisodes>0){Text('已播 '+this.detailUi.summary.airedEpisodes+' 集').fontSize(13).width('100%')}
-          if(this.detailUi.summary.rating>0){Text('Trakt '+collectionSpoilerText(this.detailUi.summary.rating.toFixed(1),this.detailUi.spoilers.rating,this.detailUi.ratingRevealed,true)+' / 10').fontSize(16).width('100%').onClick(()=>{this.revealDetail('rating');})}
-          if(this.detailUi.summary.votes!==undefined){Text('评分人数：'+this.detailUi.summary.votes).fontSize(12).width('100%')}
-          Text('剧情简介').fontSize(19).fontWeight(FontWeight.Medium).width('100%')
-          Text(collectionSpoilerText(this.displayOverview(item,this.detailUi.summary.overview)||'暂无简介',this.detailUi.spoilers.description,this.detailUi.descriptionRevealed)).fontSize(15).width('100%').onClick(()=>{this.revealDetail('description');})
-          if(this.presentationLanguage==='zh'){Button('重试中文资料').fontSize(12).onClick(()=>{this.translateDetail(item);})}
-          Row({space:4}){
-            Button(this.detailUi.spoilers.description?'简介隐藏':'简介显示').fontSize(11).layoutWeight(1).onClick(()=>{this.toggleDetailSpoiler(item,'description');})
-            Button(this.detailUi.spoilers.rating?'评分隐藏':'评分显示').fontSize(11).layoutWeight(1).onClick(()=>{this.toggleDetailSpoiler(item,'rating');})
-            Button(this.detailUi.spoilers.reveal?'允许揭示':'禁止揭示').fontSize(11).layoutWeight(1).onClick(()=>{this.toggleDetailSpoiler(item,'reveal');})
-          }.width('100%')
-        }.width('100%').padding(10).backgroundColor($r('app.color.showly_surface')).borderRadius(10)
-      }
+      DetailSummarySection({summary:this.detailUi.summary,kind:item.kind,overview:this.displayOverview(item,this.detailUi.summary?.overview??''),chinese:this.presentationLanguage==='zh',
+        spoilers:this.detailUi.spoilers,ratingRevealed:this.detailUi.ratingRevealed,descriptionRevealed:this.detailUi.descriptionRevealed,
+        onTranslate:()=>{this.translateDetail(item);},onToggle:(field:string)=>{this.toggleDetailSpoiler(item,field);},onReveal:(field:string)=>{this.revealDetail(field);}})
+      ForEach([JSON.stringify([this.currentSearchAccount(),item.id,this.detailRevision])],(_key:string)=>{
+        DetailPeopleSection({item:item,client:this.clientId,scope:this.currentSearchAccount(),repository:this.presentation})
+        DetailRelatedSection({item:item,client:this.clientId,scope:this.currentSearchAccount(),cacheDir:this.context().filesDir,repository:this.presentation,
+          hiddenKey:this.hiddenVersion('show'),onOpen:(related:Media)=>{this.openRelatedDetail(related);}})
+      },(key:string)=>key)
       if(this.detailUi.ratingBusy){LoadingProgress().width(24).height(24)}
       if(this.detailUi.rating!==undefined){Text('我的评分：'+this.detailUi.rating+' / 10').fontSize(15).width('100%')}
       if(this.detailUi.ratingStatus){Text(this.detailUi.ratingStatus).fontSize(12).width('100%')}
