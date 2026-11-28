@@ -102,6 +102,25 @@ export class ClientSettings {
     await this.storage.put('movie_progress_options', JSON.stringify(value));
     await this.storage.flush();
   }
+  loadProgressWatchMode():string{return this.storage.getSync('progress_watch_mode','ask')==='now'?'now':'ask';}
+  async saveProgressWatchMode(mode:string):Promise<void>{
+    if(mode!=='ask'&&mode!=='now'){throw new Error('Invalid watch mode');}
+    await this.storage.put('progress_watch_mode',mode);await this.storage.flush();
+  }
+  loadProgressEpisodeHidden():boolean{return this.storage.getSync('progress_episode_hidden',false)===true;}
+  async saveProgressEpisodeHidden(value:boolean):Promise<void>{await this.storage.put('progress_episode_hidden',value);await this.storage.flush();}
+  loadFanartUrls(id:string):string[]{
+    try{
+      const raw=this.storage.getSync('fanart_urls:'+id,'');
+      const values=JSON.parse(typeof raw==='string'?raw:'') as string[];
+      if(Array.isArray(values)&&values.every((x:string)=>typeof x==='string')){return values;}
+    }catch(error){}
+    return [];
+  }
+  async saveFanartUrls(id:string,urls:string[]):Promise<void>{
+    if(!/^(show|movie):[1-9][0-9]*$/.test(id)){return;}
+    await this.storage.put('fanart_urls:'+id,JSON.stringify(urls));await this.storage.flush();
+  }
   loadProgress(): ProgressPreferences {
     const raw = this.storage.getSync('show_progress_options', '');
     if (typeof raw !== 'string' || !raw) { return defaultProgress(); }

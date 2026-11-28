@@ -274,5 +274,7 @@ assert "LoadingProgress().width(24).height(24)" in page
 assert "this.collectionUi:CollectionUiSnapshot" not in page # state is declared without this
 assert "@State collectionUi:CollectionUiSnapshot" in page
 assert "this.collectionRecoveryScope()===scope" in page
-assert "signal,'fanart'" in page
+fanart=(root/"data"/"CollectionFanart.ets").read_text()
+assert "signal,'fanart'" in fanart and "settings?.loadFanartUrls(item.id)" in fanart
+assert "await cachedPoster(dir,item,urls,signal,'fanart')" in fanart
 assert "this.collectionSpoilerDetails(row.media)" in page

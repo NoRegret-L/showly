@@ -9,11 +9,16 @@ with tempfile.TemporaryDirectory() as tmp:
     subprocess.run(["tsc","--strict","--target","ES2020","--module","commonjs",*[n+".ts" for n in names]],cwd=work,check=True)
     (work/"test.cjs").write_text("""
 const assert=require('node:assert/strict');
-const {defaultProgress,selectProgress,progressRows,progressSource,toggleProgressFlag,validProgress,progressSections,progressEntries,progressPage,effectiveProgressFilter}=require('./ProgressRules.js');
+const {defaultProgress,selectProgress,progressRows,progressSource,toggleProgressFlag,validProgress,progressSections,progressEntries,progressPage,effectiveProgressFilter,validWatchTime,releaseWatchTime,ProgressWatchSelection}=require('./ProgressRules.js');
 const now=Date.parse('2026-01-10T12:00:00Z'), day=86400000;
 const media={id:'show:1',kind:'show',title:'The Série',year:2025,watched:false};
 const ep=(id,offset,watched=false,watchedAt=0,season=1)=>({episode:{id,season,number:id,title:'Episode '+id,firstAired:offset===null?'':new Date(now+offset*day).toISOString()},watched,watchedAt});
 const source={media,episodes:[ep(1,-10,true,now-2*day),ep(2,-9),ep(3,-8,true,now-day),ep(4,-1),ep(5,1),ep(6,null),ep(7,-1,false,0,0)],recentAt:now,rating:8,randomOrder:0.1};
+const sel=new ProgressWatchSelection();
+const first=sel.begin('A');assert(sel.current('A',first));assert(!sel.consume('B',first));assert(sel.consume('A',first));assert(!sel.consume('A',first));
+const stale=sel.begin('A'),fresh=sel.begin('B');assert(!sel.consume('A',stale));assert(sel.consume('B',fresh));
+assert(validWatchTime(now,now));assert(!validWatchTime(now+1,now));assert(!validWatchTime(NaN,now));assert.equal(releaseWatchTime('',now),0);
+const rel=releaseWatchTime('2025-01-01',now);assert.equal(new Date(rel).getHours(),20);assert.equal(new Date(rel).getMinutes(),0);
 const p=defaultProgress();
 assert.equal(p.days,30);
 assert.equal(selectProgress(source,p,[],now).episode.id,4);
@@ -70,3 +75,7 @@ assert "row.upcoming" in mark and "eligibleCatalog(" in mark and "projectDetail(
 assert "syncSelectedMedia(" not in mark and "uploadBatch(" not in mark
 assert "selectProgress(source,this.progressPrefs,flag ? [flag] : [],Date.now())" in source and "sortProgressCandidates([this.localizedProgress(candidate" in source
 print("Progress wiring assertions passed")
+
+assert "this.getUIContext().showActionSheet" in source and "this.getUIContext().showDatePickerDialog" in source
+assert "this.watchSelection.consume(this.watchScope(),token)" in source
+assert "auto.uuid : '',watchedAt)" in mark

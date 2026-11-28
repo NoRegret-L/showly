@@ -299,3 +299,21 @@ export function effectiveProgressFilter(prefs: ProgressPreferences): string {
   const value = prefs.filter ?? 'all';
   return prefs.days > 0 ? value : value === 'both' ? 'hold' : value === 'upcoming' ? 'all' : value;
 }
+
+// Original DateSelectionBottomSheet: release day at 20:00 local, then UTC.
+// Reject future/invalid selections rather than silently substituting now.
+export function validWatchTime(at:number,now:number):boolean{return Number.isSafeInteger(at)&&at>0&&at<=now;}
+export function releaseWatchTime(release:string,now:number):number{
+  if(!release){return 0;}
+  const date=/^\d{4}-\d{2}-\d{2}$/.test(release)?new Date(release+'T00:00:00'):new Date(release);
+  if(!Number.isFinite(date.getTime())){return 0;}
+  date.setHours(20,0,0,0);
+  return validWatchTime(date.getTime(),now)?date.getTime():0;
+}
+export class ProgressWatchSelection {
+  private serial:number=0;private active:number=0;private scope:string='';
+  begin(scope:string):number{this.scope=scope;this.active=++this.serial;return this.active;}
+  current(scope:string,token:number):boolean{return token!==0&&token===this.active&&scope===this.scope;}
+  consume(scope:string,token:number):boolean{if(!this.current(scope,token)){return false;}this.clear();return true;}
+  clear():void{this.active=0;this.scope='';}
+}

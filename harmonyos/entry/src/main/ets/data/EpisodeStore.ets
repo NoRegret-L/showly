@@ -766,10 +766,11 @@ export class EpisodeStore {
     return materialize(catalog, events, [...baseline, ...restored]);
   }
 
-  async mark(showId: string, ids: number[], watched: boolean, autoUuid: string = ''): Promise<void> {
-    return this.projectionWrite<void>([showId],false,()=>this.markBody(showId,ids,watched,autoUuid));
+  async mark(showId: string, ids: number[], watched: boolean, autoUuid: string = '',watchedAt:number=Date.now()): Promise<void> {
+    return this.projectionWrite<void>([showId],false,()=>this.markBody(showId,ids,watched,autoUuid,watchedAt));
   }
-  private async markBody(showId: string, ids: number[], watched: boolean, autoUuid: string = ''): Promise<void> {
+  private async markBody(showId: string, ids: number[], watched: boolean, autoUuid: string,watchedAt:number): Promise<void> {
+    if(!Number.isSafeInteger(watchedAt)||watchedAt<=0||watchedAt>Date.now()){throw new Error('Invalid watch time');}
     const catalog = await this.catalog(showId);
     if (!catalog || ids.length === 0) { throw new Error('Missing episode catalog'); }
     if (await this.needsCatalogVerification(showId)) { throw new Error('Restored catalog must be refreshed'); }
@@ -779,7 +780,7 @@ export class EpisodeStore {
     const consent = autoUuid ? await this.autoConsent() : undefined;
     const authorized = watched && consent?.uuid === autoUuid && await this.boundAccount() === autoUuid ? autoUuid : '';
     await this.db.executeSql('INSERT INTO episode_event(show_id,episode_ids,watched,changed_at,auto_uuid) VALUES(?,?,?,?,?)',
-      [showId, JSON.stringify(Array.from(unique)), watched ? 1 : 0, Date.now(), authorized]);
+      [showId, JSON.stringify(Array.from(unique)), watched ? 1 : 0, watched ? watchedAt : Date.now(), authorized]);
   }
 
   async boundAccount(): Promise<string> {

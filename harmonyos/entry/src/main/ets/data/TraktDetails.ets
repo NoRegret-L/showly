@@ -222,14 +222,15 @@ async function validPosterFile(path: string,scope?: ReadCancel): Promise<boolean
     } finally { await fileIo.close(file); }
   } catch (error) { scope?.check(); return false; }
 }
-export async function cachedPoster(cacheDir: string, item: Media, candidates: string[],scope?: ReadCancel): Promise<string> {
+export async function cachedPoster(cacheDir: string, item: Media, candidates: string[],scope?: ReadCancel,type:string='poster'): Promise<string> {
   if (!canReadDetails(item)) { return ''; }
   const urls=Array.from(new Set<string>(candidates.map((candidate: string)=>normalizePoster(candidate)).filter((url: string)=>!!url)));
   for (const url of urls) {
     scope?.check();
-    const path=await posterPath(cacheDir,item,url);
+    const path=await posterPath(cacheDir,item,url,type);
     if (await validPosterFile(path,scope)) { return fileUri.getUriFromPath(path); }
   }
+  if(type!=='poster'){return '';}
   // Existing offline files are a compatibility fallback only. Never promote
   // them to the new exact identity, and reject ambiguous legacy basenames.
   for (const url of urls) {

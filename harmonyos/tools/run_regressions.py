@@ -20,8 +20,11 @@ def main():
     workers=min(len(TESTS),len(os.sched_getaffinity(0)) if hasattr(os,'sched_getaffinity') else (os.cpu_count() or 1))
     print(f"Running {len(TESTS)} regressions with {workers} available CPUs",flush=True)
     start=time.monotonic(); failed=[]
+    # Measured Build 75 longest jobs first, remaining stable inventory order.
+    previous={"test_presentation_queue.py":16.433,"test_commit_delta.py":10.019,"test_library_index.py":8.915,"test_search_local.py":7.644,"test_projection_delta.py":6.900}
+    ordered=sorted(TESTS,key=lambda name:previous.get(name,0),reverse=True)
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
-        jobs=[pool.submit(run,name) for name in TESTS]
+        jobs=[pool.submit(run,name) for name in ordered]
         for job in concurrent.futures.as_completed(jobs):
             name,code,elapsed,output=job.result()
             print(f"--- {name} {elapsed:.3f}s exit={code} ---\n{output}",flush=True)

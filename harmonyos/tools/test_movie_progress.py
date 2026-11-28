@@ -83,8 +83,8 @@ assert "this.movieSortKey(query,utc)" in movie_rows and "this.currentProgressSco
 assert "this.displayRevisions.movie,includeBusiness ? this.libraryRevision : 0" in source
 assert "includeBusiness ? this.libraryRevision : 0" in source
 assert "this.movieProgressRows('',true).find(" in source
-assert "this.markMovieProgress(row.media)" in source
-assert "await this.changeMediaIntent(row.media, 'movie', 'yes')" in source
+assert "this.markMovieProgress(row.media,at)" in source
+assert "await this.changeMediaIntent(row.media, 'movie', 'yes',watchedAt)" in source
 assert "await this.clearWatchedMoviePin(item, pinScope)" in source
 assert "await settings.saveMovieProgress(options)" in source
 print("Movie progress wiring assertions passed")

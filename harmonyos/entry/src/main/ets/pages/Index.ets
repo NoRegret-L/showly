@@ -42,7 +42,7 @@ import { CacheLifecycle, cacheResidency, memoryEvents } from '../model/CacheLife
 import { computeCandidateDisplay } from '../data/ProgressCandidateTask';
 import { ShowProjectionCache } from '../model/ProjectionCompute';
 import { MovieProgressOptions, MovieProgressSource, defaultMovieProgress, validMovieProgress, movieProgressRows as projectMovieProgress, clearMoviePin, movieSortEligible, compareMovieSources, sameMovieSource } from '../model/MovieProgressRules';
-import { ProgressSource, ProgressPreferences, ProgressFlag, ProgressRow, defaultProgress, validProgress, toggleProgressFlag, selectProgress, sortProgressCandidates, ProgressEntry, progressSections, progressEntries, progressPage, effectiveProgressFilter } from '../model/ProgressRules';
+import { ProgressSource, ProgressPreferences, ProgressFlag, ProgressRow, defaultProgress, validProgress, toggleProgressFlag, selectProgress, sortProgressCandidates, ProgressEntry, progressSections, progressEntries, progressPage, effectiveProgressFilter, validWatchTime, releaseWatchTime, ProgressWatchSelection } from '../model/ProgressRules';
 import { CalendarSource, CalendarInput, CalendarEntry, CalendarIndex, CalendarText, CalendarJobInput, calendarClockKey, calendarExpiry, calendarPageRows, calendarTitleHidden } from '../model/CalendarRules';
 import { calendarDisplay } from '../data/CalendarTask';
 import { PersonalMovie, PersonalMovieSnapshot, readPersonalMovieDate, CollectionRating, readCollectionRatings } from '../data/TraktLibrary';
@@ -60,7 +60,8 @@ import { LibraryProjection, LibraryProjectionSession, projectDetail } from '../d
 import { allowLocalScope } from '../model/EffectiveState';
 import { hasTrackingEvidence } from '../model/PersonalLibrary';
 import { CollectionGroup, GroupEntry, normalizeMode, progressTabs, collectionRows, pageGroups } from '../model/NavigationModel';
-import { MediaDetail, canReadDetails, readDetails, clearDetailMemory, cachePoster, rejectPosterUri } from '../data/TraktDetails';
+import { MediaDetail, canReadDetails, readDetails, clearDetailMemory } from '../data/TraktDetails';
+import { CollectionFanartOwner } from '../data/CollectionFanart';
 import { DiscoverItem, DiscoverOptions, DiscoverFeed, DiscoverPage, defaultDiscover, validDiscoverOptions, discoverRequest, discoverKey, discoverFresh, filterDiscover, discoverPage, DISCOVER_GENRES, DISCOVER_NETWORKS } from '../model/DiscoverRules';
 import { DiscoverRead } from '../model/DiscoverRead';
 import { openDiscover } from '../data/DiscoverRepository';
@@ -174,40 +175,25 @@ struct Index {
   @State collectionSpoilers:CollectionSpoilers=defaultCollectionSpoilers();
   @State collectionRevealed:string[]=[];
   @State collectionFanart:Map<string,string>=new Map<string,string>();
-  private fanartTasks:Map<string,ReadCancel>=new Map<string,ReadCancel>();
-  private fanartAttempted:Set<string>=new Set<string>();
+  private fanartOwner:CollectionFanartOwner=new CollectionFanartOwner();
+  private watchSelection:ProgressWatchSelection=new ProgressWatchSelection();
+  @State progressWatchMode:string='ask';
+  @State progressEpisodeHidden:boolean=false;
   private showCollectionRecovery:CollectionRecoveryOwner=new CollectionRecoveryOwner();
   private movieCollectionRecovery:CollectionRecoveryOwner=new CollectionRecoveryOwner();
   private collectionStage:string='初始化';
   private collectionRecovery():CollectionRecoveryOwner{return this.mediaMode==='movie'?this.movieCollectionRecovery:this.showCollectionRecovery;}
   private clearCollectionFanart():void{
-    for(const signal of this.fanartTasks.values()){signal.cancel();}
-    this.fanartTasks.clear();this.fanartAttempted.clear();
-    if(this.collectionFanart.size){this.collectionFanart=new Map<string,string>();}
+    this.fanartOwner.clear();if(this.collectionFanart.size){this.collectionFanart=new Map<string,string>();}
   }
-  private async recentFanartVisible(item:Media,visible:boolean):Promise<void>{
-    if(!visible){const task=this.fanartTasks.get(item.id);if(task){task.cancel();this.fanartTasks.delete(item.id);}return;}
-    if(!this.pageVisible||this.tab!=='library'||this.selectedMedia||item.kind!==this.mediaMode||!this.clientId||
-      this.collectionFanart.has(item.id)||this.fanartTasks.has(item.id)||this.fanartAttempted.has(item.id)){return;}
-    const scope=this.collectionRecoveryScope(),client=this.clientId,signal=new ReadCancel();
-    this.fanartTasks.set(item.id,signal);
-    try{
-      const detail=await readDetails(item,client,false,signal);
-      signal.check();
-      const urls=detail.fanartUrls??[];
-      if(!urls.length){this.fanartAttempted.add(item.id);return;}
-      const result=await cachePoster(this.context().cacheDir,item,urls,signal,'fanart');
-      signal.check();
-      if(this.pageVisible&&this.tab==='library'&&!this.selectedMedia&&this.collectionRecoveryScope()===scope&&this.clientId===client){
-        this.fanartAttempted.add(item.id);
-        if(result.uri){const next=new Map<string,string>(this.collectionFanart);next.set(item.id,result.uri);this.collectionFanart=next;}
-      }
-    }catch(error){/* Optional public artwork never blocks collection loading. */}
-    finally{if(this.fanartTasks.get(item.id)===signal){this.fanartTasks.delete(item.id);}}
+  private recentFanartVisible(item:Media,visible:boolean):void{
+    if(!visible){this.fanartOwner.hide(item.id);return;}
+    const scope=this.collectionRecoveryScope(),client=this.clientId;
+    const current=():boolean=>this.pageVisible&&this.tab==='library'&&!this.selectedMedia&&item.kind===this.mediaMode&&this.collectionRecoveryScope()===scope&&this.clientId===client;
+    if(current()){this.fanartOwner.visible(item,client,this.context().cacheDir,this.settings,current,(rows:Map<string,string>)=>{this.collectionFanart=rows;});}
   }
   private recentFanartFailed(item:Media,uri:string):void{
-    if(this.collectionFanart.get(item.id)!==uri){return;}
-    rejectPosterUri(uri);const next=new Map<string,string>(this.collectionFanart);next.delete(item.id);this.collectionFanart=next;
+    if(this.fanartOwner.failed(item.id,uri)){this.collectionFanart=this.fanartOwner.snapshot();}
   }
   private collectionRecoveryScope():string{return JSON.stringify([this.currentProgressScope(),this.viewScope()]);}
   private publishCollectionUi(recent:PersonalLibraryRow[],other:boolean,error:string,retrying:boolean):void{
@@ -395,10 +381,6 @@ struct Index {
   @State progressBusy: boolean = false;
   @State progressStatus: string = '';
   @State seasonNumber: number = -1;
-  @State chineseTitle: string = '';
-  @State chineseOverview: string = '';
-  @State translationBusy: boolean = false;
-  @State translationStatus: string = '';
   @State discoverMode: string = 'trending';
   @State discoverOptions: DiscoverOptions = defaultDiscover();
   @State discoverGenreDraft: string = '';
@@ -594,6 +576,7 @@ struct Index {
       this.restoreDiscoverOptions();
       this.presentationLanguage = this.settings.loadLanguage();
       this.progressPrefs = this.settings.loadProgress();
+      this.progressWatchMode=this.settings.loadProgressWatchMode();this.progressEpisodeHidden=this.settings.loadProgressEpisodeHidden();
       this.movieProgressOptions = this.settings.loadMovieProgress();
       this.progressDaysInput = this.progressPrefs.days.toString();
       this.nextFilter = effectiveProgressFilter(this.progressPrefs);
@@ -637,6 +620,7 @@ struct Index {
   }
 
   onPageHide(): void {
+    this.watchSelection.clear();
     this.pageVisible = false;
     this.pauseDetail();
     this.updateCacheLifecycle();
@@ -658,6 +642,7 @@ struct Index {
   }
 
   aboutToDisappear(): void {
+    this.watchSelection.clear();
     if (this.memorySubscribed) { memoryEvents.unsubscribe(this.memoryListener); this.memorySubscribed=false; }
     if (this.memoryTimer>=0) { clearTimeout(this.memoryTimer); this.memoryTimer=-1; this.memoryPending=false; }
     this.pageVisible = false;
@@ -1964,7 +1949,7 @@ struct Index {
       row?.episode.season ?? 0,row?.episode.number ?? 0,row?.episode.firstAired ?? '',row?.total ?? 0,
       row?.completed ?? 0,row?.upcoming ?? false,row?.fresh ?? false,row?.pinned ?? false,row?.held ?? false,
       row?.dateUnknown ?? false,row ? this.artwork(row.media) : '',row ? this.displayTitle(row.media) : '',
-      row ? this.displayEpisode(row.media,row.episode.season,row.episode.id,row.episode.title) : '']);
+      row ? this.progressEpisodeLabel(row) : '']);
   }
 
   private collectionGroupKey(group: CollectionGroup): string {
@@ -3619,7 +3604,8 @@ struct Index {
     }
   }
 
-  private async persistMedia(records: MediaRecord[], changes: TitleChange[] = []): Promise<boolean> {
+  private async persistMedia(records: MediaRecord[], changes: TitleChange[] = [],watchTime:number=Date.now()): Promise<boolean> {
+    if(!validWatchTime(watchTime,Date.now())){return false;}
     const store = this.mediaStore;
     if (!this.ready || this.saving || this.syncBusy || !store || !this.canEditLibrary()) { return false; }
     const dateScope = this.currentProgressScope();
@@ -3640,7 +3626,7 @@ struct Index {
       if (scoped && await this.episodeStore?.boundAccount() !== uuid) { throw new Error('Account mismatch'); }
       if (!this.canEditLibrary() || snapshot !== this.activeCloud() || uuid !== this.cloudUuid) { throw new Error('Session changed'); }
       const verified = scoped ? await store.saveTitleEdit(records, changes, uuid, this.clientId,
-        new Date().toISOString(), this.titleQuickActive()) : await store.save(records);
+        new Date(watchTime).toISOString(), this.titleQuickActive()) : await store.save(records);
       this.invalidateMovieCalendar();
       this.publishMediaRecords(verified,records,editVersion,Array.from(editIds));
       this.items = verified.map((record: MediaRecord) => record.media);
@@ -3697,7 +3683,7 @@ struct Index {
     return value === 'yes' ? '明确标记' : value === 'no' ? '明确撤销/移出' : '未明确设置（旧记录保留）';
   }
 
-  private async changeMediaIntent(item: Media, domain: string, value: string): Promise<void> {
+  private async changeMediaIntent(item: Media, domain: string, value: string,watchTime:number=Date.now()): Promise<void> {
     if (this.isHidden(item) || this.collectionEditBusy || !this.ready || this.saving || this.cloudBusy || this.syncBusy || !this.canEditLibrary() ||
         (domain === 'movie' && this.progressPrefsBusy)) { return; }
     const pinScope = this.currentProgressScope();
@@ -3705,7 +3691,7 @@ struct Index {
     if (movieEdit) { this.progressPrefsBusy = true; }
     try {
       const edit = titleEdit(this.mediaRecords, item, domain, value);
-      const saved = await this.persistMedia(edit.records, edit.changes);
+      const saved = await this.persistMedia(edit.records, edit.changes,watchTime);
       if (saved && domain === 'movie') {
         await this.clearWatchedMoviePin(item, pinScope);
         this.movieProgressPage = 1;
@@ -4825,7 +4811,42 @@ struct Index {
     return entries;
   }
 
-  private async markNext(row: ProgressRow): Promise<void> {
+  private watchScope():string{return JSON.stringify([this.currentProgressScope(),this.viewScope(),this.clientId,this.activeCloud()?.generation??-1,this.detailRevision]);}
+  private chooseWatchTime(release:string,commit:(at:number)=>void):void{
+    const scope=this.watchScope(),token=this.watchSelection.begin(scope);
+    const apply=(at:number):void=>{
+      if(!this.pageVisible||!this.watchSelection.consume(this.watchScope(),token)){return;}
+      if(!validWatchTime(at,Date.now())){this.progressOptionStatus='观看时间无效或尚未到达。';return;}
+      commit(at);
+    };
+    if(this.progressWatchMode==='now'){apply(Date.now());return;}
+    try{
+      const released=releaseWatchTime(release,Date.now());
+      const choices:SheetInfo[]=[
+        {title:'现在',action:()=>{apply(Date.now());}},
+        {title:'自定义日期与时间',action:()=>{
+          if(!this.watchSelection.current(this.watchScope(),token)){return;}
+          try{this.getUIContext().showDatePickerDialog({selected:new Date(),end:new Date(),showTime:true,useMilitaryTime:true,onDateAccept:(value:Date)=>{apply(value.getTime());},onCancel:()=>{if(this.watchSelection.current(this.watchScope(),token)){this.watchSelection.clear();}}});}
+          catch(error){this.watchSelection.clear();this.progressOptionStatus='日期选择器无法打开。';}
+        }}
+      ];
+      if(released){choices.push({title:'上映日 · '+new Date(released).toLocaleString(),action:()=>{apply(released);}});}
+      this.getUIContext().showActionSheet({title:'观看日期',message:'确认实际观看时间',alignment:DialogAlignment.Bottom,autoCancel:true,sheets:choices,cancel:()=>{if(this.watchSelection.current(this.watchScope(),token)){this.watchSelection.clear();}}});
+    }catch(error){this.watchSelection.clear();this.progressOptionStatus='观看日期选择无法打开，未写入记录。';}
+  }
+  private async toggleWatchMode():Promise<void>{
+    const next=this.progressWatchMode==='ask'?'now':'ask';
+    try{await this.settings?.saveProgressWatchMode(next);this.progressWatchMode=next;}catch(error){this.progressOptionStatus='观看日期设置保存失败。';}
+  }
+  private async toggleEpisodeHidden():Promise<void>{
+    const next=!this.progressEpisodeHidden;
+    try{await this.settings?.saveProgressEpisodeHidden(next);this.progressEpisodeHidden=next;this.requestPresentation(false);}catch(error){this.progressOptionStatus='剧透设置保存失败。';}
+  }
+  private progressEpisodeLabel(row:ProgressRow):string{
+    return collectionSpoilerText(this.displayEpisode(row.media,row.episode.season,row.episode.id,row.episode.title),this.progressEpisodeHidden,false);
+  }
+  private async markNext(row: ProgressRow,watchedAt:number=Date.now()): Promise<void> {
+    if(!validWatchTime(watchedAt,Date.now())){return;}
     const store = this.episodeStore;
     const snapshot = this.activeCloud();
     const uuid = this.cloudUuid;
@@ -4870,7 +4891,7 @@ struct Index {
       if (!current() || !this.validateNextTarget(row)) { return; }
       this.invalidateSync();
       // Same guarded write path as detail. No direct remote request.
-      await store.mark(row.media.id, [row.episode.id], true, auto && this.autoActive() ? auto.uuid : '');
+      await store.mark(row.media.id, [row.episode.id], true, auto && this.autoActive() ? auto.uuid : '',watchedAt);
       saved = true;
       this.invalidateNextShows(row.media.id);
       this.requestProjection();
@@ -5121,6 +5142,7 @@ struct Index {
   }
 
   private chooseProgressMode(mode: string): void {
+    this.watchSelection.clear();
     if (!progressTabs(this.mediaMode).includes(mode)) { return; }
     this.progressMode = mode;
     if (mode === 'next') {
@@ -5171,6 +5193,7 @@ struct Index {
   @Builder
   progressOptionsView() {
     Column({ space: 7 }) {
+      Button(this.progressEpisodeHidden?'分集标题：隐藏':'分集标题：显示').fontSize(12).height(32).backgroundColor($r('app.color.showly_muted_surface')).fontColor($r('app.color.showly_text')).onClick(()=>{this.toggleEpisodeHidden();})
       Text('下一集策略').fontSize(14).width('100%')
       Row({ space: 6 }) {
         this.progressOptionButton('最后观看之后', 'strategy', 'last', this.progressPrefs.strategy === 'last')
@@ -5251,7 +5274,7 @@ struct Index {
       Text(this.displayTitle(row.media)).fontSize(17).fontWeight(FontWeight.Medium).width('100%')
       Text((row.pinned ? '置顶 · ' : row.held ? '暂缓 · ' : '') +
         (row.fresh ? '新集 · ' : '') + 'S' + row.episode.season + 'E' + row.episode.number +
-        (this.displayEpisode(row.media, row.episode.season, row.episode.id, row.episode.title) ? ' · ' + this.displayEpisode(row.media, row.episode.season, row.episode.id, row.episode.title) : '')).fontSize(14).width('100%')
+        (this.progressEpisodeLabel(row) ? ' · ' + this.progressEpisodeLabel(row) : '')).fontSize(14).width('100%')
       Text((row.upcoming ? '待播 · ' : '播出 · ') + row.episode.firstAired.substring(0,10)).fontSize(12).width('100%')
       Text('已看 ' + row.completed + ' / ' + row.total + ' 集 · 剩余 ' + (row.total - row.completed) + ' 集')
         .fontSize(12).width('100%')
@@ -5264,9 +5287,9 @@ struct Index {
       Row({ space: 6 }) {
         Button('详情').layoutWeight(1).fontSize(12).enabled(!this.detailBusy)
           .onClick(() => { this.openDetail(row.media, false, row.episode.season); })
-        Button(row.upcoming ? '尚未播出' : '标记已看').layoutWeight(1).fontSize(12)
+        Button(row.upcoming ? '尚未播出' : '标记已看').layoutWeight(1).fontSize(12).backgroundColor($r('app.color.showly_accent')).fontColor($r('app.color.showly_on_accent'))
           .enabled(!row.upcoming && this.canEditLibrary() && !this.localBusy && !this.cloudBusy && !this.syncBusy && !this.saving)
-          .onClick(() => { this.markNext(row); })
+          .onClick(() => { this.chooseWatchTime(row.episode.firstAired,(at:number)=>{this.markNext(row,at);}); })
       }.width('100%')
       this.showProgressActions(row.media)
     }.padding(12).borderRadius(10).width('100%').backgroundColor($r('app.color.showly_surface'))
@@ -5619,14 +5642,15 @@ struct Index {
     finally { this.progressPrefsBusy = false; this.reloadProgressFlags(); }
   }
 
-  private async markMovieProgress(item: Media): Promise<void> {
+  private async markMovieProgress(item: Media,watchedAt:number=Date.now()): Promise<void> {
+    if(!validWatchTime(watchedAt,Date.now())){return;}
     if (!this.pageVisible || this.tab !== 'progress' || this.mediaMode !== 'movie' ||
         this.progressMode !== 'next' || this.selectedMedia || this.authBusy || this.setupBusy ||
         this.backupBusy || this.localBusy || this.calendarBusy || this.progressPrefsBusy ||
         !this.canEditLibrary() || !this.activeCloud()) { return; }
     const row = this.movieProgressRows('',true).find((candidate: PersonalLibraryRow) => candidate.media.id === item.id);
     if (!row) { return; }
-    await this.changeMediaIntent(row.media, 'movie', 'yes');
+    await this.changeMediaIntent(row.media, 'movie', 'yes',watchedAt);
   }
 
   @Builder
@@ -5697,7 +5721,7 @@ struct Index {
               Button('标记已看').fontSize(12)
                 .enabled(this.canEditLibrary() && this.ready && !this.saving && !this.cloudBusy && !this.syncBusy &&
                   !this.calendarBusy && !this.progressPrefsBusy)
-                .onClick(() => { this.markMovieProgress(row.media); })
+                .onClick(() => { this.chooseWatchTime(this.movieMetadataIndex().get(row.media.id)?.released??'',(at:number)=>{this.markMovieProgress(row.media,at);}); })
             }.width('100%').padding(10).borderRadius(10).backgroundColor($r('app.color.showly_surface'))
           }
           .onVisibleAreaChange([0], (visible: boolean, ratio: number) => { this.viewportChanged(row.media,0,[],visible && ratio > 0,'progress','next'); })
@@ -5713,13 +5737,17 @@ struct Index {
     Column({ space: 12 }) {
       Row({ space: 8 }) {
         Text(this.mediaMode === 'show' ? '剧集进度' : '电影进度').fontSize(25).fontWeight(FontWeight.Bold).layoutWeight(1)
-        Button('同步').fontSize(12).onClick(() => { this.navigate('account'); })
+        Button('同步').fontSize(12).height(32).backgroundColor($r('app.color.showly_muted_surface')).fontColor($r('app.color.showly_text')).onClick(() => { this.navigate('account'); })
       }.width('100%')
       Row({ space: 6 }) {
         this.progressModeButton(this.mediaMode === 'show' ? '下一集' : '待看进度', 'next')
         this.progressModeButton(this.mediaMode === 'show' ? '日历' : '上映日历', 'calendar')
         if (this.mediaMode === 'show') { this.progressModeButton('历史', 'history') }
       }.width('100%')
+      if(this.progressMode==='next'){
+        Button(this.progressWatchMode==='ask'?'观看日期：每次询问':'观看日期：现在').fontSize(12).height(32).backgroundColor($r('app.color.showly_muted_surface')).fontColor($r('app.color.showly_text')).onClick(()=>{this.toggleWatchMode();})
+        if(this.progressOptionStatus){Text(this.progressOptionStatus).fontSize(12).width('100%')}
+      }
     }.width('100%')
   }
 
@@ -5730,67 +5758,6 @@ struct Index {
       if (this.progressMode === 'history' && this.mediaMode === 'show') {
         Text('逐集观看历史尚未实现。现有观看记录不受影响。').fontSize(14).width('100%')
       }
-    }.width('100%')
-  }
-
-  @Builder
-  legacyProgressView() {
-    Column({ space: 12 }) {
-      Text('观看进度').fontSize(25).fontWeight(FontWeight.Bold).width('100%')
-      if (this.canEditLibrary() && this.localRecent.length > 0) {
-        Text('最近本机分集记录').fontSize(18).fontWeight(FontWeight.Medium).width('100%')
-        ForEach(this.localRecent, (item: Media) => {
-          Row() {
-            Text(item.title).layoutWeight(1).fontSize(16)
-            Text('查看 ›').fontSize(13).fontColor($r('app.color.showly_secondary'))
-          }.width('100%').padding(12).backgroundColor($r('app.color.showly_surface')).borderRadius(10)
-            .onClick(() => { this.openDetail(item); })
-        }, (item: Media) => item.id)
-      }
-      Text('Trakt 观看记录').fontSize(14).fontColor($r('app.color.showly_secondary')).width('100%')
-      if (!this.signedIn && !this.cloudBusy) {
-        Text('登录 Trakt 后查看已看剧集与分集进度。').width('100%')
-        Button('连接 Trakt').onClick(() => { this.navigate('account'); })
-      } else {
-        Row({ space: 8 }) {
-          Text('看过的剧集 ' + this.trackingItems().length).fontSize(16).layoutWeight(1)
-          Button(this.cloudBusy ? '读取中…' : '刷新')
-            .enabled(!this.cloudBusy && !this.authBusy && !this.saving && !this.setupBusy)
-            .onClick(() => { this.loadCloud(); })
-        }.width('100%')
-        if (this.cloudStatus) { Text(this.cloudStatus).fontSize(12).width('100%') }
-        if (this.cloud) {
-          TextInput({ placeholder: '筛选剧集', text: this.trackingQuery })
-            .onChange((value: string) => { this.trackingQuery = value; this.trackingPage = 1; })
-          ForEach(this.trackingSlice(), (show: ShowProgress) => {
-            Row({ space: 12 }) {
-              Column({ space: 6 }) {
-                Text(show.title).fontSize(16).fontWeight(FontWeight.Medium).width('100%')
-                Text('已看 ' + show.watchedEpisodes + ' 集 · 点击查看分集')
-                  .fontSize(12).fontColor($r('app.color.showly_secondary')).width('100%')
-              }.layoutWeight(1)
-              Text('›').fontSize(24).fontColor($r('app.color.showly_secondary'))
-            }.padding(14).width('100%').borderRadius(12)
-              .backgroundColor($r('app.color.showly_surface'))
-              .onClick(() => {
-                this.openDetail({ id: show.id, title: show.title, kind: 'show', year: 0, watched: false });
-              })
-          }, (show: ShowProgress) => show.id)
-          Row({ space: 8 }) {
-            Button('上一页').layoutWeight(1).enabled(this.trackingPage > 1)
-              .onClick(() => { this.trackingPage--; })
-            Text(this.trackingPage + ' / ' + this.trackingPages()).fontSize(13)
-            Button('下一页').layoutWeight(1).enabled(this.trackingPage < this.trackingPages())
-              .onClick(() => { this.trackingPage++; })
-          }.width('100%')
-          Text('含已追完的剧集。分季分集状态仅供查看。').fontSize(12).width('100%')
-        }
-        Button('云端导入与管理').onClick(() => { this.navigate('cloud'); })
-      }
-      Divider()
-      Text('本地待看').fontSize(20).fontWeight(FontWeight.Medium).width('100%')
-      Text('待看 ' + this.mediaRecords.filter((record: MediaRecord) => inLocalWatchlist(record)).length + ' 部影视').width('100%')
-      Button('打开收藏').onClick(() => { this.chooseCollection('queue'); this.navigate('library'); })
     }.width('100%')
   }
 
@@ -6668,10 +6635,6 @@ struct Index {
     this.progressBusy=false;
     this.progressStatus = '';
     this.seasonNumber = -1;
-    this.translationBusy = false;
-    this.chineseTitle = '';
-    this.chineseOverview = '';
-    this.translationStatus = '';
     this.selectedMedia = undefined;
     this.detail = undefined;
     this.posterUri = '';
@@ -6737,6 +6700,7 @@ struct Index {
   }
 
   private async changeMediaMode(mode: string): Promise<void> {
+    this.watchSelection.clear();
     if (this.modeBusy || this.selectedMedia || (mode !== 'show' && mode !== 'movie') || mode === this.mediaMode) { return; }
     this.modeBusy = true;
     try {
@@ -6783,6 +6747,7 @@ struct Index {
   }
 
   private navigate(value: string): void {
+    this.watchSelection.clear();
     if (value==='search' || value==='account' || value==='cloud') { this.rememberScroll(); }
     if (this.tab === 'progress' || this.tab === 'discover' || this.tab === 'library') { this.returnTab = this.tab; }
     this.closeDetail();

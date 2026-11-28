@@ -104,14 +104,10 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: experimental-hap-${{ github.sha }}
-          path: harmonyos/entry/build/**/*.hap
-          if-no-files-found: error
-
-      - name: Upload upstream revision
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: upstream-revision
-          path: upstream-revision.txt
+          path: |
+            harmonyos/entry/build/**/*.hap
+            upstream-revision.txt
+          compression-level: 0
           if-no-files-found: error
 
   # Host-only regressions do not depend on HarmonyOS SDK or HAP output.
@@ -159,7 +155,7 @@ jobs:
         run: |
           set -euo pipefail
           gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "experimental-hap-$GITHUB_SHA" --dir "$RUNNER_TEMP/hap-input"
-          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name upstream-revision --dir "$RUNNER_TEMP/upstream-input"
+          test -s "$RUNNER_TEMP/hap-input/upstream-revision.txt"
 
       - name: Validate and prepare unsigned preview
         id: prepare
@@ -169,7 +165,7 @@ jobs:
           python3 harmonyos/tools/prepare_preview_release.py \
             --source "$GITHUB_WORKSPACE" \
             --hap-dir "$RUNNER_TEMP/hap-input" \
-            --upstream "$RUNNER_TEMP/upstream-input/upstream-revision.txt" \
+            --upstream "$RUNNER_TEMP/hap-input/upstream-revision.txt" \
             --output "$RUNNER_TEMP/release" \
             --commit "$GITHUB_SHA" --run "$GITHUB_RUN_ID" >> "$GITHUB_OUTPUT"
 
