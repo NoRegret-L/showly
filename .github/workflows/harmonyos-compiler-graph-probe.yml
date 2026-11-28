@@ -1,0 +1,35 @@
+name: HarmonyOS compatible TypeScript graph probe
+on:
+  push:
+    branches: [harmonyos-bootstrap]
+    paths:
+      - '.github/workflows/harmonyos-compiler-graph-probe.yml'
+      - '.github/ci/ts/graph-bin/**'
+      - '.github/ci/ts/compare_graph.py'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  compare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Install pinned TypeScript
+        run: npm ci --ignore-scripts --no-audit --no-fund --prefix .github/ci/ts
+      - name: Run every independent regression and record compiler inputs
+        run: |
+          set -euo pipefail
+          export SHOWLY_REAL_TSC="$GITHUB_WORKSPACE/.github/ci/ts/node_modules/.bin/tsc"
+          export SHOWLY_GRAPH_CAPTURE="$RUNNER_TEMP/ts-graph"
+          mkdir -p "$SHOWLY_GRAPH_CAPTURE"
+          export PATH="$GITHUB_WORKSPACE/.github/ci/ts/graph-bin:$GITHUB_WORKSPACE/.github/ci/ts/node_modules/.bin:$PATH"
+          python3 harmonyos/tools/run_regressions.py
+      - name: Measure compatible union graphs and verify emitted bytes
+        run: |
+          set -euo pipefail
+          export SHOWLY_REAL_TSC="$GITHUB_WORKSPACE/.github/ci/ts/node_modules/.bin/tsc"
+          export SHOWLY_GRAPH_CAPTURE="$RUNNER_TEMP/ts-graph"
+          python3 .github/ci/ts/compare_graph.py | tee -a "$GITHUB_STEP_SUMMARY"

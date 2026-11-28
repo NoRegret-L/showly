@@ -1,0 +1,18 @@
+#!/usr/bin/env python3
+"""Capture independent compiler inputs and outputs for an isolated graph audit."""
+import json, os, pathlib, re, shutil, subprocess, sys, tempfile
+args=sys.argv[1:]
+real=os.environ["SHOWLY_REAL_TSC"]
+result=subprocess.call([real,*args])
+prefix=["--strict","--target","ES2020","--module","commonjs"]
+roots=args[len(prefix):]
+cwd=pathlib.Path.cwd()
+if result==0 and args[:len(prefix)]==prefix and roots and all(re.fullmatch(r"[A-Za-z0-9_.-]+\.ts",r) for r in roots):
+    sources=sorted(cwd.glob("*.ts"))
+    if sources and all((cwd/r).is_file() for r in roots) and not (cwd/"tsconfig.json").exists():
+        dest=pathlib.Path(tempfile.mkdtemp(dir=os.environ["SHOWLY_GRAPH_CAPTURE"]))
+        (dest/"sources").mkdir();(dest/"outputs").mkdir()
+        for p in sources: shutil.copyfile(p,dest/"sources"/p.name)
+        for p in cwd.glob("*.js"): shutil.copyfile(p,dest/"outputs"/p.name)
+        (dest/"roots.json").write_text(json.dumps(roots))
+sys.exit(result)
