@@ -130,7 +130,12 @@ assert "this.mediaRecords=records" in page
 assert "this.refreshPresentationRows(Array.from(dirty))" in page
 assert "this.discoverRows.refreshDependencies" in page and "this.collectionRowsSource().refreshDependencies" in page
 assert "this.projectionFence.finish(token,success,ids" in store
-assert "this.db.rollBack()" in store and "await this.markBody(intent.showId, [episodeId], value)" in store
+adopt=store.split("  private async adoptRemoteBody(",1)[1].split("\n  async ",1)[0]
+assert "await this.boundAccount() !== uuid" in adopt
+assert "intent.seq !== expectedSeq" in adopt
+assert "await this.markBody(intent.showId, [episodeId], value, '', Date.now());" in adopt
+assert adopt.index("this.db.beginTransaction()") < adopt.index("await this.markBody(") < adopt.index("await this.saveCommonStatesBody(") < adopt.index("this.db.commit()")
+assert "this.db.rollBack()" in adopt
 assert "store.assertProjectionReadable()" in projection and "store.projectionReadable(revision)" in projection
 assert "await store.saveReadCheckpoints(account.uuid, result.matches)" in page
 assert "await readSyncAccount(session)" in page and "await readActivity(session)" in page

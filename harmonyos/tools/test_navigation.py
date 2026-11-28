@@ -48,7 +48,7 @@ assert "const kind = this.mediaMode;" in source
 assert "this.collectionPageGroups()" in source
 assert "this.movieProgressView()" in source
 assert "this.markMovieProgress(row.media,at)" in source
-assert "await this.changeMediaIntent(row.media, 'movie', 'yes')" in source
+assert "await this.changeMediaIntent(row.media, 'movie', 'yes',watchedAt)" in source
 print("Navigation wiring assertions passed")
 
 assert "this.chooseWatchTime(this.movieMetadataIndex().get(row.media.id)?.released??''" in source
