@@ -1357,12 +1357,12 @@ struct Index {
   private onShowsChanged(): void {
     this.displayRevisions.showsChanged();
     const slot=this.scrollSlot();
-    if(!slot||slot==='show'||slot==='calendar'||slot==='library'){this.onPresentationChanged();}
+    if(!slot||slot==='show'||slot==='calendar'||slot==='library'||slot==='discover'||slot==='search'){this.onPresentationChanged();}
   }
   private onMoviesChanged(): void {
     this.displayRevisions.moviesChanged();
     const slot=this.scrollSlot();
-    if(!slot||slot==='movie'||slot==='movieCalendar'||slot==='library'){this.onPresentationChanged();}
+    if(!slot||slot==='movie'||slot==='movieCalendar'||slot==='library'||slot==='discover'||slot==='search'){this.onPresentationChanged();}
   }
   private onCollectionRatingsChanged(): void {
     this.showRatingVersion++;

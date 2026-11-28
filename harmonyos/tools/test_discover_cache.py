@@ -82,10 +82,14 @@ assert "revision === this.discoverRevision && clientId === this.clientId" in pag
 assert "this.discoverOptions === options" in page
 assert "this.discoverOptions.hideCollection && (!this.ready || (this.signedIn && !this.activeCloud()))" in page
 assert "filterDiscover(this.discoverItems,this.discoverOptions,hidden,members,now)" in page
-assert "if (committed && current()) { this.showSummary = summary; }" in page
-assert "if (committed && current()) { this.movieSummary = summary; }" in page
-assert "if (committed && current()) { this.collectionSummary = summary; }" in page
+assert "if (committed && current() && this.showRows.work.publishSummary(summary,this.showSummary)) { this.showSummary = summary; }" in page
+assert "if (committed && current() && this.movieRowsSource.work.publishSummary(summary,this.movieSummary)) { this.movieSummary = summary; }" in page
+assert "if (committed && current() && this.collectionRowsSource.work.publishSummary(summary,this.collectionSummary)) { this.collectionSummary = summary; }" in page
 assert "this.showSummary.key === this.showDisplayKey()" in page
 assert "await store.saveReadCheckpoints(account.uuid, result.matches)" in page
 assert "await readSyncAccount(session)" in page and "await readActivity(session)" in page
 print("Discovery local-first, async summary commit and synchronization wiring passed")
+
+assert "if(!slot||slot==='show'||slot==='calendar'||slot==='library'||slot==='discover'||slot==='search'){this.onPresentationChanged();}" in page
+
+assert "if(!slot||slot==='movie'||slot==='movieCalendar'||slot==='library'||slot==='discover'||slot==='search'){this.onPresentationChanged();}" in page
