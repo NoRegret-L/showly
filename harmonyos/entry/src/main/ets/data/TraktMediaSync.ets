@@ -18,7 +18,7 @@ interface HistoryRemoveBody { ids: number[]; }
 interface Counts { movies?: number; shows?: number; episodes?: number; seasons?: number; }
 interface Missing { movies?: TitleItem[]; }
 interface AddResponse { added?: Counts; not_found?: Missing; }
-export interface TitleSyncResult { message: string; }
+export interface TitleSyncResult { message: string; verified?: boolean; }
 export interface PendingMediaResult { confirmed: number; remaining: number; failed: number; message: string; }
 interface PendingCheck { verified: boolean; message: string; }
 
@@ -138,7 +138,7 @@ export async function syncSelectedMedia(store: MediaStore, binding: EpisodeStore
   if (selected.operation === 'reconcile') {
     if (!prior || prior.state !== 'pending') { throw new Error('Operation changed'); }
     const checked = await confirmPending(store, binding, session, uuid, selected.domain, selected.id, prior);
-    return { message: checked.message };
+    return { message: checked.message, verified: checked.verified };
   }
   const fresh = await buildMediaPreview(binding, session, records, uuid, store);
   const row = fresh.rows.find((item: MediaDifference) => item.id === selected.id && item.domain === selected.domain);
@@ -238,7 +238,7 @@ export async function syncSelectedMedia(store: MediaStore, binding: EpisodeStore
     const pending = await store.latestOperation(uuid, row.domain, row.id);
     if (!pending || pending.seq !== seq || pending.state !== 'pending') { throw new Error('Operation changed'); }
     const result = await confirmPending(store, binding, session, uuid, row.domain, row.id, pending, accepted);
-    if (result.verified) { return { message: result.message }; }
+    if (result.verified) { return { message: result.message, verified: true }; }
     failure = stage + '：云端尚未显示目标状态。' + (failure ? ' ' + failure : '');
   } catch (error) {
     failure = stage + '：' + safeSyncError(error as Error) + (failure ? '；' + failure : '');

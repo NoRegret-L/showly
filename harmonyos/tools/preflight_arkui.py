@@ -24,6 +24,8 @@ if args.sdk:
 errors=[];count=0
 for path in root.rglob("*.ets"):
     source=path.read_text()
+    for n,line in enumerate(source.splitlines(),1):
+        if re.search(r"^\s*for\s*\(\s*(?:const|let|var)\s*\[",line):errors.append(f"{path.name}:{n}: ArkTS destructuring loop declaration")
     if not re.search(r"@Component(?:V2)?\b",source):continue
     count+=1
     for n,line in enumerate(source.splitlines(),1):

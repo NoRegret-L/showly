@@ -1,5 +1,8 @@
 import { readPreparedObservation } from '../data/BackgroundObservation';
 import { SyncStatusPanel } from './SyncStatusPanel';
+import { ManualSyncControls } from './ManualSyncControls';
+import { ManualRunOwner } from '../model/SyncRunState';
+import { readSyncRun, saveSyncRun } from '../data/SyncRunJournal';
 import { syncDirections } from '../model/ManualSync';
 import { actualWatchTime } from '../model/ExportEvidence';
 import { openCustomLists } from '../data/CustomListsRepository';
@@ -606,8 +609,8 @@ struct Index {
   @State @Watch('onRecoveryGateChanged') cloudBusy: boolean = false;
   @State cloudStatus: string = '';
   @State advancedSync: boolean = false;
-  @State manualImport: boolean = true;
-  @State manualExport: boolean = true;
+  private manualImport: boolean = true;
+  private manualExport: boolean = true;
   @State manualRunning: boolean = false;
   @State manualStatus: string = '';
   @State quickSettingsOpen: boolean = false;
@@ -1004,6 +1007,8 @@ struct Index {
     const signal=this.manualSignal, client=this.clientId;
     const session=traktAuth.session(client);
     const store=this.episodeStore;
+    const run=new ManualRunOwner(),directory=this.context().filesDir;
+    const phase=(value:string):void=>{saveSyncRun(directory,run.transition(value,Date.now()));};
     try {
       if (!session || !store) { throw new Error('Session unavailable'); }
       const account=await readSyncAccount(session);
@@ -1019,6 +1024,7 @@ struct Index {
       }
       this.syncAccount=account; this.syncBound=true;
       const scope='account:'+account.uuid;
+      saveSyncRun(directory,run.begin(account.uuid,client,readSyncRun(directory,account.uuid,client),direction.importEnabled?'import-library':'recover',Date.now()));
       if (direction.importEnabled) {
         this.manualStatus='正在导入观看进度与待看列表…';
         await this.loadCloud(false);
@@ -1030,25 +1036,27 @@ struct Index {
         if (!current() || !this.uploadStatus.startsWith('已新增保存')) { throw new Error('Episode import incomplete'); }
         await this.importCloud();
         if (!current() || this.cloudStatus.includes('失败')) { throw new Error('Title import incomplete'); }
-        this.manualStatus='正在核对隐藏与归档…';
+        phase('import-archive'); this.manualStatus='正在核对隐藏与归档…';
         const hidden=await readArchiveObservation(session,account.uuid,signal);
         if(!current()||!this.settings||this.currentProgressScope()!==scope){throw new Error('Archive scope changed');}
         const previous=this.settings.loadCollectionState(scope),archive=await openArchive(this.context());
         const merged=await archive.importObserved(scope,previous,hidden,current);
         if(merged!==previous){await this.settings.saveCollectionState(scope,merged);if(!current()){throw new Error('Archive scope changed');}this.collectionState=merged;this.collectionScope=scope;this.onCollectionStateChanged();this.resetCollection();}
-        this.manualStatus='正在导入自定义列表…';
+        phase('import-lists'); this.manualStatus='正在导入自定义列表…';
         const lists=await openCustomLists(this.context());
         const remoteLists=await readCustomLists(session,account.uuid,signal);
         if (!current()) { throw new Error('Account changed'); }
         await lists.importMapped(scope,remoteLists,current);
-        this.manualStatus='正在导入个人评分…';
+        phase('import-ratings'); this.manualStatus='正在导入个人评分…';
         const repo=await openRatings(this.context());
         await repo.refreshAllVerified(scope,session,current);
         this.collectionRatingKey=''; this.movieRatingKey=''; this.showRatingRequest.reset(); this.movieRatingRequest.reset();
+        if(!current()){throw new Error('Account changed');}
+        phase('import-verified');
         this.projectionPending=true;
       }
       if (direction.exportEnabled) {
-        this.manualStatus='正在处理此前已授权的待同步操作…';
+        phase('recover'); this.manualStatus='正在处理此前已授权的待同步操作…';
         await this.reloadQueue();
         if (!current()) { throw new Error('Account changed'); }
         if (this.queueRows.length) { this.queueConfirm=true; await this.resumeQueued(true); }
@@ -1058,7 +1066,7 @@ struct Index {
         if (!current()) { throw new Error('Account changed'); }
         await this.recoverMediaPending();
         if (!current()) { throw new Error('Account changed'); }
-        this.manualStatus='正在导出有实际观看时间的缺失分集…';
+        phase('export-episodes'); this.manualStatus='正在导出有实际观看时间的缺失分集…';
         const history=await buildSyncPreview(store,session,true);
         if(!current()||history.account.uuid!==account.uuid){throw new Error('Account changed');}
         const eligible=history.rows.filter((row:SyncDifference)=>row.kind==='addition'&&!row.uploadBlocked&&!!actualWatchTime(row.watchedAt));
@@ -1068,39 +1076,42 @@ struct Index {
           completed=result.completedIds.length;
         }
         if(!current()){throw new Error('Account changed');}
-        this.manualStatus='正在核对电影及待看缺失项…';
+        phase('export-media'); this.manualStatus='正在核对电影及待看缺失项…';
         const media=this.mediaStore;let titleChecked=0;
         if(media){
           const preview=await buildMediaPreview(store,session,await media.load(),account.uuid,media);
           const additions=preview.rows.filter((row:MediaDifference)=>row.operation==='add'&&(row.domain==='watchlist'||!!actualWatchTime(row.watchedAt)));
           for(const selected of additions){
             if(!current()){throw new Error('Account changed');}
-            const fresh=await buildMediaPreview(store,session,await media.load(),account.uuid,media);
-            const row=fresh.rows.find((item:MediaDifference)=>item.id===selected.id&&item.domain===selected.domain);
-            if(!row||row.operation!=='add'||row.operationSeq!==selected.operationSeq||row.watchedAt!==selected.watchedAt){continue;}
-            const at=row.domain==='movie'?actualWatchTime(row.watchedAt):new Date().toISOString();
-            if(at){await syncSelectedMedia(media,store,session,fresh,row,at,current);titleChecked++;}
+            // The executor independently refreshes and checks the reviewed baseline,
+            // including operation sequence, actual time, and watchlist membership.
+            const at=selected.domain==='movie'?actualWatchTime(selected.watchedAt):new Date().toISOString();
+            if(at){const result=await syncSelectedMedia(media,store,session,preview,selected,at,current);if(result.verified){titleChecked++;}}
           }
         }
         if(!current()){throw new Error('Account changed');}
-        this.manualStatus='正在同步隐藏归档…';
+        phase('export-archive'); this.manualStatus='正在同步隐藏归档…';
         if(!this.settings||this.currentProgressScope()!==scope||!current()){throw new Error('Archive scope changed');}
         const archive=await openArchive(this.context()),archiveResult=await archive.export(scope,this.settings.loadCollectionState(scope),session,signal,current);
         if(!current()){throw new Error('Account changed');}
-        this.manualStatus='正在同步映射列表的缺失成员…';
+        phase('export-lists'); this.manualStatus='正在同步映射列表的缺失成员…';
         const lists=await openCustomLists(this.context()),listResult=await lists.exportAdditive(scope,session,signal,current);
         if(!current()){throw new Error('Account changed');}
-        this.manualStatus='正在批量核对并导出个人评分…';
+        phase('export-ratings'); this.manualStatus='正在批量核对并导出个人评分…';
         const ratings=await openRatings(this.context());let ratingBlocked=0;
         for(const kind of ['show','movie','season','episode']){ratingBlocked+=await ratings.exportIntents(scope,kind,session,current);}
+        if(!current()){throw new Error('Account changed');}
+        phase('export-reviewed');
         this.manualStatus=(direction.importEnabled?'四类导入已核对；':'')+'分集回读 '+completed+'/'+eligible.length+'，影视核对 '+titleChecked+'，归档确认 '+archiveResult.confirmed+'，归档待核对 '+archiveResult.blocked+'，列表新增 '+listResult.created+' 个、成员 '+listResult.added+' 项，列表待核对 '+listResult.blocked+'，评分待核对 '+ratingBlocked+'。未核对项目保留，非完整双向同步。';
         this.observationPending=true;
       } else {
         this.manualStatus='观看进度、待看、隐藏归档、自定义列表与评分导入已核对。';
       }
     } catch (error) {
+      if(run.active()){try{phase('interrupted');}catch(failure){}}
       this.manualStatus='同步未全部完成；已有记录与保护凭证保留。请重试读取或查看高级管理。';
     } finally {
+      run.end();
       try{releaseSyncLease(operation);}finally{this.manualRunning=false;this.onRecoveryGateChanged();}
     }
   }
@@ -7349,17 +7360,10 @@ struct Index {
       if (this.manualRunning || this.syncBusy || this.cloudBusy) {
         LoadingProgress().width(36).height(36)
       } else {
-        Row({space:8}) {
-          Checkbox({name:'sync-import',group:'sync-direction'}).select(this.manualImport).onChange((v:boolean)=>{this.manualImport=v;})
-          Text('从 Trakt.tv 导入到 Showly').fontSize(14).onClick(()=>{this.manualImport=!this.manualImport;})
-        }.width('100%')
-        Row({space:8}) {
-          Checkbox({name:'sync-export',group:'sync-direction'}).select(this.manualExport).onChange((v:boolean)=>{this.manualExport=v;})
-          Text('从 Showly 导出到 Trakt.tv').fontSize(14).onClick(()=>{this.manualExport=!this.manualExport;})
-        }.width('100%')
-        Button(!this.signedIn?'Trakt.tv 授权':'立即同步').width('72%')
-          .enabled(!this.syncPageBusy()&&!!this.clientId&&(!this.signedIn||!!syncDirections(this.manualImport,this.manualExport)))
-          .onClick(()=>{if(!this.signedIn){this.beginSyncLogin();}else{this.runManualSync();}})
+        ManualSyncControls({initialImport:this.manualImport,initialExport:this.manualExport,signedIn:this.signedIn,
+          available:!this.syncPageBusy()&&!!this.clientId,
+          onDirection:(i:boolean,e:boolean)=>{this.manualImport=i;this.manualExport=e;},
+          onStart:()=>{if(!this.signedIn){this.beginSyncLogin();}else{this.runManualSync();}}})
         if (!this.signedIn && this.hasAccount()) {
           Text('授权需要恢复。').fontSize(12)
           Text('重试恢复登录').fontSize(13).fontColor($r('app.color.showly_accent')).onClick(()=>{traktAuth.restore(this.clientId,true);})

@@ -47,8 +47,12 @@ def group_compile(projects):
                 for p in g["projects"]: (p/"fallback").touch()
             for p in g["projects"]: (p/"done").touch()
 assert len(suite.TESTS)==34 and len(set(suite.TESTS))==34
+SPECIALISTS=["test_custom_lists.py","test_statistics.py","test_list_persistence.py","test_ratings.py","test_people.py","test_availability.py","test_comments.py","test_gallery.py","test_sync_coordinator.py","test_observation_delta.py","test_sync_batch_index.py","test_sync_schedule.py","test_background_observation.py","test_startup_read_state.py","test_manual_sync.py","test_export_evidence.py","test_sync_merge_batch.py","test_sync_metadata_archive.py","test_archive_sync.py","test_sync_run_state.py"]
+specialists_mode='--specialists' in sys.argv[1:]
+tests=SPECIALISTS if specialists_mode else suite.TESTS
+assert len(set(tests))==len(tests)
 try:
-    for name in suite.TESTS:
+    for name in tests:
         env=os.environ.copy();env["SHOWLY_ONEPASS_TEST"]=name
         env["PATH"]=str(here/"onepass-bin")+os.pathsep+env["PATH"]
         log=queue/(name+".log");logs[name]=log
@@ -66,13 +70,13 @@ try:
             group_compile(pending);handled.update(pending)
         elif active: time.sleep(0.05)
     failures=[]
-    for name in suite.TESTS:
+    for name in tests:
         code,elapsed=finished[name]
         print(f"--- {name} {elapsed:.3f}s exit={code} ---\n{logs[name].read_text()}",flush=True)
         if code: failures.append(name)
-    print(f"{34-len(failures)}/34 passed in {time.monotonic()-start:.3f}s; failures={failures}",flush=True)
+    print(f"{len(tests)-len(failures)}/{len(tests)} passed in {time.monotonic()-start:.3f}s; failures={failures}",flush=True)
     print(f"onepass_groups={groups_count} onepass_shared_projects={hits} captured_projects={len(handled)}",flush=True)
-    sys.exit(int(bool(failures) or hits==0))
+    sys.exit(int(bool(failures) or (not specialists_mode and hits==0)))
 finally:
     for p in processes.values():
         if p.poll() is None:p.terminate()

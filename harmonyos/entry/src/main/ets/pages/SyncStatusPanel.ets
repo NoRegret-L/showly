@@ -1,3 +1,5 @@
+import { readSyncRun } from '../data/SyncRunJournal';
+import { SyncRunRecord, runPhaseLabel } from '../model/SyncRunState';
 import { backgroundReadInfo } from '../data/BackgroundObservation';
 import { common } from '@kit.AbilityKit';
 import { scheduledHours, setScheduledHours, lastScheduleWake, SYNC_PERIODS } from '../data/SyncSchedule';
@@ -18,6 +20,7 @@ export struct SyncStatusPanel {
   @State backgroundEnabled: boolean = false;
   @State backgroundExpiry: number = 0;
   @State backgroundVerified: number = 0;
+  @State runStatus?: SyncRunRecord;
   @State hours: number = 0;
   @State wake: number = 0;
   @State scheduleStatus: string = '';
@@ -28,6 +31,7 @@ export struct SyncStatusPanel {
       this.hours = await scheduledHours();
       const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
       this.wake = lastScheduleWake(context.filesDir);
+      this.runStatus=readSyncRun(context.filesDir,this.uuid,this.clientId);
       const info=backgroundReadInfo(context.filesDir,this.uuid,this.clientId);
       this.backgroundEnabled=info.enabled;this.backgroundExpiry=info.expiresAt;this.backgroundVerified=info.verifiedAt;
     } catch (error) { this.scheduleStatus = '系统调度状态不可用'; }
@@ -62,6 +66,10 @@ export struct SyncStatusPanel {
           }));
           this.getUIContext().showActionSheet({title:'定时同步时间',message:'实际执行由系统决定；后台只读需单独授权。',autoCancel:true,sheets:choices});
         })
+      if(this.bound&&this.runStatus&&this.runStatus.uuid===this.uuid&&this.runStatus.clientId===this.clientId){
+        Text(runPhaseLabel(this.runStatus.phase)).fontSize(13).width('100%')
+        if(this.runStatus.lastImportAt>0){Text('最近核对成功的导入：'+new Date(this.runStatus.lastImportAt).toLocaleString()).fontSize(12).width('100%')}
+      }
       if(this.lastVerified>0){Text('上次云端核对：'+new Date(this.lastVerified).toLocaleString()).fontSize(12).textAlign(TextAlign.Center)}
       if(this.scheduleStatus){Text(this.scheduleStatus).fontSize(12).textAlign(TextAlign.Center)}
       if(this.details){
