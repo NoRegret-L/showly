@@ -16,6 +16,7 @@ interface TraktIds {
 }
 interface Images {
   poster?: string[];
+  fanart?: string[];
 }
 interface Summary {
   title: string;
@@ -42,6 +43,7 @@ export interface MediaDetail {
   genres: string;
   airedEpisodes: number;
   posterUrls: string[];
+  fanartUrls?: string[];
   collection?: CollectionMeta;
 }
 let posterWriteSequence: number = 0;
@@ -108,7 +110,8 @@ async function fetchDetails(item: Media, clientId: string, key: string, epoch: n
         rating: typeof data.rating === 'number' && Number.isFinite(data.rating) && data.rating >= 0 && data.rating <= 10 ? data.rating : undefined,
         runtime: typeof data.runtime === 'number' && Number.isFinite(data.runtime) && data.runtime >= 0 ? data.runtime : undefined },
       airedEpisodes: typeof data.aired_episodes === 'number' ? data.aired_episodes : 0,
-      posterUrls: Array.isArray(poster) ? poster.filter((value: string) => typeof value === 'string' && value.length > 0) : []
+      posterUrls: Array.isArray(poster) ? poster.filter((value: string) => typeof value === 'string' && value.length > 0) : [],
+      fanartUrls: Array.isArray(data.images?.fanart) ? data.images?.fanart?.filter((value: string) => typeof value === 'string' && value.length > 0) : []
     };
     if (epoch === summaryEpoch) { summaries.set(key, result); }
     return result;
@@ -189,8 +192,8 @@ function networkError(code: number): string {
 // consumer. A fresh verified download atomically replaces it.
 const rejectedPosterUris: Set<string>=new Set<string>();
 export function rejectPosterUri(uri: string): void { if (uri) { rejectedPosterUris.add(uri); } }
-export async function posterPath(cacheDir: string,item: Media,url: string): Promise<string> {
-  const key=artworkIdentity('trakt','poster',item.id,url);
+export async function posterPath(cacheDir: string,item: Media,url: string,type:string='poster'): Promise<string> {
+  const key=type==='poster'?artworkIdentity('trakt','poster',item.id,url):artworkIdentity('trakt','fanart',item.id,url);
   // normalizePoster accepts ASCII paths and authority; encode UTF-8 explicitly
   // for query strings as well, without storing signed URLs in file names.
   const data=new util.TextEncoder().encodeInto(key);
@@ -237,12 +240,12 @@ export async function cachedPoster(cacheDir: string, item: Media, candidates: st
   }
   return '';
 }
-export async function cachePoster(cacheDir: string, item: Media, candidates: string[], consumer?: ReadCancel): Promise<PosterResult> {
+export async function cachePoster(cacheDir: string, item: Media, candidates: string[], consumer?: ReadCancel,type:string='poster'): Promise<PosterResult> {
   const selected=candidates.map((candidate: string)=>normalizePoster(candidate)).find((url: string)=>!!url)??'';
-  const key=JSON.stringify([cacheDir,artworkIdentity('trakt','poster',item.id,selected),selected?'':candidates[0]??'']);
-  return posterFlights.run(key,(scope: ReadCancel)=>downloadPoster(cacheDir,item,candidates,scope),consumer);
+  const key=JSON.stringify([cacheDir,artworkIdentity('trakt',type,item.id,selected),selected?'':candidates[0]??'']);
+  return posterFlights.run(key,(scope: ReadCancel)=>downloadPoster(cacheDir,item,candidates,scope,type),consumer);
 }
-async function downloadPoster(cacheDir: string, item: Media, candidates: string[], scope: ReadCancel): Promise<PosterResult> {
+async function downloadPoster(cacheDir: string, item: Media, candidates: string[], scope: ReadCancel,type:string): Promise<PosterResult> {
   if (!canReadDetails(item) || candidates.length === 0) {
     return { uri: '', status: 'Trakt API 未返回海报地址（images.poster 为空）' };
   }
@@ -258,7 +261,7 @@ async function downloadPoster(cacheDir: string, item: Media, candidates: string[
     return { uri: '', status: '海报地址未通过安全校验 · ' + rejectedPosterHint(candidates[0]) };
   }
   const host = url.substring(8, url.indexOf('/', 8));
-  const path=await posterPath(cacheDir,item,url);
+  const path=await posterPath(cacheDir,item,url,type);
   if (await validPosterFile(path,scope)) {
     return { uri:fileUri.getUriFromPath(path),status:'海报来自本地缓存 · '+host };
   }

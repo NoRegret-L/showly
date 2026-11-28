@@ -15,6 +15,7 @@ jobs:
       matrix:
         cache: ['false','true']
     steps:
+      # Second run measures restore of the cache seeded by the previous benchmark.
       - name: Start SDK timer
         run: date +%s > "$RUNNER_TEMP/sdk-start"
       - name: Set up pinned SDK

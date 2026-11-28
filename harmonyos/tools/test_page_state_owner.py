@@ -16,10 +16,15 @@ interface IDataSource { totalCount():number; getData(i:number):unknown; register
 const assert=require('node:assert/strict');
 const {PageStateOwner,PageWorkSet,PageSortJobs}=require('./PageStateOwner');
 const {planListDiff}=require('./ListDiff');
-const {CollectionViewOwner,COLLECTION_NETWORK_GROUPS,COLLECTION_GENRES,toggleCollectionSelection,CollectionDependencyVersions,CollectionMetadataVersions,CollectionRatingRequest,CollectionRecoveryOwner,COLLECTION_RECENT_AMOUNTS,validCollectionRecentAmount,collectionEmptyText}=require('./CollectionViewOwner');
+const {CollectionViewOwner,COLLECTION_NETWORK_GROUPS,COLLECTION_GENRES,toggleCollectionSelection,CollectionDependencyVersions,CollectionMetadataVersions,CollectionRatingRequest,CollectionRecoveryOwner,emptyCollectionUi,collectionUiNext,collectionSpoilerText,COLLECTION_RECENT_AMOUNTS,validCollectionRecentAmount,collectionEmptyText}=require('./CollectionViewOwner');
 const {ConsumerReadFlight}=require('./ReadFlight');
 (async()=>{
  for(const size of [393,10000]){
+  const ui=emptyCollectionUi();assert.strictEqual(collectionUiNext(ui,ui.recent,false,'',false),ui);
+  const changedUi=collectionUiNext(ui,ui.recent,false,'error',true);assert.equal(changedUi.revision,1);assert.equal(ui.error,'');
+  assert.equal(collectionSpoilerText('a b',true,false),'• •');
+  assert.equal(collectionSpoilerText('8.1',true,false,true),'•.•');
+  assert.equal(collectionSpoilerText('8.1',true,true,true),'8.1');
   const showRecovery=new CollectionRecoveryOwner(),movieRecovery=new CollectionRecoveryOwner();
   showRecovery.activate('A:show');movieRecovery.activate('A:movie');
   for(let i=0;i<100;i++){
@@ -220,7 +225,7 @@ assert "this.releaseCollectionOwner(this.mediaMode==='movie'?'show':'movie')" in
 assert "this.captureCollectionView();" in page and "this.restoreCollectionView();" in page
 assert "COLLECTION_NETWORK_GROUPS" in page and "COLLECTION_GENRES" in page
 assert "if(this.collectionSearchOpen || this.collectionQuery.length>0)" in page
-assert "this.posterImage(row.media,80,120)" in page
+assert "ratio:16/9" in page and "this.recentFanartVisible(" in page
 
 assert "this.collectionDependencies.observe(" in page
 assert "this.collectionMetadata.changed(row.id,prior?.collection,row.collection)" in page
@@ -239,7 +244,7 @@ assert "this.showRatingRequest.finish(ticket)" in page and "this.movieRatingRequ
 collection_view=page.split("  collectionView() {",1)[1].split("  collectionSortButton(",1)[0]
 assert "this.recentCollectionRows()" not in collection_view
 assert "this.personalLibrary()" not in collection_view
-assert "ForEach(this.collectionRecentRows," in collection_view
+assert "ForEach(this.collectionUi.recent," in collection_view
 assert "this.publishCollectionHeader();" in page
 assert "this.updateLazyRows().catch(" in page
 sort=page.split("  private async runCollectionSort(",1)[1].split("  private collectionEntries()",1)[0]
@@ -265,3 +270,9 @@ assert "this.collectionRecoveryScope()!==scope" in page
 assert "prepared.slice(i,i+step)" in page
 assert "this.collectionStatusLabel()" in page
 assert "LoadingProgress().width(24).height(24)" in page
+
+assert "this.collectionUi:CollectionUiSnapshot" not in page # state is declared without this
+assert "@State collectionUi:CollectionUiSnapshot" in page
+assert "this.collectionRecoveryScope()===scope" in page
+assert "signal,'fanart'" in page
+assert "this.collectionSpoilerDetails(row.media)" in page

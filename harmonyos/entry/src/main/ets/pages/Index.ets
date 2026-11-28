@@ -1,4 +1,4 @@
-import { CollectionViewOwner, CollectionNetworkGroup, CollectionGenreOption, COLLECTION_NETWORK_GROUPS, COLLECTION_GENRES, toggleCollectionSelection, COLLECTION_RECENT_AMOUNTS, CollectionDependencyVersions, CollectionMetadataVersions, CollectionRatingRequest, CollectionRecoveryOwner, collectionEmptyText } from '../model/CollectionViewOwner';
+import { CollectionViewOwner, CollectionNetworkGroup, CollectionGenreOption, COLLECTION_NETWORK_GROUPS, COLLECTION_GENRES, toggleCollectionSelection, COLLECTION_RECENT_AMOUNTS, CollectionDependencyVersions, CollectionMetadataVersions, CollectionRatingRequest, CollectionRecoveryOwner, CollectionUiSnapshot, emptyCollectionUi, collectionUiNext, CollectionSpoilers, defaultCollectionSpoilers, collectionSpoilerText, collectionEmptyText } from '../model/CollectionViewOwner';
 import { StableDisplayOrder, StableOrderChange } from '../model/StableDisplayOrder';
 import { PageStateOwner, PageWork, PageWorkSet, PageSortJobs, PageSummary } from '../model/PageStateOwner';
 import { ProgressTitleOrder } from '../model/ProgressTitleOrder';
@@ -60,7 +60,7 @@ import { LibraryProjection, LibraryProjectionSession, projectDetail } from '../d
 import { allowLocalScope } from '../model/EffectiveState';
 import { hasTrackingEvidence } from '../model/PersonalLibrary';
 import { CollectionGroup, GroupEntry, normalizeMode, progressTabs, collectionRows, pageGroups } from '../model/NavigationModel';
-import { MediaDetail, canReadDetails, readDetails, clearDetailMemory } from '../data/TraktDetails';
+import { MediaDetail, canReadDetails, readDetails, clearDetailMemory, cachePoster, rejectPosterUri } from '../data/TraktDetails';
 import { DiscoverItem, DiscoverOptions, DiscoverFeed, DiscoverPage, defaultDiscover, validDiscoverOptions, discoverRequest, discoverKey, discoverFresh, filterDiscover, discoverPage, DISCOVER_GENRES, DISCOVER_NETWORKS } from '../model/DiscoverRules';
 import { DiscoverRead } from '../model/DiscoverRead';
 import { openDiscover } from '../data/DiscoverRepository';
@@ -170,15 +170,50 @@ struct Index {
   @State showSummary: PageSummary = {key:'',total:0,page:1,pages:1};
   @State movieSummary: PageSummary = {key:'',total:0,page:1,pages:1};
   @State collectionSummary: PageSummary = {key:'',total:0,page:1,pages:1};
-  @State collectionRecentRows:PersonalLibraryRow[]=[];
-  @State collectionHasOther:boolean=false;
-  @State collectionRenderError:string='';
+  @State collectionUi:CollectionUiSnapshot=emptyCollectionUi();
+  @State collectionSpoilers:CollectionSpoilers=defaultCollectionSpoilers();
+  @State collectionRevealed:string[]=[];
+  @State collectionFanart:Map<string,string>=new Map<string,string>();
+  private fanartTasks:Map<string,ReadCancel>=new Map<string,ReadCancel>();
+  private fanartAttempted:Set<string>=new Set<string>();
   private showCollectionRecovery:CollectionRecoveryOwner=new CollectionRecoveryOwner();
   private movieCollectionRecovery:CollectionRecoveryOwner=new CollectionRecoveryOwner();
   private collectionStage:string='初始化';
   private collectionRecovery():CollectionRecoveryOwner{return this.mediaMode==='movie'?this.movieCollectionRecovery:this.showCollectionRecovery;}
+  private clearCollectionFanart():void{
+    for(const signal of this.fanartTasks.values()){signal.cancel();}
+    this.fanartTasks.clear();this.fanartAttempted.clear();
+    if(this.collectionFanart.size){this.collectionFanart=new Map<string,string>();}
+  }
+  private async recentFanartVisible(item:Media,visible:boolean):Promise<void>{
+    if(!visible){const task=this.fanartTasks.get(item.id);if(task){task.cancel();this.fanartTasks.delete(item.id);}return;}
+    if(!this.pageVisible||this.tab!=='library'||this.selectedMedia||item.kind!==this.mediaMode||!this.clientId||
+      this.collectionFanart.has(item.id)||this.fanartTasks.has(item.id)||this.fanartAttempted.has(item.id)){return;}
+    const scope=this.collectionRecoveryScope(),client=this.clientId,signal=new ReadCancel();
+    this.fanartTasks.set(item.id,signal);
+    try{
+      const detail=await readDetails(item,client,false,signal);
+      signal.check();
+      const urls=detail.fanartUrls??[];
+      if(!urls.length){this.fanartAttempted.add(item.id);return;}
+      const result=await cachePoster(this.context().cacheDir,item,urls,signal,'fanart');
+      signal.check();
+      if(this.pageVisible&&this.tab==='library'&&!this.selectedMedia&&this.collectionRecoveryScope()===scope&&this.clientId===client){
+        this.fanartAttempted.add(item.id);
+        if(result.uri){const next=new Map<string,string>(this.collectionFanart);next.set(item.id,result.uri);this.collectionFanart=next;}
+      }
+    }catch(error){/* Optional public artwork never blocks collection loading. */}
+    finally{if(this.fanartTasks.get(item.id)===signal){this.fanartTasks.delete(item.id);}}
+  }
+  private recentFanartFailed(item:Media,uri:string):void{
+    if(this.collectionFanart.get(item.id)!==uri){return;}
+    rejectPosterUri(uri);const next=new Map<string,string>(this.collectionFanart);next.delete(item.id);this.collectionFanart=next;
+  }
   private collectionRecoveryScope():string{return JSON.stringify([this.currentProgressScope(),this.viewScope()]);}
-  @State collectionRetryBusy:boolean=false;
+  private publishCollectionUi(recent:PersonalLibraryRow[],other:boolean,error:string,retrying:boolean):void{
+    const next=collectionUiNext(this.collectionUi,recent,other,error,retrying);
+    if(next!==this.collectionUi){this.collectionUi=next;}
+  }
   private showTitleRevision: number = 0;
   private movieTitleRevision: number = 0;
   private showMetaRevision: number = 0;
@@ -485,9 +520,7 @@ struct Index {
   private clearCollectionOwners():void{this.releaseCollectionOwner('show');this.releaseCollectionOwner('movie');this.clearCollectionHeader();}
   private clearCollectionHeader():void{
     this.showCollectionRecovery.clear();this.movieCollectionRecovery.clear();
-    if(this.collectionRecentRows.length){this.collectionRecentRows=[];}
-    if(this.collectionHasOther){this.collectionHasOther=false;}
-    if(this.collectionRenderError){this.collectionRenderError='';}
+    this.collectionUi=emptyCollectionUi();this.collectionRevealed=[];this.clearCollectionFanart();
   }
   private publishCollectionHeader():void{
     const key=JSON.stringify([this.currentProgressScope(),this.mediaMode,this.collectionDependencies.source(this.mediaMode),this.collectionDependencies.business(this.mediaMode),this.collectionRecentAmount,this.collectionScope]);
@@ -497,21 +530,20 @@ struct Index {
     const recent=this.recentCollectionRows();
     const other=collectionRows(rows,this.mediaMode,'other').length>0;
     owner.publishHeader(key);
-    this.collectionRecentRows=recent;
-    if(this.collectionHasOther!==other){this.collectionHasOther=other;}
+    this.publishCollectionUi(recent,other,this.collectionUi.error,this.collectionUi.retrying);
   }
   private reportCollectionFailure(key:string,stage:string,error?:Error):void{
     const detail=error?.message??'';
     const message='收藏加载失败（'+stage+'）'+(detail?'：'+detail:'')+'；观看记录未修改。';
     this.collectionRecovery().fail(key,message);
-    this.collectionRenderError=message;
+    this.publishCollectionUi(this.collectionUi.recent,this.collectionUi.other,message,this.collectionUi.retrying);
   }
   private async retryCollectionDisplay():Promise<void>{
-    if(this.collectionRetryBusy||this.tab!=='library'){return;}
+    if(this.collectionUi.retrying||this.tab!=='library'){return;}
     const owner=this.collectionRecovery(),scope=this.collectionRecoveryScope();
     owner.activate(scope);
     const token=owner.beginRetry(scope);if(!token){return;}
-    this.collectionRetryBusy=true;
+    this.publishCollectionUi(this.collectionUi.recent,this.collectionUi.other,this.collectionUi.error,true);
     try{
       await Promise.resolve();
       if(this.tab!=='library'||!this.pageVisible||this.collectionRecovery()!==owner||
@@ -519,13 +551,13 @@ struct Index {
       this.collectionStage='重试缓存清理';
       this.collectionItemsMemo().clear();this.collectionTitleOrder().clear();this.recentCollectionMemo().clear();
       if(!owner.requestFull(scope,token)){return;}
-      this.collectionRenderError='';
+      this.publishCollectionUi(this.collectionUi.recent,this.collectionUi.other,'',this.collectionUi.retrying);
       this.requestPresentation();
     }catch(error){
       if(owner.current(scope,token)&&this.collectionRecovery()===owner&&this.collectionRecoveryScope()===scope){
         this.reportCollectionFailure(this.collectionSortKey(),this.collectionStage,error as Error);
       }
-    }finally{owner.finishRetry(scope,token);this.collectionRetryBusy=false;}
+    }finally{if(owner.finishRetry(scope,token)&&this.collectionRecovery()===owner&&this.collectionRecoveryScope()===scope){this.publishCollectionUi(this.collectionUi.recent,this.collectionUi.other,this.collectionUi.error,false);}}
   }
   private searchHistoryGeneration: SearchGeneration = new SearchGeneration();
   @State libraryStatus: string = '';
@@ -1754,6 +1786,7 @@ struct Index {
     },0);
   }
   private releaseInactiveCaches(pressure: boolean): void {
+    if(pressure||!this.pageVisible||this.tab!=='library'||this.selectedMedia){this.clearCollectionFanart();}
     const residency=cacheResidency(this.pageVisible,this.tab,this.mediaMode,this.progressMode,!!this.selectedMedia);
     const generation=this.cacheLifecycle.generation();
     const scope=residency.search ? this.currentSearchAccount() : '';
@@ -1895,7 +1928,7 @@ struct Index {
       const committed = await this.collectionRowsSource().submit(rows, rows.map((group: CollectionGroup) => group.key),
         rows.map((group: CollectionGroup) => this.collectionGroupKey(group)),differ,current);
       if (committed && current() && this.collectionRowsSource().work.publishSummary(summary,this.collectionSummary)) { this.collectionSummary = summary; }
-      if (committed && current()) { recovery.published();this.collectionRenderError='';this.restoreScroll('library'); }
+      if (committed && current()) { recovery.published();this.publishCollectionUi(this.collectionUi.recent,this.collectionUi.other,'',this.collectionUi.retrying);this.restoreScroll('library'); }
       return;
     }
     if (this.tab !== 'progress' || this.progressMode !== 'next') { return; }
@@ -1935,7 +1968,7 @@ struct Index {
   }
 
   private collectionGroupKey(group: CollectionGroup): string {
-    return group.key + ':' + this.collectionGrid + ':' + group.rows.map((row: PersonalLibraryRow) => this.movieRowKey(row) + ':' + this.isHidden(row.media)).join(',');
+    return group.key + ':' + this.collectionGrid + ':' + group.rows.map((row: PersonalLibraryRow) => this.movieRowKey(row) + ':' + this.isHidden(row.media)+':'+this.collectionDescription(row.media)+':'+this.collectionRatingText(row.media)).join(',');
   }
 
   private movieRowKey(row: PersonalLibraryRow): string {
@@ -5763,7 +5796,7 @@ struct Index {
 
   private async refreshPage(): Promise<void> {
     this.candidateFailureKey='';
-    if(this.tab==='library'){this.collectionRecovery().refresh();this.collectionRenderError='';}
+    if(this.tab==='library'){this.collectionRecovery().refresh();this.publishCollectionUi(this.collectionUi.recent,this.collectionUi.other,'',this.collectionUi.retrying);}
     if (this.tab === 'library' || (this.tab==='progress' && this.mediaMode==='show' && this.progressPrefs.sort==='userRating')) { this.showRatingRequest.reset();this.collectionRatingStatus='';this.collectionRatingKey = ''; this.collectionRatings = []; }
     if (this.mediaMode === 'movie') {
       this.movieRatingRequest.reset();this.movieCollectionRatingStatus='';
@@ -5910,8 +5943,42 @@ struct Index {
     if (!this.settings || this.collectionOptionKey === key || !['mine','queue','hidden'].includes(this.collectionFilter)) { return; }
     this.collectionOptionKey = key;
     this.collectionOptions = this.settings.loadCollectionOptions(this.mediaMode,this.collectionFilter);
+    this.collectionSpoilers=this.settings.loadCollectionSpoilers(this.mediaMode,this.collectionFilter);this.collectionRevealed=[];
     this.collectionGenreDraft = this.collectionOptions.genres.join(',');
     this.collectionNetworkDraft = this.collectionOptions.networks.join(',');
+  }
+  private async editCollectionSpoilers(field:string):Promise<void>{
+    const settings=this.settings,kind=this.mediaMode,section=this.collectionFilter,scope=this.collectionRecoveryScope();
+    if(!settings){return;}
+    const old=this.collectionSpoilers;
+    const next:CollectionSpoilers={description:field==='description'?!old.description:old.description,rating:field==='rating'?!old.rating:old.rating,reveal:field==='reveal'?!old.reveal:old.reveal};
+    try{
+      await settings.saveCollectionSpoilers(kind,section,next);
+      if(scope===this.collectionRecoveryScope()){this.collectionSpoilers=next;this.collectionRevealed=[];this.requestPresentation(false);}
+    }catch(error){this.collectionRuleStatus='剧透保护设置保存失败。';}
+  }
+  private revealCollection(id:string,field:string):void{
+    const key=id+':'+field;
+    if(this.collectionSpoilers.reveal&&!this.collectionRevealed.includes(key)){
+      this.collectionRevealed=[...this.collectionRevealed,key];this.requestPresentation(false);
+    }
+  }
+  private collectionDescription(item:Media):string{
+    const text=this.titleIndex.get(item.id)?.text.overview??'';
+    return collectionSpoilerText(text,this.collectionSpoilers.description,this.collectionRevealed.includes(item.id+':description'));
+  }
+  private collectionRatingText(item:Media):string{
+    const rating=this.titleIndex.get(item.id)?.collection?.rating;
+    return rating===undefined?'':collectionSpoilerText(rating.toFixed(1),this.collectionSpoilers.rating,this.collectionRevealed.includes(item.id+':rating'),true);
+  }
+  @Builder
+  collectionSpoilerDetails(item:Media){
+    if(this.collectionRatingText(item)){
+      Text(this.collectionRatingText(item)).fontSize(12).fontColor($r('app.color.showly_secondary')).onClick(()=>{this.revealCollection(item.id,'rating');})
+    }
+    if(this.collectionDescription(item)){
+      Text(this.collectionDescription(item)).fontSize(12).maxLines(3).textOverflow({overflow:TextOverflow.Ellipsis}).width('100%').onClick(()=>{this.revealCollection(item.id,'description');})
+    }
   }
   private async toggleCollectionGenre(slug:string):Promise<void>{
     await this.editCollectionOptions('genre',toggleCollectionSelection(this.collectionOptions.genres,[slug]).join(','));
@@ -6231,7 +6298,7 @@ struct Index {
         this.collectionFilterButton(this.mediaMode === 'show' ? '我的剧集' : '我的电影', 'mine')
         this.collectionFilterButton('待看', 'queue')
         this.collectionFilterButton('隐藏', 'hidden')
-        if (this.collectionHasOther) {
+        if (this.collectionUi.other) {
           this.collectionFilterButton('其他', 'other')
         }
       }.width('100%')
@@ -6255,20 +6322,24 @@ struct Index {
         }.width('100%')
       }
       if (this.collectionFilter === 'hidden') { Text('仅本机隐藏，不删除历史、不写入 Trakt。').fontSize(12).width('100%') }
-      if (this.presentationRevision>=0 && this.collectionFilter === 'mine' && this.collectionPage === 1 && !this.collectionQuery.trim() && this.collectionRecentRows.length) {
+      if (this.presentationRevision>=0 && this.collectionFilter === 'mine' && this.collectionPage === 1 && !this.collectionQuery.trim() && this.collectionUi.recent.length) {
         Text('最近添加（已记录时间）').fontSize(17).fontWeight(FontWeight.Medium).width('100%')
         Flex({wrap:FlexWrap.Wrap,justifyContent:FlexAlign.SpaceBetween}){
-          ForEach(this.collectionRecentRows, (row: PersonalLibraryRow) => {
-            Row({space:8}){
-              this.posterImage(row.media,80,120)
-              Text(this.displayTitle(row.media)).fontSize(13).maxLines(3).layoutWeight(1)
+          ForEach(this.collectionUi.recent, (row: PersonalLibraryRow) => {
+            Column({space:4}){
+              if(this.collectionFanart.get(row.media.id)){
+                ArtworkImage({uri:this.collectionFanart.get(row.media.id)??'',widthValue:'100%',ratio:16/9,corner:8,onFailure:(uri:string)=>{this.recentFanartFailed(row.media,uri);}})
+              }else{
+                Column(){Text('背景图').fontSize(12).fontColor($r('app.color.showly_secondary'))}.width('100%').aspectRatio(16/9).justifyContent(FlexAlign.Center).backgroundColor($r('app.color.showly_placeholder')).borderRadius(8)
+              }
+              Text(this.displayTitle(row.media)).fontSize(13).maxLines(2).width('100%')
             }.width('48%').padding({bottom:8}).onClick(()=>{this.openDetail(row.media);})
-              .onVisibleAreaChange([0], (visible: boolean, ratio: number) => { this.viewportChanged(row.media,0,[],visible && ratio > 0,'library','','recent:' + row.media.id); })
-          }, (row: PersonalLibraryRow) => 'recent:' + row.media.id + ':' + this.displayTitle(row.media)+':'+this.artwork(row.media))
+              .onVisibleAreaChange([0], (visible: boolean, ratio: number) => { this.viewportChanged(row.media,0,[],visible && ratio > 0,'library','','recent:' + row.media.id);this.recentFanartVisible(row.media,visible&&ratio>0); })
+          }, (row: PersonalLibraryRow) => 'recent:' + row.media.id + ':' + this.displayTitle(row.media)+':'+(this.collectionFanart.get(row.media.id)??''))
         }.width('100%')
       }
-      if(this.collectionRenderError){
-        Row({space:8}){Text(this.collectionRenderError).fontSize(12).layoutWeight(1);Button(this.collectionRetryBusy?'重试中…':'重试').fontSize(12).height(32).backgroundColor($r('app.color.showly_accent')).fontColor($r('app.color.showly_on_accent')).enabled(!this.collectionRetryBusy).onClick(()=>{this.retryCollectionDisplay();})}.width('100%')
+      if(this.collectionUi.error){
+        Row({space:8}){Text(this.collectionUi.error).fontSize(12).layoutWeight(1);Button(this.collectionUi.retrying?'重试中…':'重试').fontSize(12).height(32).backgroundColor($r('app.color.showly_accent')).fontColor($r('app.color.showly_on_accent')).enabled(!this.collectionUi.retrying).onClick(()=>{this.retryCollectionDisplay();})}.width('100%')
       } else if (this.collectionSummary.key === this.collectionDisplayKey()) {
         if (!this.collectionSummary.total && !this.cloudBusy && !this.localBusy) { Text(collectionEmptyText(this.collectionHasFilters(),this.collectionFilter)).fontSize(14).width('100%').textAlign(TextAlign.Center).padding(16) }
         Text('共 ' + this.collectionSummary.total + ' 部').fontSize(14)
@@ -6332,6 +6403,12 @@ struct Index {
   collectionFilterPanel(){
     Column({space:12}){
       Text('排序与筛选').fontSize(18).fontWeight(FontWeight.Medium).width('100%')
+      Text('剧透保护').fontSize(13).width('100%')
+      Row({space:4}){
+        Button(this.collectionSpoilers.description?'简介：隐藏':'简介：显示').fontSize(12).layoutWeight(1).backgroundColor($r('app.color.showly_muted_surface')).fontColor($r('app.color.showly_text')).onClick(()=>{this.editCollectionSpoilers('description');})
+        Button(this.collectionSpoilers.rating?'评分：隐藏':'评分：显示').fontSize(12).layoutWeight(1).backgroundColor($r('app.color.showly_muted_surface')).fontColor($r('app.color.showly_text')).onClick(()=>{this.editCollectionSpoilers('rating');})
+        Button(this.collectionSpoilers.reveal?'点击揭示：开':'点击揭示：关').fontSize(12).layoutWeight(1).backgroundColor($r('app.color.showly_muted_surface')).fontColor($r('app.color.showly_text')).onClick(()=>{this.editCollectionSpoilers('reveal');})
+      }.width('100%')
       if(this.mediaMode==='show'&&this.collectionFilter==='mine'){
         Text('剧集状态').fontSize(13).width('100%')
         Row({space:4}){
@@ -6439,6 +6516,7 @@ struct Index {
               Text(this.displayLabel(row.media)).fontSize(14).maxLines(2)
                 .textOverflow({ overflow: TextOverflow.Ellipsis }).width('100%')
               Text(businessLibraryLabel(row)).fontSize(11).width('100%')
+              this.collectionSpoilerDetails(row.media)
               this.showProgressActions(row.media)
               if (!this.isHidden(row.media) && row.media.kind !== 'show' && this.canEditLibrary()) {
                 Button(row.watched ? '撤销已看' : '标记已看').fontSize(12)
@@ -6449,7 +6527,7 @@ struct Index {
               .onVisibleAreaChange([0], (visible: boolean, ratio: number) => { this.viewportChanged(row.media,0,[],visible && ratio > 0,'library',''); })
               .onClick(() => { this.openDetail(row.media); })
           }, (row: PersonalLibraryRow) => row.media.id + ':' + businessLibraryLabel(row) + ':' +
-            this.artwork(row.media) + ':' + this.displayTitle(row.media))
+            this.artwork(row.media) + ':' + this.displayTitle(row.media)+':'+this.collectionRatingText(row.media)+':'+this.collectionDescription(row.media))
         }.width('100%')
       } else {
         ForEach(group.rows, (row: PersonalLibraryRow) => {
@@ -6461,6 +6539,7 @@ struct Index {
               if(row.media.kind==='show'&&row.effectiveWatched!==undefined&&row.effectiveTotal!==undefined&&row.effectiveTotal>0){
                 Progress({value:Math.min(row.effectiveWatched,row.effectiveTotal),total:row.effectiveTotal,type:ProgressType.Linear}).width('100%').color($r('app.color.showly_accent'))
               }
+              this.collectionSpoilerDetails(row.media)
               this.showProgressActions(row.media)
             }.layoutWeight(1).onClick(() => { this.openDetail(row.media); })
             if (!this.isHidden(row.media) && row.media.kind !== 'show' && this.canEditLibrary()) {
@@ -6471,7 +6550,7 @@ struct Index {
           }.width('100%')
             .onVisibleAreaChange([0], (visible: boolean, ratio: number) => { this.viewportChanged(row.media,0,[],visible && ratio > 0,'library',''); })
         }, (row: PersonalLibraryRow) => row.media.id + ':' + businessLibraryLabel(row) + ':' +
-          (row.watched ? 'yes' : 'no') + ':' + this.artwork(row.media) + ':' + this.displayTitle(row.media))
+          (row.watched ? 'yes' : 'no') + ':' + this.artwork(row.media) + ':' + this.displayTitle(row.media)+':'+this.collectionRatingText(row.media)+':'+this.collectionDescription(row.media))
       }
     }.width('100%')
   }

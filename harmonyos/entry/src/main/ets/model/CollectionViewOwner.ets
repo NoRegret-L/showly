@@ -1,3 +1,4 @@
+import { PersonalLibraryRow } from './PersonalLibrary';
 import { CollectionMeta } from './MediaPresentation';
 import { CollectionOptions } from './CollectionRules';
 // Derived, account-scoped view state only; no authority or sync writes.
@@ -188,4 +189,18 @@ export class CollectionRecoveryOwner {
   published():void{
     if(this.error||this.failureKey||this.fullRetry){this.error='';this.failureKey='';this.fullRetry=false;this.revision++;}
   }
+}
+
+// One immutable-by-publication UI value; avoid independent header/error state writes.
+export interface CollectionUiSnapshot { recent:PersonalLibraryRow[]; other:boolean; error:string; retrying:boolean; revision:number; }
+export function emptyCollectionUi():CollectionUiSnapshot{return {recent:[],other:false,error:'',retrying:false,revision:0};}
+export function collectionUiNext(old:CollectionUiSnapshot,recent:PersonalLibraryRow[],other:boolean,error:string,retrying:boolean):CollectionUiSnapshot{
+  if(old.recent===recent&&old.other===other&&old.error===error&&old.retrying===retrying){return old;}
+  return {recent:recent,other:other,error:error,retrying:retrying,revision:old.revision+1};
+}
+export interface CollectionSpoilers { description:boolean; rating:boolean; reveal:boolean; }
+export function defaultCollectionSpoilers():CollectionSpoilers{return {description:false,rating:false,reveal:false};}
+export function collectionSpoilerText(value:string,hidden:boolean,revealed:boolean,rating:boolean=false):string{
+  if(!hidden||revealed||!value){return value;}
+  return rating?'•.•':value.replace(/\S/g,'•');
 }

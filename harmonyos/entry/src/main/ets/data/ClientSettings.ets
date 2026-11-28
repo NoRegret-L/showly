@@ -1,4 +1,4 @@
-import { validCollectionRecentAmount } from '../model/CollectionViewOwner';
+import { validCollectionRecentAmount, CollectionSpoilers, defaultCollectionSpoilers } from '../model/CollectionViewOwner';
 import { preferences } from '@kit.ArkData';
 import { DiscoverOptions, defaultDiscover, validDiscoverOptions } from '../model/DiscoverRules';
 import { common } from '@kit.AbilityKit';
@@ -43,6 +43,18 @@ export class ClientSettings {
     if (!['show','movie'].includes(kind) || !validDiscoverOptions(value)) { throw new Error('Invalid discovery settings'); }
     await this.storage.put('discover_options:'+kind,JSON.stringify(value));
     await this.storage.flush();
+  }
+  loadCollectionSpoilers(kind:string,section:string):CollectionSpoilers{
+    const raw=this.storage.getSync('collection_spoilers:'+kind+':'+section,'');
+    try{
+      const value=JSON.parse(typeof raw==='string'?raw:'') as CollectionSpoilers;
+      if(typeof value.description==='boolean'&&typeof value.rating==='boolean'&&typeof value.reveal==='boolean'){return value;}
+    }catch(error){}
+    return defaultCollectionSpoilers();
+  }
+  async saveCollectionSpoilers(kind:string,section:string,value:CollectionSpoilers):Promise<void>{
+    if(!['show','movie'].includes(kind)||!['mine','queue','hidden'].includes(section)){throw new Error('Invalid spoiler scope');}
+    await this.storage.put('collection_spoilers:'+kind+':'+section,JSON.stringify(value));await this.storage.flush();
   }
   loadCollectionRecentAmount():number {
     const value=this.storage.getSync('collection_recent_amount',4);
