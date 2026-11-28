@@ -3,7 +3,7 @@ import { http } from '@kit.NetworkKit';
 import { Media, CollectionDate, PersonalMovie, PersonalMovieSnapshot, validReleaseDate } from '../model/Media';
 import { ReadFlight } from '../model/ReadFlight';
 import { TraktSession, traktAuth } from './TraktAuth';
-import { RemotePlayPosition, RemoteMovieObservation, RemoteLibraryObservation, RemoteShowObservation, validateObservation, ObservationVersions, observationCollectionMask } from '../model/RemoteObservation';
+import { RemotePlayPosition, RemoteMovieObservation, RemoteLibraryObservation, RemoteShowObservation, validateObservation, ObservationVersions, observationCollectionMask, mergeMovieSources, movieSourcesValid } from '../model/RemoteObservation';
 export { PersonalMovie, PersonalMovieSnapshot, validReleaseDate } from '../model/Media';
 
 interface Ids {
@@ -93,8 +93,10 @@ export async function readActivityVersions(session: TraktSession): Promise<Obser
     const watchedShows = activityStamp(data.episodes?.watched_at);
     const queuedShows = activityPair(activityStamp(data.shows?.watchlisted_at),
       activityPair(activityStamp(data.seasons?.watchlisted_at),activityStamp(data.episodes?.watchlisted_at)));
-    return {all:data.all,
-      movies:activityPair(activityStamp(data.movies?.watched_at),activityStamp(data.movies?.watchlisted_at)),
+    const watchedMovies = activityStamp(data.movies?.watched_at);
+    const queuedMovies = activityStamp(data.movies?.watchlisted_at);
+    return {all:data.all, watchedMovies:watchedMovies, queuedMovies:queuedMovies,
+      movies:activityPair(watchedMovies,queuedMovies),
       shows:activityPair(watchedShows,queuedShows), watchedShows:watchedShows, queuedShows:queuedShows};
   } finally {
     req.destroy();
@@ -298,9 +300,13 @@ function observationFromGroups(session: TraktSession, groups: SyncItem[][], afte
   const shows = showProgress(groups[1]);
   const queueMovieRows = groups[2];
   const queueShowRows = groups[3];
-  const movieDetails = new Map<string, PersonalMovie>();
-  appendPersonalMovies(movieDetails,movieRows,true);
-  appendPersonalMovies(movieDetails,queueMovieRows,false);
+  const watchedDetails = new Map<string, PersonalMovie>();
+  const queuedDetails = new Map<string, PersonalMovie>();
+  appendPersonalMovies(watchedDetails,movieRows,true);
+  appendPersonalMovies(queuedDetails,queueMovieRows,false);
+  const movieWatchedDetails = Array.from(watchedDetails.values());
+  const movieQueuedDetails = Array.from(queuedDetails.values());
+  const movieDetails = mergeMovieSources(movieWatchedDetails,movieQueuedDetails);
   const queuedMovies = uniqueTitles(queueMovieRows, 'movie', false);
   const queuedShows = uniqueTitles(queueShowRows, 'show', false);
   const queueDates: CollectionDate[] = [];
@@ -311,7 +317,7 @@ function observationFromGroups(session: TraktSession, groups: SyncItem[][], afte
     }
   }
   const snapshot: CloudLibrary = { generation: session.generation, activity: after, observedAt: Date.now(),
-    watchlist: [...queuedMovies, ...queuedShows], watchedMovies: movies, shows: shows, moviePlays: moviePlays, queueDates: queueDates, movieDetails: Array.from(movieDetails.values()) };
+    watchlist: [...queuedMovies, ...queuedShows], watchedMovies: movies, shows: shows, moviePlays: moviePlays, queueDates: queueDates, movieDetails: movieDetails, movieWatchedDetails: movieWatchedDetails, movieQueuedDetails: movieQueuedDetails };
   validateObservation(snapshot);
   return snapshot;
 }
@@ -321,13 +327,14 @@ function observationFromGroups(session: TraktSession, groups: SyncItem[][], afte
 export async function readCloudLibraryIncremental(session: TraktSession, prior?: CloudLibrary): Promise<CloudLibrary> {
   const before = await readActivityVersions(session);
   let mask = prior && prior.queueDates !== undefined && prior.movieDetails !== undefined ?
-    observationCollectionMask(prior.versions,before) : 15;
+    observationCollectionMask(prior.versions,before,movieSourcesValid(prior)) : 15;
   if (!prior || prior.generation !== session.generation) { mask = 15; }
   const groups = await readObservationCollections(session,mask);
   const after = await readActivityVersions(session);
   ensureCurrent(session);
   if (before.all !== after.all || before.movies !== after.movies || before.shows !== after.shows ||
-      before.watchedShows !== after.watchedShows || before.queuedShows !== after.queuedShows) {
+      before.watchedShows !== after.watchedShows || before.queuedShows !== after.queuedShows ||
+      before.watchedMovies !== after.watchedMovies || before.queuedMovies !== after.queuedMovies) {
     throw new Error('Trakt activity changed during import; retry');
   }
   const snapshot = observationFromGroups(session,groups,after.all);
@@ -335,7 +342,15 @@ export async function readCloudLibraryIncremental(session: TraktSession, prior?:
     if ((mask & 1) === 0) {
       snapshot.watchedMovies = prior.watchedMovies;
       snapshot.moviePlays = prior.moviePlays;
+    }
+    if ((mask & 1) === 0 && (mask & 4) === 0) {
       snapshot.movieDetails = prior.movieDetails;
+      snapshot.movieWatchedDetails = prior.movieWatchedDetails;
+      snapshot.movieQueuedDetails = prior.movieQueuedDetails;
+    } else {
+      if ((mask & 1) === 0) { snapshot.movieWatchedDetails = prior.movieWatchedDetails; }
+      if ((mask & 4) === 0) { snapshot.movieQueuedDetails = prior.movieQueuedDetails; }
+      snapshot.movieDetails = mergeMovieSources(snapshot.movieWatchedDetails ?? [],snapshot.movieQueuedDetails ?? []);
     }
     if ((mask & 2) === 0) { snapshot.shows = prior.shows; }
     const oldQueue = prior.watchlist.filter((item: Media) => item.kind === 'movie' ? (mask & 4) === 0 : (mask & 8) === 0);

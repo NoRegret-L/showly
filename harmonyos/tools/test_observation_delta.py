@@ -25,6 +25,10 @@ for(let i=0;i<100;i++){
  assert.equal(observationCollectionMask(split,{...split,all:'b',movies:'new'}),5);
  assert.equal(observationCollectionMask(split,{...split,all:'b',shows:'new',watchedShows:''}),10);
  assert.equal(observationCollectionMask(undefined,split),15);
+ const full={...split,watchedMovies:'wm',queuedMovies:'qm'};
+ assert.equal(observationCollectionMask(full,{...full,all:'b',movies:'new',watchedMovies:'wm2'},true),1);
+ assert.equal(observationCollectionMask(full,{...full,all:'b',movies:'new',queuedMovies:'qm2'},true),4);
+ assert.equal(observationCollectionMask(full,{...full,all:'b',movies:'new',queuedMovies:'qm2'},false),5);
 }
 console.log('Observation domain masks: 100 rounds, paired watchlist dependencies, missing and unknown activity full fallback passed');
 """)

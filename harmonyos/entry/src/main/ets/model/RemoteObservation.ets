@@ -22,7 +22,7 @@ export interface RemoteMovieObservation {
 }
 // Optional cache-only activity evidence. Missing or invalid domain stamps
 // always require a complete observation; they never grant write permission.
-export interface ObservationVersions { all: string; movies: string; shows: string; watchedShows?: string; queuedShows?: string; }
+export interface ObservationVersions { all: string; movies: string; shows: string; watchedShows?: string; queuedShows?: string; watchedMovies?: string; queuedMovies?: string; }
 export function observationReadMask(old: ObservationVersions | undefined, next: ObservationVersions): number {
   if (!old || !old.all || !next.all || !old.movies || !old.shows || !next.movies || !next.shows) { return 3; }
   if (old.all === next.all) { return old.movies === next.movies && old.shows === next.shows ? 0 : 3; }
@@ -32,11 +32,15 @@ export function observationReadMask(old: ObservationVersions | undefined, next: 
 // Four endpoint bits: watched movies=1, watched shows=2, queued movies=4,
 // queued shows=8. Movie metadata has joint provenance; keep its two reads
 // together until a separate raw source cache is validated.
-export function observationCollectionMask(old: ObservationVersions | undefined, next: ObservationVersions): number {
+export function observationCollectionMask(old: ObservationVersions | undefined, next: ObservationVersions, movieSources: boolean = false): number {
   const group = observationReadMask(old,next);
   if (group === 0) { return 0; }
-  if (group === 3 || !old) { return 15; }
-  if (group === 1) { return 5; }
+  if (!old || group === 3) { return 15; }
+  if (group === 1) {
+    if (!movieSources || !old.watchedMovies || !old.queuedMovies || !next.watchedMovies || !next.queuedMovies) { return 5; }
+    const changed = (old.watchedMovies !== next.watchedMovies ? 1 : 0) | (old.queuedMovies !== next.queuedMovies ? 4 : 0);
+    return changed || 5;
+  }
   if (!old.watchedShows || !old.queuedShows || !next.watchedShows || !next.queuedShows) { return 10; }
   const changed = (old.watchedShows !== next.watchedShows ? 2 : 0) | (old.queuedShows !== next.queuedShows ? 8 : 0);
   return changed || 10;
@@ -54,6 +58,40 @@ export interface RemoteLibraryObservation {
   queueDates?: CollectionDate[];
   // Display metadata only. Never used to establish membership or authorize writes.
   movieDetails?: PersonalMovie[];
+  movieWatchedDetails?: PersonalMovie[];
+  movieQueuedDetails?: PersonalMovie[];
+}
+// Normalize each endpoint separately before merging. This reproduces the
+// watched-first, watchlist-second metadata priority without keeping raw HTTP.
+export function mergeMovieSources(watched: PersonalMovie[], queued: PersonalMovie[]): PersonalMovie[] {
+  const merged = new Map<string,PersonalMovie>();
+  for (const item of watched) { merged.set(item.media.id,item); }
+  for (const item of queued) {
+    const old = merged.get(item.media.id);
+    if (!old) { merged.set(item.media.id,item); continue; }
+    const conflict = !!old.released && !!item.released && old.released !== item.released;
+    const value: PersonalMovie = {media:old.media,released:conflict ? '' : (item.released || old.released),
+      cloudWatched:true,cloudWatchlist:true,localOnly:false,runtime:item.runtime ?? old.runtime,
+      rating:item.rating ?? old.rating,addedAt:item.addedAt ?? old.addedAt,
+      dateUncertain:!!old.dateUncertain || !!item.dateUncertain || conflict};
+    merged.set(item.media.id,value);
+  }
+  return Array.from(merged.values());
+}
+export function movieSourcesValid(snapshot: RemoteLibraryObservation): boolean {
+  const watched = snapshot.movieWatchedDetails;
+  const queued = snapshot.movieQueuedDetails;
+  if (!Array.isArray(watched) || !Array.isArray(queued) || !snapshot.movieDetails) { return false; }
+  const watchedIds = new Set<string>(snapshot.watchedMovies.map((item: Media)=>item.id));
+  const queueIds = new Set<string>(snapshot.watchlist.filter((item: Media)=>item.kind==='movie').map((item: Media)=>item.id));
+  if (watched.length !== watchedIds.size || queued.length !== queueIds.size) { return false; }
+  for (const item of watched) {
+    if (!item || !item.media || !watchedIds.delete(item.media.id) || !item.cloudWatched || item.cloudWatchlist || item.localOnly) { return false; }
+  }
+  for (const item of queued) {
+    if (!item || !item.media || !queueIds.delete(item.media.id) || item.cloudWatched || !item.cloudWatchlist || item.localOnly) { return false; }
+  }
+  return JSON.stringify(mergeMovieSources(watched,queued)) === JSON.stringify(snapshot.movieDetails);
 }
 export interface EpisodeDecision {
   episodeId: number;

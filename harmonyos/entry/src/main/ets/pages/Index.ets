@@ -3556,7 +3556,7 @@ struct Index {
       if (cached) {
         const restored: CloudLibrary = { generation: session.generation, activity: cached.activity,
           observedAt: cached.observedAt, watchlist: cached.watchlist, watchedMovies: cached.watchedMovies,
-          shows: cached.shows, moviePlays: cached.moviePlays, queueDates: cached.queueDates, movieDetails: cached.movieDetails, versions: cached.versions, verifiedAt: cached.verifiedAt };
+          shows: cached.shows, moviePlays: cached.moviePlays, queueDates: cached.queueDates, movieDetails: cached.movieDetails, movieWatchedDetails: cached.movieWatchedDetails, movieQueuedDetails: cached.movieQueuedDetails, versions: cached.versions, verifiedAt: cached.verifiedAt };
         this.cloud = restored;
         this.cloudUuid = account.uuid;
         this.publishMovieSource(restored);
@@ -3600,7 +3600,7 @@ struct Index {
         const persisted: CloudLibrary = { generation: snapshot.generation, activity: snapshot.activity,
           observedAt: snapshot.observedAt, watchlist: snapshot.watchlist, watchedMovies: snapshot.watchedMovies,
           shows: snapshot.shows, moviePlays: snapshot.moviePlays, queueDates: snapshot.queueDates,
-          movieDetails: snapshot.movieDetails, versions: snapshot.versions, verifiedAt: verifiedAt };
+          movieDetails: snapshot.movieDetails, movieWatchedDetails: snapshot.movieWatchedDetails, movieQueuedDetails: snapshot.movieQueuedDetails, versions: snapshot.versions, verifiedAt: verifiedAt };
         await store.saveRemoteObservation(account.uuid, persisted);
         if (!current()) { throw new Error('Session changed'); }
         snapshot = persisted;

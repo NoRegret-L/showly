@@ -14,7 +14,7 @@ with tempfile.TemporaryDirectory() as tmp:
     for name in ("Media","ShowCatalog","RemoteObservation","ReadFlight","MediaPresentation"):
         shutil.copyfile(root/"model"/(name+".ets"),work/(name+".ts"))
     harness="""import { Media, CollectionDate, PersonalMovie, validReleaseDate } from './Media';
-import { RemoteLibraryObservation, RemoteMovieObservation, RemoteShowObservation, RemotePlayPosition, validateObservation, ObservationVersions, observationCollectionMask } from './RemoteObservation';
+import { RemoteLibraryObservation, RemoteMovieObservation, RemoteShowObservation, RemotePlayPosition, validateObservation, ObservationVersions, observationCollectionMask, mergeMovieSources, movieSourcesValid } from './RemoteObservation';
 type ShowProgress=RemoteShowObservation;
 type CloudLibrary=RemoteLibraryObservation;
 interface TraktSession { clientId:string; generation:number; token:string; }
@@ -27,9 +27,9 @@ let stopped=false;
 let active=0;
 let maximum=0;
 export function scenario(change:boolean=false,fail:boolean=false) { requests=[];activity='revision';changed=change;stopped=fail;active=0;maximum=0; }
-let watchedShows:string|undefined,queuedShows:string|undefined;
-export function setVersions(m:string,s:string,w?:string,q?:string){movies=m;shows=s;watchedShows=w;queuedShows=q;activity='changed-revision';}
-async function readActivityVersions(session:TraktSession):Promise<ObservationVersions> { return {all:await readActivity(session),movies,shows,watchedShows,queuedShows}; }
+let watchedShows:string|undefined,queuedShows:string|undefined,watchedMovies:string|undefined,queuedMovies:string|undefined;
+export function setVersions(m:string,s:string,w?:string,q?:string,wm?:string,qm?:string){movies=m;shows=s;watchedShows=w;queuedShows=q;watchedMovies=wm;queuedMovies=qm;activity='changed-revision';}
+async function readActivityVersions(session:TraktSession):Promise<ObservationVersions> { return {all:await readActivity(session),movies,shows,watchedShows,queuedShows,watchedMovies,queuedMovies}; }
 export function stats(){return {requests,maximum,active};}
 function ensureCurrent(session:TraktSession):void { if(session.generation!==1)throw Error('session'); }
 async function readActivity(session:TraktSession):Promise<string> {
@@ -119,6 +119,21 @@ const {mergeText}=require('./MediaPresentation.js');
  assert.deepEqual(showOnly.queueDates,split.queueDates);
  assert.deepEqual(showOnly.movieDetails,split.movieDetails);
  console.log('Split show endpoint fixture: 6 full requests -> 3; complete observation parity passed');
+ h.scenario();h.setVersions('m','s','w','q','wm','qm');
+ const movieBase=await h.readCloudLibraryIncremental(session);
+ const moviePrior={...movieBase,activity:'prior',versions:{...movieBase.versions,all:'prior'}};
+ h.scenario();h.setVersions('m2','s','w','q','wm','qm2');
+ const queueOnly=await h.readCloudLibraryIncremental(session,moviePrior);
+ assert.equal(h.stats().requests.length,3);
+ assert.deepEqual(queueOnly.movieDetails,movieBase.movieDetails);
+ assert.deepEqual(queueOnly.watchedMovies,movieBase.watchedMovies);
+ assert.deepEqual(queueOnly.queueDates,movieBase.queueDates);
+ h.scenario();h.setVersions('m2','s','w','q','wm2','qm');
+ const watchedOnly=await h.readCloudLibraryIncremental(session,moviePrior);
+ assert.equal(h.stats().requests.length,3);
+ assert.deepEqual(watchedOnly.movieDetails,movieBase.movieDetails);
+ assert.deepEqual(watchedOnly.watchlist,movieBase.watchlist);
+ console.log('Split movie endpoints fixture: 6 full requests -> 3 each; normalized metadata provenance parity passed');
  const legacy={...snap};delete legacy.movieDetails;validateObservation(legacy);
  h.scenario(true);
  await assert.rejects(h.readCloudLibrary(session),/activity changed/);
