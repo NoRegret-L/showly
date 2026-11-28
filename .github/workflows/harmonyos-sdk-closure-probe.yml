@@ -110,6 +110,7 @@ jobs:
         with:
           persist-credentials: false
           sparse-checkout: harmonyos
+      # Build 92: rerun after ArkTS explicit snapshot construction fix.
       - name: Start remote cache timer
         run: date +%s%N > "$RUNNER_TEMP/cache-start"
       - name: Restore exact candidate

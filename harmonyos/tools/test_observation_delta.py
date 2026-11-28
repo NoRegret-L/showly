@@ -29,4 +29,6 @@ assert "before.all !== after.all || before.movies !== after.movies || before.sho
 assert "readObservationCollections(session,mask)" in lib
 assert "validateObservation(snapshot)" in lib
 assert "readCloudLibraryIncremental(session,snapshot)" in page
-assert "await store.saveRemoteObservation(account.uuid, { ...snapshot, verifiedAt: verifiedAt })" in page
+assert "await store.saveRemoteObservation(account.uuid, persisted)" in page
+assert "verifiedAt: verifiedAt" in page
+assert "{ ...snapshot, verifiedAt:" not in page

@@ -3582,9 +3582,13 @@ struct Index {
         if (!current()) { throw new Error('Session changed'); }
         const verifiedAt = Date.now();
         // Persist only after account/activity fences. Cache metadata is not a receipt.
-        await store.saveRemoteObservation(account.uuid, { ...snapshot, verifiedAt: verifiedAt });
+        const persisted: CloudLibrary = { generation: snapshot.generation, activity: snapshot.activity,
+          observedAt: snapshot.observedAt, watchlist: snapshot.watchlist, watchedMovies: snapshot.watchedMovies,
+          shows: snapshot.shows, moviePlays: snapshot.moviePlays, queueDates: snapshot.queueDates,
+          movieDetails: snapshot.movieDetails, versions: snapshot.versions, verifiedAt: verifiedAt };
+        await store.saveRemoteObservation(account.uuid, persisted);
         if (!current()) { throw new Error('Session changed'); }
-        snapshot.verifiedAt = verifiedAt;
+        snapshot = persisted;
         this.cloud = snapshot;
         this.cloudUuid = account.uuid;
         this.publishMovieSource(snapshot);

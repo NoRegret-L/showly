@@ -102,6 +102,7 @@ const {mergeText}=require('./MediaPresentation.js');
  assert.deepEqual(delta.watchlist,baseline.watchlist);
  assert.deepEqual(delta.queueDates,baseline.queueDates);
  assert.deepEqual(delta.shows,baseline.shows);
+ console.log('Incremental observation fixture: 6 full requests -> 4 show-domain requests; retained movie details and collection equality passed');
  h.scenario();h.setVersions('new-movie','new-show');
  const moviesOnly=await h.readCloudLibraryIncremental(session,delta);
  assert.equal(h.stats().requests.length,6); // global revision identical but domain inconsistent -> full
