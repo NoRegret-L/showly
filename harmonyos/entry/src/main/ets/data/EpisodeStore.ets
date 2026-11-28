@@ -463,7 +463,7 @@ export class EpisodeStore {
     this.db.beginTransaction();
     try {
       // No autoUuid: accepting a cloud state never authorizes a new upload.
-      await this.markBody(intent.showId, [episodeId], value);
+      await this.markBody(intent.showId, [episodeId], value, '', Date.now());
       await this.saveCommonStatesBody(uuid, 'episode', activity, [{ id: episodeId.toString(), value: value }]);
       this.db.commit();
     } catch (error) {

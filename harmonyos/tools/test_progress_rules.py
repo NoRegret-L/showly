@@ -79,3 +79,8 @@ print("Progress wiring assertions passed")
 assert "this.getUIContext().showActionSheet" in source and "this.getUIContext().showDatePickerDialog" in source
 assert "this.watchSelection.consume(this.watchScope(),token)" in source
 assert "auto.uuid : '',watchedAt)" in mark
+
+store=(root/"data"/"EpisodeStore.ets").read_text()
+assert "await this.markBody(intent.showId, [episodeId], value, '', Date.now());" in store
+assert "watched ? watchedAt : Date.now(), authorized" in store
+assert "this.markBody(showId,ids,watched,autoUuid,watchedAt)" in store

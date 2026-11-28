@@ -92,9 +92,12 @@ assert "readProjectionCache(" not in lib and "encodePersistedProjection(" not in
 for builder,ds in [("nextShowsView","showRows"),("movieProgressView","movieRowsSource")]:
     region=page.split("  "+builder+"(",1)[1].split("\n  @Builder",1)[0]
     assert "List({ space:" in region and "LazyForEach(this."+ds in region and "ListItem()" in region
-assert "this.markNext(row)" in page and "this.markMovieProgress(row.media)" in page
+assert "this.markNext(row,at)" in page and "this.markMovieProgress(row.media,at)" in page
 assert "this.cancelCatalogRepair()" in page and "this.showRows.replace([], [], [])" in page
 print("Persistent cache, foreground repair and native lazy-list wiring assertions passed")
 
 assert "Refresh({ refreshing: $$this.refreshing })" in page
 assert "Refresh({ refreshing: $this.refreshing })" not in page
+
+assert "this.chooseWatchTime(this.movieMetadataIndex().get(row.media.id)?.released??''" in page
+assert "this.chooseWatchTime(row.episode.firstAired" in page
