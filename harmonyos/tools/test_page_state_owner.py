@@ -83,7 +83,9 @@ const {ConsumerReadFlight}=require('./ReadFlight');
   const firstRejected=assert.rejects(first);lane.cancel();await firstRejected;
   completeRead(size);assert.equal(await second,size);
   assert(!lane.finish(thirdRead,'stale'));assert(secondLane.finish(secondRead));
-  pages.transition('show','show:next','account-B');assert(!third.work.current(thirdTicket));assert(!jobs.current('discover',thirdJob));
+  pages.resetDisplay();assert(!third.work.current(thirdTicket));assert(secondLane.current(secondRead));
+  const beforeAccount=third.work.begin(),beforeAccountJob=jobs.begin('discover','before-account');
+  pages.transition('show','show:next','account-B');assert(!third.work.current(beforeAccount));assert(!jobs.current('discover',beforeAccountJob));assert(!jobs.current('discover',thirdJob));
   assert(secondRead.cancelled());assert.equal(lane.snapshot().loading,false);
   const hidden=show.work.remote.begin('hidden');pages.transition('','','account-B');assert(hidden.cancelled());
   show.activate('B');show.replace(rows,ids,keys);
@@ -116,3 +118,5 @@ assert "this.activePageWork()?.changePresentation(route)" in page
 assert "this.searchRows.work.remote" in page and "this.searchRows.work.local" in page
 assert "this.discoverRows.work.remote" in page and "this.calendarRows.work.hydrate" in page
 assert "this.viewport.clear(); this.sortJobs.clear(); this.viewportRouteKey" not in page
+
+assert "this.pageWorks.resetDisplay();" in page

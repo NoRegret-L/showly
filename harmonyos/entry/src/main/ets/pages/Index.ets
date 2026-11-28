@@ -1641,7 +1641,7 @@ struct Index {
     this.pageWorks.transition(this.scrollSlot(),route,account);
     this.cancelPresentationReads();
     this.businessPresentationTasks=undefined;
-    if (!this.pageVisible || this.selectedMedia || this.tab!=='discover') { this.discoverBusy=false; }
+    if (!this.pageVisible || this.selectedMedia || this.tab!=='discover' || !this.discoverRows.work.remote.snapshot().loading) { this.discoverBusy=false; }
     this.releaseInactiveCaches(false);
   }
   private handleMemoryPressure(): void {
@@ -1698,7 +1698,9 @@ struct Index {
     }
     if (pressure || !this.pageVisible) { this.libraryProjectionSession.clear(); this.episodeStore?.releaseProjectionReadCache(); }
     if (pressure) {
-      this.sortJobs.clear(); this.invalidateLazyWork();
+      // Pressure revokes display work, not the still-visible remote search or
+      // discovery request. Their original lifecycle and loading flags stay valid.
+      this.pageWorks.resetDisplay();
       this.movieMetadataMemo.clear(); this.movieMemo.clear(); this.movieAllMemo.clear(); this.movieTitleOrder.clear(); this.movieAllTitleOrder.clear();
       // The existing projection may be in use by verified observation. Do not
       // clear its shared cache mid-flight; derived module caches above suffice.

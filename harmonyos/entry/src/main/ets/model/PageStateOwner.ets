@@ -67,6 +67,7 @@ export class PageWork {
     if(this.commitKey===key){return;}
     this.commitKey=key;this.dependencies++;this.invalidate();this.jobs.clear();
   }
+  resetDisplay():void{this.summary=undefined;this.invalidate();this.jobs.clear();}
   deactivate():void{this.invalidate();this.jobs.clear();this.remote.cancel();this.local.cancel();this.hydrate.cancel();}
   changePresentation(key:string):void{
     if(this.presentationKey===key){return;}
@@ -112,6 +113,7 @@ export class PageWorkSet{
   }
   register(page:string,work:PageWork):void{this.owners.set(page,work);}
   get(page:string):PageWork|undefined{return this.owners.get(page);}
+  resetDisplay():void{for(const work of this.owners.values()){work.resetDisplay();}}
   reset():void{for(const work of this.owners.values()){work.reset();}}
   observe(key:string,ids:string[],full:boolean):void{
     for(const page of this.owners.keys()){if(pageAffected(page,ids,full)){this.owners.get(page)?.observe(key);}}
