@@ -29,3 +29,8 @@ refresh=p.split("Refresh({ refreshing: $$this.refreshing })",1)[1]
 assert "if(this.collectionFilter==='lists'){\n            Column(){\n              ForEach([this.currentProgressScope()]" in refresh
 assert "},(scope:string)=>scope)\n            }.width('100%').height('100%')" in refresh
 print("Custom lists Refresh single-child branch assertion passed")
+
+# Native two-way binding must retain both dollar signs in the generated source.
+assert ".bindSheet($$this.ratingSheetOpen,this.ratingSheet()" in p
+assert ".bindSheet($this.ratingSheetOpen" not in p
+print("Rating sheet native binding preflight passed")

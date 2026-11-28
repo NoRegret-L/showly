@@ -122,7 +122,12 @@ print("10,000 journal rows: indexed scoped query returns 100 identical rows; nat
 
 assert "this.detailOwner.current(token,scope,item.id)" in page
 assert "this.presentation?.readCachedDetail(item,consumer)" in page and "this.presentation?.saveCachedDetail(item,data,consumer)" in page
-assert "readCollectionRatings(session,item.kind,source.activity)" in page
+assert "this.sharedTitleRatings(item.kind,ratingScope)" in page
+rating_repo=(root/"data/RatingsRepository.ets").read_text()
+assert "ratingScope===this.currentProgressScope()" in page
+assert "readCollectionRatings(session,kind,activity)" in rating_repo
+assert "await this.verify(scope,session,current)" in rating_repo
+assert "await readActivity(session)!==activity" in rating_repo
 assert "this.detailFanart.visible(" in page
 assert "DetailHeader({" in page
 

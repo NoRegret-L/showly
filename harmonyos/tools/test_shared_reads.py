@@ -113,7 +113,12 @@ assert "await store.saveReadCheckpoints(account.uuid, result.matches)" in cloud
 assert "readPersonalMovies(session)" not in calendar and "await this.loadCalendar()" not in cloud
 assert "this.movieCalendarData.activity === active.activity" in page
 assert "this.movieRatingKey = ''" in page and "this.movieRatingRows = []" in page
-assert "readCollectionRatings(session,'movie',source.activity)" in page
+assert "this.sharedTitleRatings('movie',scope)" in page
+rating_repo=(root/"data/RatingsRepository.ets").read_text()
+assert "await repo.list(scope,kind,session," in page
+assert "readCollectionRatings(session,kind,activity)" in rating_repo
+assert "old.known&&old.activity===activity" in rating_repo
+assert "await this.verify(scope,session,current)" in rating_repo and "await readActivity(session)!==activity" in rating_repo
 assert "SELECT show_id,season,payload FROM presentation_season" not in repo
 assert "SELECT payload FROM presentation_season WHERE show_id=? AND season=?" in repo
 assert "await repo.hydrateSeason(" in page

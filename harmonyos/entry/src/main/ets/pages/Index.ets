@@ -7346,6 +7346,6 @@ struct Index {
       }.padding({ left: 12, right: 12, top: 4, bottom: 4 }).width('100%')
         .backgroundColor($r('app.color.showly_surface'))
     }.width('100%').height('100%').backgroundColor($r('app.color.showly_background'))
-      .bindSheet($this.ratingSheetOpen,this.ratingSheet(),{height:SheetSize.MEDIUM,showClose:true})
+      .bindSheet($$this.ratingSheetOpen,this.ratingSheet(),{height:SheetSize.MEDIUM,showClose:true})
   }
 }

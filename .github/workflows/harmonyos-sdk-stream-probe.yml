@@ -2,7 +2,7 @@ name: HarmonyOS verified SDK streaming pair probe
 on:
   push:
     branches: [harmonyos-bootstrap]
-    paths: ['.github/workflows/harmonyos-sdk-stream-probe.yml']
+    paths: ['.github/workflows/harmonyos-sdk-stream-probe.yml'] # rerun fixed Build 86 native source
   workflow_dispatch:
 permissions:
   contents: read
