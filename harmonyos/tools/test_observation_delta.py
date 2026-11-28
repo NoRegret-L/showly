@@ -9,7 +9,7 @@ with tempfile.TemporaryDirectory() as tmp:
     subprocess.run(["tsc","--strict","--target","ES2020","--module","commonjs","RemoteObservation.ts"],cwd=w,check=True)
     (w/"test.cjs").write_text("""
 const assert=require('node:assert/strict');
-const {observationReadMask}=require('./RemoteObservation');
+const {observationReadMask,observationCollectionMask}=require('./RemoteObservation');
 for(let i=0;i<100;i++){
  const prior={all:'a'+i,movies:'m'+i,shows:'s'+i};
  assert.equal(observationReadMask(undefined,prior),3);
@@ -19,6 +19,12 @@ for(let i=0;i<100;i++){
  assert.equal(observationReadMask(prior,{...prior,all:'b'}),3);
  assert.equal(observationReadMask(prior,{...prior,all:'b',movies:''}),3);
  assert.equal(observationReadMask(prior,{...prior,shows:'x'}),3);
+ const split={...prior,watchedShows:'w',queuedShows:'q'};
+ assert.equal(observationCollectionMask(split,{...split,all:'b',shows:'new',watchedShows:'w2'}),2);
+ assert.equal(observationCollectionMask(split,{...split,all:'b',shows:'new',queuedShows:'q2'}),8);
+ assert.equal(observationCollectionMask(split,{...split,all:'b',movies:'new'}),5);
+ assert.equal(observationCollectionMask(split,{...split,all:'b',shows:'new',watchedShows:''}),10);
+ assert.equal(observationCollectionMask(undefined,split),15);
 }
 console.log('Observation domain masks: 100 rounds, paired watchlist dependencies, missing and unknown activity full fallback passed');
 """)

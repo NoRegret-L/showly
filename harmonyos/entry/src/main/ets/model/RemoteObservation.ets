@@ -22,12 +22,24 @@ export interface RemoteMovieObservation {
 }
 // Optional cache-only activity evidence. Missing or invalid domain stamps
 // always require a complete observation; they never grant write permission.
-export interface ObservationVersions { all: string; movies: string; shows: string; }
+export interface ObservationVersions { all: string; movies: string; shows: string; watchedShows?: string; queuedShows?: string; }
 export function observationReadMask(old: ObservationVersions | undefined, next: ObservationVersions): number {
   if (!old || !old.all || !next.all || !old.movies || !old.shows || !next.movies || !next.shows) { return 3; }
   if (old.all === next.all) { return old.movies === next.movies && old.shows === next.shows ? 0 : 3; }
   const mask = (old.movies !== next.movies ? 1 : 0) | (old.shows !== next.shows ? 2 : 0);
   return mask || 3; // unclassified global activity: conservative full read
+}
+// Four endpoint bits: watched movies=1, watched shows=2, queued movies=4,
+// queued shows=8. Movie metadata has joint provenance; keep its two reads
+// together until a separate raw source cache is validated.
+export function observationCollectionMask(old: ObservationVersions | undefined, next: ObservationVersions): number {
+  const group = observationReadMask(old,next);
+  if (group === 0) { return 0; }
+  if (group === 3 || !old) { return 15; }
+  if (group === 1) { return 5; }
+  if (!old.watchedShows || !old.queuedShows || !next.watchedShows || !next.queuedShows) { return 10; }
+  const changed = (old.watchedShows !== next.watchedShows ? 2 : 0) | (old.queuedShows !== next.queuedShows ? 8 : 0);
+  return changed || 10;
 }
 export interface RemoteLibraryObservation {
   generation: number;

@@ -14,7 +14,7 @@ with tempfile.TemporaryDirectory() as tmp:
     for name in ("Media","ShowCatalog","RemoteObservation","ReadFlight","MediaPresentation"):
         shutil.copyfile(root/"model"/(name+".ets"),work/(name+".ts"))
     harness="""import { Media, CollectionDate, PersonalMovie, validReleaseDate } from './Media';
-import { RemoteLibraryObservation, RemoteMovieObservation, RemoteShowObservation, RemotePlayPosition, validateObservation, ObservationVersions, observationReadMask } from './RemoteObservation';
+import { RemoteLibraryObservation, RemoteMovieObservation, RemoteShowObservation, RemotePlayPosition, validateObservation, ObservationVersions, observationCollectionMask } from './RemoteObservation';
 type ShowProgress=RemoteShowObservation;
 type CloudLibrary=RemoteLibraryObservation;
 interface TraktSession { clientId:string; generation:number; token:string; }

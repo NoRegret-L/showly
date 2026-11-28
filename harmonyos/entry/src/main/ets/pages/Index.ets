@@ -954,7 +954,7 @@ struct Index {
   }
 
   private onRecoveryGateChanged(): void {
-    if (this.backupBusy || !this.pageVisible || this.syncBusy || this.localBusy || this.cloudBusy || this.saving ||
+    if (syncService.busy() || this.backupBusy || !this.pageVisible || this.syncBusy || this.localBusy || this.cloudBusy || this.saving ||
         this.authBusy || this.setupBusy) { return; }
     if (this.detailResumePending && this.selectedMedia) { this.resumeDetail(); if (this.localBusy) { return; } }
     const lane = this.syncCoordinator.next(this.autoActive() && this.episodeReady,
