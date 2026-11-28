@@ -1,9 +1,10 @@
 import { Media } from './Media';
-import { matchesText, validTitleId } from './MediaPresentation';
+import { matchesText, validTitleId, searchKey } from './MediaPresentation';
 export const SEARCH_LIMIT: number=50;
 export const SEARCH_SUGGESTIONS: number=5;
 export const SEARCH_RECENTS: number=5;
-export const SEARCH_MIN_SUGGESTION: number=2;
+// Explicit HarmonyOS enhancement: allow single-character local suggestions.
+export const SEARCH_MIN_SUGGESTION: number=1;
 export interface SearchRecord { media: Media; votes: number; }
 export interface SearchCandidate { media: Media; votes: number; localized: string; }
 export interface SearchOptions { kind: string; sort: string; descending: boolean; }
@@ -68,26 +69,54 @@ export class SearchCandidateTitles {
   private rows:SearchCandidate[]=[];
   private positions:Map<string,number>=new Map<string,number>();
   private patches:number=0;
-  clear():void{this.rows=[];this.positions.clear();}
+  private grams:Map<string,Set<string>>=new Map<string,Set<string>>();
+  private ready:boolean=false;
+  clear():void{this.rows=[];this.positions.clear();this.grams.clear();this.ready=false;}
   seed(rows:SearchCandidate[]):void{
     this.clear();this.rows=rows;
-    for(let i=0;i<rows.length;i++){if(this.positions.has(rows[i].media.id)){this.clear();return;}this.positions.set(rows[i].media.id,i);}
+    for(let i=0;i<rows.length;i++){if(this.positions.has(rows[i].media.id)){this.clear();return;}this.positions.set(rows[i].media.id,i);this.addGrams(rows[i]);}
+    this.ready=true;
+  }
+  private keys(row:SearchCandidate):Set<string>{
+    const out=new Set<string>();
+    for(const text of [searchKey(row.media.title),searchKey(row.localized)]){
+      for(let i=0;i<text.length;i++){out.add(text.substring(i,i+1));if(i+1<text.length){out.add(text.substring(i,i+2));}}
+    }return out;
+  }
+  private addGrams(row:SearchCandidate):void{
+    for(const key of this.keys(row)){let ids=this.grams.get(key);if(!ids){ids=new Set<string>();this.grams.set(key,ids);}ids.add(row.media.id);}
+  }
+  private dropGrams(row:SearchCandidate):void{
+    for(const key of this.keys(row)){const ids=this.grams.get(key);if(ids){ids.delete(row.media.id);if(!ids.size){this.grams.delete(key);}}}
+  }
+  matching(query:string,fallback:SearchCandidate[]):SearchCandidate[]{
+    if(!this.ready||this.rows!==fallback){return fallback;}
+    const key=searchKey(query.trim());if(!key){return fallback;}
+    let candidates:Set<string>|undefined;
+    for(let i=0;i<(key.length===1?1:key.length-1);i++){
+      const ids=this.grams.get(key.substring(i,i+(key.length===1?1:2)));
+      if(!ids){return [];}if(!candidates||ids.size<candidates.size){candidates=ids;}
+    }
+    const positions:number[]=[];
+    for(const id of candidates??new Set<string>()){const pos=this.positions.get(id);if(pos!==undefined){const row=this.rows[pos];if(matchesText(query,row.media.title,row.localized)){positions.push(pos);}}}
+    positions.sort((a:number,b:number)=>a-b);
+    return positions.map((pos:number)=>this.rows[pos]);
   }
   get(id:string):SearchCandidate|undefined{const pos=this.positions.get(id);return pos===undefined?undefined:this.rows[pos];}
   private reindex(from:number):void{for(let i=from;i<this.rows.length;i++){this.positions.set(this.rows[i].media.id,i);}}
   upsert(row:SearchCandidate):void{
     const id=row.media.id,pos=this.positions.get(id);
     if(pos!==undefined){const old=this.rows[pos];if(old.media===row.media&&old.votes===row.votes&&old.localized===row.localized){return;}
-      this.rows[pos]=row;this.patches++;return;}
+      this.dropGrams(old);this.rows[pos]=row;this.addGrams(row);this.patches++;return;}
     let lo=0,hi=this.rows.length;
     while(lo<hi){const mid=Math.floor((lo+hi)/2);if(this.rows[mid].media.id<id){lo=mid+1;}else{hi=mid;}}
-    this.rows.splice(lo,0,row);this.reindex(lo);this.patches++;
+    this.rows.splice(lo,0,row);this.addGrams(row);this.reindex(lo);this.patches++;
   }
-  remove(id:string):void{const pos=this.positions.get(id);if(pos===undefined){return;}this.rows.splice(pos,1);this.positions.delete(id);this.reindex(pos);this.patches++;}
+  remove(id:string):void{const pos=this.positions.get(id);if(pos===undefined){return;}this.dropGrams(this.rows[pos]);this.rows.splice(pos,1);this.positions.delete(id);this.reindex(pos);this.patches++;}
   patch(id:string,title:string):void{
     const pos=this.positions.get(id);if(pos===undefined){return;}
     const old=this.rows[pos];if(old.localized===title){return;}
-    this.rows[pos]={media:old.media,votes:old.votes,localized:title};this.patches++;
+    this.dropGrams(old);this.rows[pos]={media:old.media,votes:old.votes,localized:title};this.addGrams(this.rows[pos]);this.patches++;
   }
   patchCount():number{return this.patches;}
 }

@@ -4,15 +4,15 @@ import json,shutil,sqlite3,subprocess,tempfile
 root=Path(__file__).resolve().parents[1]/"entry/src/main/ets"
 with tempfile.TemporaryDirectory() as tmp:
     work=Path(tmp)
-    for name in ("Media","MediaPresentation","SearchRules","SearchRead","ReadFlight"):
+    for name in ("Media","MediaPresentation","SearchRules","SearchRead","ReadFlight","SearchController"):
         shutil.copyfile(root/"model"/(name+".ets"),work/(name+".ts"))
-    subprocess.run(["tsc","--strict","--target","ES2020","--module","commonjs","SearchRead.ts"],cwd=work,check=True)
+    subprocess.run(["tsc","--strict","--target","ES2020","--module","commonjs","SearchRead.ts","SearchController.ts"],cwd=work,check=True)
     (work/"test.cjs").write_text("""
 const assert=require('node:assert/strict'),fs=require('node:fs'),m=require('./SearchRules.js'),{SearchRead}=require('./SearchRead.js');
 const row=(i,kind='show',title='Test '+i)=>({media:{id:kind+':'+i,kind,title,year:2000+i,watched:true},votes:i});
 const candidates=Array.from({length:12},(_,i)=>({...row(i+1,i<6?'show':'movie'),localized:i===0?'中文测试':''}));
 const opt=m.defaultSearch(),input={catalog:candidates,remote:[],query:'test',suggestions:true,options:opt};
-assert.equal(m.searchRows({...input,query:'t'}).length,0);
+assert.equal(m.searchRows({...input,query:'t'}).length,10);
 assert.equal(m.searchRows(input).length,10);assert.equal(m.searchRows(input)[0].id,'movie:11');
 assert.equal(m.searchRows({...input,query:'中文'}).length,1);
 const remote=[{...row(99,'movie','Alias'),localized:'别名'},{...row(1),localized:'中文测试'}];
@@ -39,6 +39,20 @@ for(const size of [393,10000]){
  assert(newBytes<oldBytes);
  console.log(size+' search candidates: compact wire '+oldBytes+' -> '+newBytes+' UTF-8 bytes across 18 exact parity cases');
 }
+const {SearchController}=require('./SearchController.js');
+const owner=new SearchController(),catalogRows=Array.from({length:10000},(_,i)=>row(i+1,i%2?'show':'movie',i===42?'独特😀':'Test '+(i%13)));
+const candidate=r=>({...r,localized:r.media.id==='show:44'?'中文':''});
+owner.seed(catalogRows,'A',[],candidate);
+for(const q of ['t','Test 1','独','😀','中文','absent'])for(const kind of ['all','show','movie']){
+ const options={kind,sort:'rank',descending:false};
+ assert.deepEqual(m.searchRows(owner.input(q,false,options,candidate)),m.searchRows({catalog:owner.candidates,remote:[],query:q,suggestions:true,options}));
+}
+owner.acceptRemote(remote);assert.deepEqual(m.searchRows(owner.input('test',true,opt,candidate)).map(x=>x.id),['movie:99','show:1']);
+owner.acceptRemote([]);assert.deepEqual(m.searchRows(owner.input('test',true,opt,candidate)),[]);
+owner.chooseOffline(true);assert(m.searchRows(owner.input('test',true,opt,candidate)).length>0);
+owner.titles.patch('show:44','新增翻译');assert.deepEqual(m.searchRows(owner.input('新增',false,opt,candidate)).map(x=>x.id),['show:44']);
+owner.clearCandidates();assert.equal(owner.input('新增',false,opt,candidate).catalog.length,0);
+console.log('10k exact indexed candidates, single-character suggestion, remote empty separation, offline switch and scoped reset passed');
 const gate=new m.SearchGeneration(),old=gate.begin(),latest=gate.begin();assert(!gate.current(old));assert(gate.current(latest));gate.cancel();assert(!gate.current(latest));
 const A=m.searchScope('client','account:A'),B=m.searchScope('client','account:B');
 const catalog=new Map(),history=new Map();let reads=0,writes=0,calls=0;
@@ -95,8 +109,9 @@ task=(root/"data"/"SearchTask.ets").read_text()
 assert "this.searchGeneration.current(token)" in page and "scope===this.currentSearchAccount()" in page
 assert "this.searchRows.replace([],[],[])" in page and "this.searchRows.submit(" in page
 assert "await searchDisplay(input,consumer)" in page and "executeDisplayTask(new taskpool.Task(searchTask" in task
-assert "this.searchCandidateSource!==stored || this.searchCandidateKey!==key" in page
+assert "this.searchController.source!==stored || this.searchController.key!==key" in page
 assert "repo.rememberCatalog(scope,rows)" in page and "repo.remember(scope,query)" in page
+assert "GROUP BY query ORDER BY MAX(seq) DESC" in repo
 assert "search_catalog WHERE scope=?" in repo and "search_recent WHERE scope=?" in repo
 assert "await store.saveReadCheckpoints(account.uuid, result.matches)" in page
 assert "await readSyncAccount(session)" in page and "await readActivity(session)" in page

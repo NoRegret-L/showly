@@ -30,6 +30,7 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
+          sparse-checkout: harmonyos
 
       - name: Record upstream revision
         run: |
@@ -139,6 +140,7 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
+          sparse-checkout: harmonyos
 
       - name: Validate source release versions
         if: ${{ inputs.mode == 'build' || hashFiles('harmonyos/build-profile.json5') != '' }}
@@ -212,15 +214,21 @@ jobs:
             echo "::error::Release already exists. Inspect it; increment versionCode for a new build."
             exit 1
           fi
-          if ! existing="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" --jq '.object.sha' 2>/dev/null)"; then
+          echo "Release phase: inspect exact tag"
+          if ! existing="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" --jq '.object.sha' 2>"$RUNNER_TEMP/tag-error")"; then
+            cat "$RUNNER_TEMP/tag-error"
+            grep -q 'HTTP 404' "$RUNNER_TEMP/tag-error" || { echo "::error::Tag lookup failed (not a missing tag)"; exit 1; }
+            echo "Release phase: create exact tag"
             gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
-              -f "ref=refs/tags/$TAG" -f "sha=$GITHUB_SHA" >/dev/null
+              -f "ref=refs/tags/$TAG" -f "sha=$GITHUB_SHA" >/dev/null || { echo "::error::Tag creation denied or failed; inspect repository tag rules and Actions token access"; exit 1; }
             existing="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" --jq '.object.sha')"
           fi
           [[ "$existing" == "$GITHUB_SHA" ]] || { echo "::error::Tag points to another commit"; exit 1; }
+          echo 'Release phase: create verified draft and upload assets'
           gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --draft --prerelease \
             --title "Showly HarmonyOS $TAG (unsigned preview)" --notes-file release-notes.md \
             "showly-$TAG-unsigned.hap" SHA256SUMS.txt release-info.json
+          echo 'Release phase: inspect uploaded asset integrity'
           release_id="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json databaseId --jq .databaseId)"
           [[ "$release_id" =~ ^[0-9]+$ ]]
           gh api "repos/$GITHUB_REPOSITORY/releases/$release_id/assets?per_page=100" > remote-assets.json
@@ -231,5 +239,6 @@ jobs:
               '[.[] | select(.name == $file and .state == "uploaded" and .digest == $digest and .size == $size)] | length == 1' \
               remote-assets.json >/dev/null
           done
+          echo 'Release phase: publish verified draft'
           gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --prerelease --latest=false
           echo "[Unsigned preview release](https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG)" >> "$GITHUB_STEP_SUMMARY"

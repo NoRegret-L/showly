@@ -22,14 +22,14 @@ class DiskSearch implements SearchStorage {
     if (values.length && await this.db.batchInsertWithConflictResolution('search_catalog',values,relationalStore.ConflictResolution.ON_CONFLICT_REPLACE)!==values.length) { throw new Error('Search index write failed'); }
   }
   async recents(scope: string): Promise<string[]> {
-    const result=await this.db.querySql('SELECT query FROM search_recent WHERE scope=? ORDER BY seq DESC LIMIT ?',[scope,SEARCH_RECENTS]);
+    const result=await this.db.querySql('SELECT query FROM search_recent WHERE scope=? GROUP BY query ORDER BY MAX(seq) DESC LIMIT ?',[scope,SEARCH_RECENTS]);
     const rows: string[]=[];
     try { while (result.goToNextRow()) { rows.push(result.getString(0)); } } finally { result.close(); }
     return rows;
   }
   async remember(scope: string,query: string): Promise<void> {
     await this.db.executeSql('INSERT INTO search_recent(scope,query) VALUES (?,?)',[scope,query]);
-    await this.db.executeSql('DELETE FROM search_recent WHERE scope=? AND seq NOT IN (SELECT seq FROM search_recent WHERE scope=? ORDER BY seq DESC LIMIT ?)',[scope,scope,SEARCH_RECENTS]);
+    await this.db.executeSql('DELETE FROM search_recent WHERE scope=? AND seq NOT IN (SELECT MAX(seq) FROM search_recent WHERE scope=? GROUP BY query ORDER BY MAX(seq) DESC LIMIT ?)',[scope,scope,SEARCH_RECENTS]);
   }
   async clear(scope: string): Promise<void> { await this.db.executeSql('DELETE FROM search_recent WHERE scope=?',[scope]); }
 }
@@ -45,7 +45,7 @@ class MemorySearch implements SearchStorage {
     this.catalog.set(scope,index);
   }
   async recents(scope: string): Promise<string[]> { return this.history.get(scope) ?? []; }
-  async remember(scope: string,query: string): Promise<void> { this.history.set(scope,[query,...(this.history.get(scope) ?? [])].slice(0,SEARCH_RECENTS)); }
+  async remember(scope: string,query: string): Promise<void> { this.history.set(scope,[query,...(this.history.get(scope) ?? []).filter((value:string)=>value!==query)].slice(0,SEARCH_RECENTS)); }
   async clear(scope: string): Promise<void> { this.history.delete(scope); }
 }
 class TraktSearchTransport implements SearchTransport {

@@ -1,3 +1,4 @@
+import { SearchController, SearchSnapshot } from '../model/SearchController';
 import { SeasonPresentationOwner, parseSeasonPresentation, SeasonInfo } from '../model/SeasonPresentation';
 import { readSeasonPresentation } from '../data/DetailSectionsRepository';
 import { SeasonDetailOwner, SeasonDetailSnapshot, emptySeasonDetail, VerifiedEpisode, DetailEpisodeEntry, DetailSeasonRow } from '../model/SeasonDetailOwner';
@@ -548,13 +549,13 @@ struct Index {
   private searchAccount: string = '';
   private searchRoute: boolean = false;
   private searchLanguage: string = '';
-  private searchRemote: SearchRecord[] = [];
+  private searchController:SearchController=new SearchController();
+  @State searchSnapshot:SearchSnapshot=this.searchController.snapshot();
+  private publishSearch():void{const next=this.searchController.snapshot();if(next!==this.searchSnapshot){this.searchSnapshot=next;}}
+  private resetSearchRemote():void{this.searchController.resetRemote();this.publishSearch();}
+  private chooseSearchSource(offline:boolean):void{this.searchController.chooseOffline(offline);this.publishSearch();this.refreshSearchLocal();}
   private searchLocalRunning: boolean = false;
-  private searchCandidateSource?: SearchRecord[];
-  private searchCandidateKey: string = '';
-  private searchCandidates: SearchCandidate[] = [];
-  private searchTitleIndex=new SearchCandidateTitles();
-  private searchStoredIds:Set<string>=new Set<string>();
+
   private movieTitleOrder=new StableDisplayOrder<MovieProgressSource>((x:MovieProgressSource)=>x.row);
   private movieAllTitleOrder=new StableDisplayOrder<MovieProgressSource>((x:MovieProgressSource)=>x.row);
   private showCollectionTitleOrder=new StableDisplayOrder<CollectionCandidate>((x:CollectionCandidate)=>x.row);
@@ -1413,20 +1414,20 @@ struct Index {
     this.refreshSearchLocal();
   }
   private updateSearchCandidatesForLibraryChanges(changes:PersonalLibraryChange[]):void{
-    if(!this.searchCandidateSource){return;}
+    if(!this.searchController.source){return;}
     const scope=this.currentSearchAccount();
     const priorKey=JSON.stringify([scope,this.libraryRevision-1,this.cloudLocalAllowed,this.activeCloud()?.generation??-1,
       this.activeCloud()?.activity??'',this.presentationLanguage]);
-    if(this.searchCandidateKey!==priorKey){return;}
+    if(this.searchController.key!==priorKey){return;}
     for(const change of changes){
-      if(this.searchStoredIds.has(change.id)){continue;}
+      if(this.searchController.stored.has(change.id)){continue;}
       if(change.row&&isTraktMedia(change.row.media)){
-        const old=this.searchTitleIndex.get(change.id);
-        this.searchTitleIndex.upsert({media:publicSearchRecord(change.row.media).media,votes:old?.votes??0,
+        const old=this.searchController.titles.get(change.id);
+        this.searchController.titles.upsert({media:publicSearchRecord(change.row.media).media,votes:old?.votes??0,
           localized:this.presentationLanguage==='zh'?this.titleIndex.get(change.id)?.text.title??'':''});
-      }else{this.searchTitleIndex.remove(change.id);}
+      }else{this.searchController.titles.remove(change.id);}
     }
-    this.searchCandidateKey=JSON.stringify([scope,this.libraryRevision,this.cloudLocalAllowed,this.activeCloud()?.generation??-1,
+    this.searchController.key=JSON.stringify([scope,this.libraryRevision,this.cloudLocalAllowed,this.activeCloud()?.generation??-1,
       this.activeCloud()?.activity??'',this.presentationLanguage]);
   }
   private applyMediaRecordDisplayDelta(pending:PendingMediaDelta):boolean{
@@ -1580,7 +1581,7 @@ struct Index {
       if ((prior?.text.title ?? '') !== row.text.title) {
         this.titleSortRevision++; sortDirty.add(row.id);
         if(this.presentationLanguage==='zh'){
-          this.searchTitleIndex.patch(row.id,row.text.title);
+          this.searchController.titles.patch(row.id,row.text.title);
           this.movieTitleOrder.dirty(row.id);this.movieAllTitleOrder.dirty(row.id);
           if(row.id.startsWith('movie:')){this.movieCollectionTitleOrder.dirty(row.id);}else{this.showCollectionTitleOrder.dirty(row.id);}
         }
@@ -1855,7 +1856,7 @@ struct Index {
     }
     if (!residency.search || pressure) {
       if(pressure){this.invalidateSearchLocal();}
-      this.searchCandidateSource=undefined; this.searchCandidateKey=''; this.searchCandidates=[]; this.searchTitleIndex.clear(); this.searchStoredIds.clear();
+      this.searchController.clearCandidates();
       if (!residency.search) { this.searchRows.replace([],[],[]); }
       else { this.refreshSearchLocal(); }
     }
@@ -4175,8 +4176,8 @@ struct Index {
   }
   private resetSearchAccount(): void {
     this.cancelSearchRead(); this.searchHistoryGeneration.cancel(); this.invalidateSearchLocal();
-    this.searchAccount=''; this.searchRemote=[]; this.searchSubmitted=false; this.searching=false;
-    this.searchCandidateSource=undefined; this.searchCandidateKey=''; this.searchCandidates=[]; this.searchTitleIndex.clear();
+    this.searchAccount=''; this.resetSearchRemote(); this.searchSubmitted=false; this.searching=false;
+    this.searchController.clearCandidates();
     this.searchRecents=[]; this.searchStatus=''; this.title=''; this.results=[];
     this.searchRows.replace([],[],[]);
   }
@@ -4194,8 +4195,8 @@ struct Index {
       const previous=this.searchAccount;
       this.searchAccount=scope;
       this.cancelSearchRead(); this.searchHistoryGeneration.cancel(); this.invalidateSearchLocal();
-      this.searchRemote=[]; this.searchSubmitted=false; this.searching=false; this.searchRecents=[];
-      this.searchCandidateSource=undefined; this.searchCandidateKey=''; this.searchCandidates=[]; this.searchTitleIndex.clear();
+      this.resetSearchRemote(); this.searchSubmitted=false; this.searching=false; this.searchRecents=[];
+      this.searchController.clearCandidates();
       if (previous) { this.title=''; }
       this.searchStatus=''; this.results=[]; this.searchRows.replace([],[],[]);
     }
@@ -4238,7 +4239,7 @@ struct Index {
     if (value===this.title) { return; }
     this.cancelSearchRead(); this.invalidateSearchLocal();
     this.title=value; this.searching=false; this.searchSubmitted=false;
-    this.searchRemote=[]; this.searchOptions=defaultSearch(); this.searchStatus='';
+    this.resetSearchRemote(); this.searchOptions=defaultSearch(); this.searchStatus='';
     this.searchRows.replace([],[],[]); this.results=[];
     this.refreshSearchLocal();
   }
@@ -4269,24 +4270,11 @@ struct Index {
         const candidate=(row: SearchRecord): SearchCandidate=>({media:row.media,votes:row.votes,localized:language==='zh' ? this.titleIndex.get(row.media.id)?.text.title ?? '' : ''});
         const key=JSON.stringify([scope,this.libraryRevision,this.cloudLocalAllowed,this.activeCloud()?.generation ?? -1,
           this.activeCloud()?.activity ?? '',language]);
-        if (this.searchCandidateSource!==stored || this.searchCandidateKey!==key) {
-          const merged=new Map<string,SearchRecord>();
-          this.searchStoredIds.clear();
-          for (const row of stored) { if (validSearchRecord(row)) { merged.set(row.media.id,row); this.searchStoredIds.add(row.media.id); } }
-          // Current private library is an ephemeral input, never persisted here.
-          if (scope && scope===this.currentSearchAccount()) {
-            for (const row of this.personalLibrary()) {
-              if (isTraktMedia(row.media) && !merged.has(row.media.id)) { merged.set(row.media.id,publicSearchRecord(row.media)); }
-            }
-          }
-          const ordered=Array.from(merged.values());
-          ordered.sort((a: SearchRecord,b: SearchRecord)=>a.media.id<b.media.id ? -1 : a.media.id>b.media.id ? 1 : 0);
-          this.searchCandidates=ordered.map(candidate);
-          this.searchTitleIndex.seed(this.searchCandidates);
-          this.searchCandidateSource=stored; this.searchCandidateKey=key;
+        if (this.searchController.source!==stored || this.searchController.key!==key) {
+          const library:Media[]=scope&&scope===this.currentSearchAccount()?this.personalLibrary().filter((row:PersonalLibraryRow)=>isTraktMedia(row.media)).map((row:PersonalLibraryRow)=>row.media):[];
+          this.searchController.seed(stored,key,library,candidate);
         }
-        const input: SearchInput={catalog:this.searchCandidates,remote:this.searchRemote.map(candidate),
-          query:query,suggestions:!submitted,options:options};
+        const input:SearchInput=this.searchController.input(query,submitted,options,candidate);
         try {
           const local=this.searchRows.work.local;
           const consumer=local.consumer();local.start(consumer,JSON.stringify([key,query,submitted,version]));
@@ -4294,7 +4282,7 @@ struct Index {
           local.finish(consumer);
           if (!current()) { continue; }
           this.results=rows;
-          if (!submitted) { this.searchStatus=query.length<2 ? '输入至少2个字符查看本地建议。' : '本地建议 · '+rows.length+' 部'; }
+          if (!submitted) { this.searchStatus='本地建议 · '+rows.length+' 部'; }
           else if (this.searching) { this.searchStatus='本地结果 · '+rows.length+' 部，正在搜索网络…'; }
         } catch (error) { if (current()) { const local=this.searchRows.work.local;local.finish(local.consumer(),'local');this.searchStatus='本地搜索暂不可用。'; } }
       }
@@ -4309,7 +4297,7 @@ struct Index {
     const token=this.searchGeneration.begin();
     const current=(): boolean=>this.searchGeneration.current(token) && lane.current(consumer) && this.searchActive() &&
       client===this.clientId && scope===this.currentSearchAccount() && query===this.title.trim();
-    this.searchSubmitted=true; this.searchRemote=[]; this.searchOptions=defaultSearch();
+    this.searchSubmitted=true; this.resetSearchRemote(); this.searchOptions=defaultSearch();
     this.searching=!!client; this.searchStatus=client ? '读取本地结果…' : '本地搜索（未配置网络）';
     if(client){lane.start(consumer,JSON.stringify([scope,client,query]));}
     this.refreshSearchLocal();
@@ -4319,9 +4307,9 @@ struct Index {
       if (!client) { return; }
       const rows=await repo.remote(client,query,consumer);
       if (!current()) { return; }
-      this.searchRemote=rows;
+      this.searchController.acceptRemote(rows);this.publishSearch();
       lane.finish(consumer);this.searching=false;
-      this.searchStatus='搜索完成 · 本地与网络结果';
+      this.searchStatus='网络搜索完成';
       this.refreshSearchLocal();
       // Persist only public metadata under the captured verified scope.
       try { await repo.rememberCatalog(scope,rows); } catch (error) {}
@@ -7084,9 +7072,12 @@ struct Index {
       ListItem() {
         Column({ space: 12 }) {
           if (this.presentationStatus) { Text(this.presentationStatus).fontSize(12).width('100%') }
-        Text('影视搜索').fontSize(20).fontWeight(FontWeight.Medium)
-        TextInput({ placeholder: '电影或剧集名称', text: this.title })
-          .onChange((value: string) => { this.changeSearchText(value); })
+        Row({space:6}){
+          TextInput({placeholder:'电影或剧集名称',text:this.title}).layoutWeight(1).height(40)
+            .onChange((value:string)=>{this.changeSearchText(value);})
+            .onSubmit(()=>{this.search();})
+          if(this.title){Button('清空').height(34).fontSize(12).onClick(()=>{this.changeSearchText('');})}
+        }.width('100%')
         Row({ space: 8 }) {
           Button(this.searching ? '重新搜索' : '搜索').layoutWeight(1)
             .enabled(!this.setupBusy && this.title.trim().length > 0)
@@ -7126,7 +7117,16 @@ struct Index {
             Text('排序：'+(this.searchOptions.sort==='rank' ? '相关度' : this.searchOptions.sort==='title' ? '名称' : '年份')).fontSize(12)
           }
         }
+        if(this.searchSubmitted&&this.searchSnapshot.remoteReady){
+          Row({space:6}){
+            Button(this.searchSnapshot.offline?'网络结果':'✓ 网络结果').fontSize(12).layoutWeight(1).onClick(()=>{this.chooseSearchSource(false);})
+            Button(this.searchSnapshot.offline?'✓ 本地补充':'本地补充').fontSize(12).layoutWeight(1).onClick(()=>{this.chooseSearchSource(true);})
+          }.width('100%')
+        }
+        if(this.searching){LoadingProgress().width(22).height(22)}
         Text(this.searchStatus).fontSize(13)
+        if(!this.searching&&this.searchStatus.includes('失败')){Button('重试网络搜索').fontSize(12).onClick(()=>{this.search();})}
+        if(this.searchSubmitted&&!this.searching&&!this.results.length){Text(this.searchSnapshot.remoteReady&&!this.searchSnapshot.offline?'网络无匹配结果':'本地无匹配结果').fontSize(12)}
         }.width('100%')
       }
         LazyForEach(this.searchRows, (item: Media) => {
@@ -7136,6 +7136,7 @@ struct Index {
             Text(this.displayLabel(item)).layoutWeight(1)
               .onClick(() => { this.openDetail(item); })
             if (this.isHidden(item)) { Text('已隐藏').fontSize(12) }
+            if(this.isInLibrary(item)){Text('已收藏').fontSize(11)}
             Button('详情').fontSize(12).enabled(!this.detailUi.summaryBusy && !this.setupBusy)
               .onClick(() => { this.openDetail(item); })
             Button(this.isInLibrary(item) ? '已收藏' : '添加')

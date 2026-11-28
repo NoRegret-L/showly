@@ -91,7 +91,7 @@ export class SearchRead {
   async recents(scope: string): Promise<string[]> {
     if (!scope) { return []; }
     await (this.historyWrites.get(scope) ?? Promise.resolve()).catch((): void=>{});
-    return (await this.store.recents(scope)).slice(0,SEARCH_RECENTS);
+    return Array.from(new Set<string>(await this.store.recents(scope))).slice(0,SEARCH_RECENTS);
   }
   async remember(scope: string,query: string): Promise<void> {
     const text=query.trim();
