@@ -5,7 +5,7 @@ root=Path(__file__).resolve().parents[1]/"entry/src/main/ets"
 with tempfile.TemporaryDirectory() as tmp:
     w=Path(tmp)
     for source in (root/"model").glob("*.ets"):shutil.copyfile(source,w/(source.stem+".ts"))
-    subprocess.run(["tsc","--strict","--target","ES2020","--module","commonjs","ListSyncMerge.ts","RatingRules.ts"],cwd=w,check=True)
+    subprocess.run(["tsc","--strict","--target","ES2020","--module","commonjs","ListSyncMerge.ts","RatingRules.ts","ListPersistence.ts"],cwd=w,check=True)
     (w/"test.cjs").write_text("""
 const a=require('node:assert/strict'),m=require('./ListSyncMerge'),r=require('./RatingRules'),p=require('./ListPersistence');
 const item=i=>({media:{id:'show:'+i,kind:'show',title:'T'+i,year:2020,watched:false},rank:i,listedAt:i});
