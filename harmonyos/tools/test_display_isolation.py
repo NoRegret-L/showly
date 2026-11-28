@@ -89,7 +89,13 @@ assert "this.displayRevisions.showsChanged()" in page and "this.displayRevisions
 assert "this.displayRevisions.collectionChanged()" in page
 assert "this.flagVersion('show')" in page and "this.hiddenVersion('show')" in page
 assert page.count("differ,current)")==7
-assert page.count("this.sortJobs.current(slot,token)")==3
+# Three successful publication guards plus an independent collection error guard.
+assert page.count("if (!this.sortJobs.current(slot,token)")==3
+collection_sort=page.split("  private async runCollectionSort(",1)[1].split("  private collectionEntries()",1)[0]
+assert "if (!(error instanceof ReadCancelled) && this.sortJobs.current(slot,token)" in collection_sort
+assert "epoch===this.presentationEpoch && key===this.collectionSortKey()" in collection_sort
+assert "this.reportCollectionFailure(key,'排序')" in collection_sort
+assert "this.collectionFailureKey!==key" in collection_sort
 assert page.count("epoch !== this.presentationEpoch")>=3
 assert "this.validateNextTarget(row)" in page
 assert "this.movieProgressRows('',true).find(" in page
