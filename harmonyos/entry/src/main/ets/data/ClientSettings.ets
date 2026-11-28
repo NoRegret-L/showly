@@ -1,3 +1,4 @@
+import { validCollectionRecentAmount } from '../model/CollectionViewOwner';
 import { preferences } from '@kit.ArkData';
 import { DiscoverOptions, defaultDiscover, validDiscoverOptions } from '../model/DiscoverRules';
 import { common } from '@kit.AbilityKit';
@@ -42,6 +43,14 @@ export class ClientSettings {
     if (!['show','movie'].includes(kind) || !validDiscoverOptions(value)) { throw new Error('Invalid discovery settings'); }
     await this.storage.put('discover_options:'+kind,JSON.stringify(value));
     await this.storage.flush();
+  }
+  loadCollectionRecentAmount():number {
+    const value=this.storage.getSync('collection_recent_amount',4);
+    return typeof value==='number'&&validCollectionRecentAmount(value)?value:4;
+  }
+  async saveCollectionRecentAmount(value:number):Promise<void>{
+    if(!validCollectionRecentAmount(value)){throw new Error('Invalid collection recent amount');}
+    await this.storage.put('collection_recent_amount',value);await this.storage.flush();
   }
   loadCollectionOptions(kind: string, section: string): CollectionOptions {
     const raw = this.storage.getSync('collection_options:' + kind + ':' + section, '');

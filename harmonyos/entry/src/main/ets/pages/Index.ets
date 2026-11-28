@@ -1,4 +1,4 @@
-import { CollectionViewOwner, CollectionNetworkGroup, CollectionGenreOption, COLLECTION_NETWORK_GROUPS, COLLECTION_GENRES, toggleCollectionSelection } from '../model/CollectionViewOwner';
+import { CollectionViewOwner, CollectionNetworkGroup, CollectionGenreOption, COLLECTION_NETWORK_GROUPS, COLLECTION_GENRES, toggleCollectionSelection, COLLECTION_RECENT_AMOUNTS, CollectionDependencyVersions, CollectionMetadataVersions, CollectionRatingRequest, collectionEmptyText } from '../model/CollectionViewOwner';
 import { StableDisplayOrder, StableOrderChange } from '../model/StableDisplayOrder';
 import { PageStateOwner, PageWork, PageWorkSet, PageSortJobs, PageSummary } from '../model/PageStateOwner';
 import { ProgressTitleOrder } from '../model/ProgressTitleOrder';
@@ -162,6 +162,8 @@ struct Index {
   private pageOwnerSlot():string{const slot=this.scrollSlot();return slot==='library'?this.collectionOwnerSlot():slot;}
   private activePageWork():PageWork|undefined{return this.pageWorks.get(this.pageOwnerSlot());}
   private libraryRevision: number = 0;
+  private collectionDependencies:CollectionDependencyVersions=new CollectionDependencyVersions();
+  private collectionMetadata:CollectionMetadataVersions=new CollectionMetadataVersions();
   private mediaInput: MediaInputVersion=new MediaInputVersion();
   private displayRevisions: DisplayRevisions = new DisplayRevisions();
   @State sortedViewRevision: number = 0;
@@ -315,7 +317,8 @@ struct Index {
   @State @Watch('onMoviesChanged') movieCalendarData?: PersonalMovieSnapshot = undefined;
   private movieRatingKey: string = '';
   private movieRatingRows: CollectionRating[] = [];
-  private movieRatingBusy: boolean = false;
+  private movieRatingRequest:CollectionRatingRequest=new CollectionRatingRequest();
+  @State movieCollectionRatingStatus:string='';
   @State @Watch('onMovieCalendarViewChanged') movieCalendarMode: string = 'future';
   @State @Watch('onMovieCalendarViewChanged') movieCalendarQuery: string = '';
   private calendarRevision: number = 0;
@@ -428,7 +431,9 @@ struct Index {
   private get recentCollectionMemo():RevisionMemo<PersonalLibraryRow[]>{return this.collectionRowsSource.allMemo;}
   @State @Watch('onCollectionRatingsChanged') collectionRatings: CollectionRating[] = [];
   private collectionRatingKey: string = '';
-  private collectionRatingBusy: boolean = false;
+  private showRatingRequest:CollectionRatingRequest=new CollectionRatingRequest();
+  @State collectionRecentAmount:number=4;
+  @State collectionRecentSaving:boolean=false;
   @State collectionRatingStatus: string = '';
   @State @Watch('onRecoveryGateChanged') cloudBusy: boolean = false;
   @State cloudStatus: string = '';
@@ -500,6 +505,7 @@ struct Index {
       this.settings = new ClientSettings(context);
       this.clientId = this.settings.load();
       this.mediaMode = normalizeMode(this.settings.loadMode());
+      this.collectionRecentAmount=this.settings.loadCollectionRecentAmount();
       this.restoreDiscoverOptions();
       this.presentationLanguage = this.settings.loadLanguage();
       this.progressPrefs = this.settings.loadProgress();
@@ -660,6 +666,7 @@ struct Index {
     this.clearLocalCalendar(true);
     this.movieCalendarRows.replace([],[],[]);
     this.collectionScope = '';
+    this.showRatingRequest.reset();this.collectionRatingStatus='';
     this.collectionRatingKey = '';
     this.collectionRatings = [];
     this.collectionState = emptyCollectionState();
@@ -679,6 +686,7 @@ struct Index {
     this.showProjectionCache.clear(); this.libraryProjectionSession.clear();
     this.episodeStore?.releaseProjectionReadCache();
     this.libraryRevision++;
+    this.collectionDependencies.reset();
     this.displayRevisions.reset();
     this.collectionIndexMemos.clear();
     this.movieMetadataMemo.clear();
@@ -1259,6 +1267,7 @@ struct Index {
     const scoped=!!pending?.changes&&pending.version===this.mediaInput.version()&&pending.account===this.currentProgressScope()&&
       pending.cloud===this.activeCloud()&&pending.evidence===this.libraryEvidence&&pending.localAllowed===this.cloudLocalAllowed&&
       (!this.signedIn||!!this.activeCloud());
+    this.collectionDependencies.observe(scoped&&pending?.changes?pending.changes.map((change:PersonalLibraryChange)=>change.id):[],!scoped);
     this.pageWorks.observe(JSON.stringify([this.currentProgressScope(),this.libraryRevision]),
       scoped&&pending?.changes?pending.changes.map((change:PersonalLibraryChange)=>change.id):[],!scoped);
     if(scoped&&pending?.changes){
@@ -1378,23 +1387,23 @@ struct Index {
   }
 
   private onShowsChanged(): void {
-    this.displayRevisions.showsChanged();
+    this.displayRevisions.showsChanged();this.collectionDependencies.sourceChanged('show');
     const slot=this.scrollSlot();
     if(!slot||slot==='show'||slot==='calendar'||slot==='library'||slot==='discover'||slot==='search'){this.onPresentationChanged();}
   }
   private onMoviesChanged(): void {
-    this.displayRevisions.moviesChanged();
+    this.displayRevisions.moviesChanged();this.collectionDependencies.sourceChanged('movie');
     const slot=this.scrollSlot();
     if(!slot||slot==='movie'||slot==='movieCalendar'||slot==='library'||slot==='discover'||slot==='search'){this.onPresentationChanged();}
   }
   private onCollectionRatingsChanged(): void {
     this.showRatingVersion++;
-    this.displayRevisions.collectionChanged();
+    this.displayRevisions.collectionChanged();this.collectionDependencies.sourceChanged('show');
     const slot=this.scrollSlot();
     if(!slot||slot==='show'||slot==='library'){this.onPresentationChanged();}
   }
   private onCollectionStateChanged(): void {
-    this.displayRevisions.collectionChanged();
+    this.displayRevisions.collectionChanged();this.collectionDependencies.sourceChanged('');
     this.hiddenIndex = new Set<string>(this.collectionState.hidden.map((row: HiddenEntry) => row.media.id));
     this.hiddenShowKey = JSON.stringify(Array.from(this.hiddenIndex).filter((id: string) => id.startsWith('show:')).sort());
     this.hiddenMovieKey = JSON.stringify(Array.from(this.hiddenIndex).filter((id: string) => id.startsWith('movie:')).sort());
@@ -1425,6 +1434,7 @@ struct Index {
     this.presentationPublished = revision;
     const changes = this.presentation.takeChanges();
     const priorTitles=this.titleSortRevision;
+    const priorCollectionMeta=this.collectionMetadataKey();
     const priorShow=this.showTitleRevision,priorMovie=this.movieTitleRevision;
     const priorShowMeta=this.showMetaRevision,priorMovieMeta=this.movieMetaRevision;
     const priorEpisodes=this.episodeSearchRevision;
@@ -1444,6 +1454,7 @@ struct Index {
       }
       if (JSON.stringify(prior?.collection ?? null) !== JSON.stringify(row.collection ?? null)) {
         this.collectionMetaRevision++;
+        this.collectionMetadata.changed(row.id,prior?.collection,row.collection);
         if (row.id.startsWith('movie:')) { this.movieMetaRevision++; } else { this.showMetaRevision++; }
       }
       if ((prior?.text.title??'')!==row.text.title || (prior?.posterUri??'')!==row.posterUri) { dirty.add(row.id); }
@@ -1489,7 +1500,7 @@ struct Index {
     const episodeChanged=this.presentationLanguage==='zh' && priorEpisodes!==this.episodeSearchRevision;
     if (this.tab==='search' && this.presentationLanguage==='zh' && priorTitles!==this.titleSortRevision) { this.refreshSearchLocal(); }
     if ((this.tab==='library' && titleChanged) || !this.scrollSlot()) { this.presentationRevision=revision; }
-    const structural=(this.tab==='library' && ((titleChanged && this.businessTitlesNeeded()) || (metaChanged && this.collectionNeedsMetadata()))) ||
+    const structural=(this.tab==='library' && ((titleChanged && this.businessTitlesNeeded()) || (priorCollectionMeta!==this.collectionMetadataKey()))) ||
       (this.tab==='progress' && this.progressMode==='next' && ((titleChanged && (this.mediaMode==='show' || this.businessTitlesNeeded())) || (episodeChanged && this.mediaMode==='show' && !!this.nextQuery.trim()))) ||
       (this.tab==='progress' && this.progressMode==='calendar' && (this.mediaMode==='show' ?
         metaChanged || (!!this.calendarQuery.trim() && (titleChanged || episodeChanged)) : titleChanged && !!this.movieCalendarQuery.trim()));
@@ -3240,6 +3251,7 @@ struct Index {
     this.clearLocalCalendar(true);
     this.movieCalendarRows.replace([],[],[]);
     this.collectionScope = '';
+    this.showRatingRequest.reset();this.collectionRatingStatus='';
     this.collectionRatingKey = '';
     this.collectionRatings = [];
     this.collectionState = emptyCollectionState();
@@ -3259,6 +3271,7 @@ struct Index {
     this.showProjectionCache.clear(); this.libraryProjectionSession.clear();
     this.episodeStore?.releaseProjectionReadCache();
     this.libraryRevision++;
+    this.collectionDependencies.reset();
     this.displayRevisions.reset();
     this.collectionIndexMemos.clear();
     this.movieMetadataMemo.clear();
@@ -4790,6 +4803,7 @@ struct Index {
   private resetCalendar(): void {
     ++this.calendarRevision;
     this.movieCalendarData = undefined;
+    this.movieRatingRequest.reset();this.movieCollectionRatingStatus='';
     this.movieRatingKey = '';
     this.movieRatingRows = [];
     this.clearLocalCalendar(true);
@@ -4801,6 +4815,7 @@ struct Index {
   private publishMovieSource(snapshot: CloudLibrary): void {
     if (this.activeCloud() !== snapshot || !snapshot.movieDetails) { return; }
     if (this.movieCalendarCurrent()) { return; }
+    this.movieRatingRequest.reset();this.movieCollectionRatingStatus='';
     this.movieRatingKey = '';
     this.movieRatingRows = [];
     this.movieCalendarData = { generation: snapshot.generation, activity: snapshot.activity,
@@ -4815,12 +4830,13 @@ struct Index {
     const session = traktAuth.session(this.clientId);
     const scope = this.currentProgressScope();
     if (!source || !snapshot || !session || !scope || !this.movieCalendarCurrent() || !this.cloudFresh ||
-        this.cloudBusy || this.movieRatingBusy || this.authBusy || this.syncBusy || this.setupBusy) { return; }
+        this.cloudBusy || this.authBusy || this.syncBusy || this.setupBusy) { return; }
     const key = JSON.stringify([scope,session.clientId,session.generation,source.activity]);
     if (this.movieRatingKey === key) { return; }
+    const ticket=this.movieRatingRequest.begin(key);if(!ticket){return;}
     this.movieRatingKey = key;
-    this.movieRatingBusy = true;
-    const current = (): boolean => this.activeCloud() === source && this.movieCalendarData === snapshot &&
+    this.movieCollectionRatingStatus='正在读取电影个人评分…';
+    const current = (): boolean => this.movieRatingRequest.current(ticket)&&this.activeCloud() === source && this.movieCalendarData === snapshot &&
       this.currentProgressScope() === scope && traktAuth.isCurrent(session.clientId,session.generation);
     try {
       const ratings = await readCollectionRatings(session,'movie',source.activity);
@@ -4828,16 +4844,16 @@ struct Index {
       const values = new Map<string,number>();
       for (const rating of ratings) { values.set(rating.id,rating.value); }
       this.movieRatingRows = ratings;
-      this.collectionRatingStatus = '';
+      this.movieCollectionRatingStatus = '';
       const movies = snapshot.movies.map((row: PersonalMovie): PersonalMovie => ({
         media: row.media, released: row.released, cloudWatched: row.cloudWatched, cloudWatchlist: row.cloudWatchlist,
         localOnly: row.localOnly, runtime: row.runtime, rating: row.rating, addedAt: row.addedAt,
         dateUncertain: row.dateUncertain, userRating: values.get(row.media.id) }));
       this.movieCalendarData = { generation: snapshot.generation, activity: snapshot.activity, movies: movies, ratingsComplete: true };
     } catch (error) {
-      if (current()) { this.collectionRatingStatus = '电影个人评分读取失败；下拉刷新后重试。'; }
+      if (current()) { this.movieCollectionRatingStatus = '电影个人评分读取失败；可重试。'; }
     } finally {
-      this.movieRatingBusy = false;
+      if (!this.movieRatingRequest.finish(ticket)) { return; }
       if (this.activeCloud() !== source || this.currentProgressScope() !== scope ||
           (this.movieCalendarData !== snapshot && this.movieCalendarData?.ratingsComplete !== true)) {
         if (this.movieRatingKey === key) { this.movieRatingKey = ''; }
@@ -5193,7 +5209,7 @@ struct Index {
       if (this.showSummary.key === this.showDisplayKey()) {
         Text('符合条件 ' + this.showSummary.total + ' 部').fontSize(13).width('100%')
         if (!this.showSummary.total && !this.cloudBusy && !this.localBusy) { Text('暂无符合条件的下一集。').fontSize(14).width('100%') }
-      } else { Text('正在更新列表…').fontSize(13).width('100%') }
+      } else { Row({space:8}) { LoadingProgress().width(24).height(24); Text('正在更新列表…').fontSize(13) }.width('100%').justifyContent(FlexAlign.Center) }
         }.width('100%')
       }
       if (!this.signedIn || this.activeCloud()) {
@@ -5683,8 +5699,9 @@ struct Index {
 
   private async refreshPage(): Promise<void> {
     this.candidateFailureKey='';
-    if (this.tab === 'library' || (this.tab==='progress' && this.mediaMode==='show' && this.progressPrefs.sort==='userRating')) { this.collectionRatingKey = ''; this.collectionRatings = []; }
+    if (this.tab === 'library' || (this.tab==='progress' && this.mediaMode==='show' && this.progressPrefs.sort==='userRating')) { this.showRatingRequest.reset();this.collectionRatingStatus='';this.collectionRatingKey = ''; this.collectionRatings = []; }
     if (this.mediaMode === 'movie') {
+      this.movieRatingRequest.reset();this.movieCollectionRatingStatus='';
       this.movieRatingKey = '';
       this.movieRatingRows = [];
     }
@@ -5866,22 +5883,23 @@ struct Index {
     const session = traktAuth.session(this.clientId);
     const scope = this.currentProgressScope();
     const kind = this.mediaMode;
-    if (!snapshot || !session || !scope || !this.cloudFresh || this.collectionRatingBusy || this.cloudBusy || this.syncBusy || this.authBusy) { return; }
+    if (!snapshot || !session || !scope || !this.cloudFresh || this.cloudBusy || this.syncBusy || this.authBusy) { return; }
     const key = JSON.stringify([scope,session.clientId,session.generation,snapshot.activity,kind]);
     if (this.collectionRatingKey === key) { return; }
-    this.collectionRatingBusy = true;
+    const ticket=this.showRatingRequest.begin(key);if(!ticket){return;}
     this.collectionRatingKey = key;
     this.collectionRatings = [];
-    const current = (): boolean => this.currentProgressScope() === scope && this.activeCloud() === snapshot &&
-      this.mediaMode === kind && this.clientId === session.clientId && traktAuth.isCurrent(session.clientId,session.generation);
+    const current = (): boolean => this.showRatingRequest.current(ticket)&&this.currentProgressScope() === scope && this.activeCloud() === snapshot &&
+      this.clientId === session.clientId && traktAuth.isCurrent(session.clientId,session.generation);
     try {
       this.collectionRatingStatus = '正在读取个人评分…';
       const ratings = await readCollectionRatings(session,kind,snapshot.activity);
       if (current()) { this.collectionRatings = ratings; this.collectionRatingStatus = ''; }
-    } catch (error) { if (current()) { this.collectionRatingStatus = '个人评分读取失败；刷新后重试。'; } }
+    } catch (error) { if (current()) { this.collectionRatingStatus = '个人评分读取失败；可重试。'; } }
     finally {
-      this.collectionRatingBusy = false;
-      if (!current() && this.collectionRatingKey === key) {
+      const valid=current();
+      if(!this.showRatingRequest.finish(ticket)){return;}
+      if (!valid && this.collectionRatingKey === key) {
         this.collectionRatingKey = '';
         this.scheduleLazyRows();
       }
@@ -5910,7 +5928,7 @@ struct Index {
   }
   private collectionIndexes(section: string): CollectionIndexes {
     const now = Date.now();
-    const key = JSON.stringify([this.displayRevisions.collection,this.currentProgressScope(),this.activeCloud()?.generation??-1,
+    const key = JSON.stringify([this.collectionDependencies.source(this.mediaMode),this.currentProgressScope(),this.activeCloud()?.generation??-1,
       this.activeCloud()?.activity??'',this.collectionScope,this.mediaMode,section,this.collectionRatingKey,this.movieRatingKey,this.movieCalendarCurrent()]);
     const slot = this.mediaMode + ':' + section;
     let memo = this.collectionIndexMemos.get(slot);
@@ -5953,21 +5971,46 @@ struct Index {
     return rows.map((row:PersonalLibraryRow)=>this.collectionCandidateForRow(row,section,indexes));
   }
   private recentCollectionRows(): PersonalLibraryRow[] {
+    if(this.collectionRecentAmount===0){return [];}
     const now = Date.now();
-    const key = JSON.stringify([this.displayRevisions.collection,this.libraryRevision,this.collectionScope,this.currentProgressScope(),this.mediaMode]);
+    const key = JSON.stringify([this.collectionDependencies.source(this.mediaMode),this.collectionDependencies.business(this.mediaMode),this.collectionScope,this.currentProgressScope(),this.mediaMode,this.collectionRecentAmount]);
     const cached = this.recentCollectionMemo.get(key,now);
     if (cached) { return cached; }
     const members = collectionMembers(this.personalLibrary(),this.currentCollectionState(),this.mediaMode,'mine','all');
-    const rows = recentCollection(this.collectionCandidates(members,'mine'),4);
+    const rows = recentCollection(this.collectionCandidates(members,'mine'),this.collectionRecentAmount);
     this.recentCollectionMemo.put(key,rows,now,Number.MAX_SAFE_INTEGER);
     return rows;
   }
   private collectionSource(): PersonalLibraryRow[] { return this.collectionBase(); }
+  private collectionHasFilters():boolean{
+    const options=this.collectionFilter==='other'?defaultCollection():this.collectionOptions;
+    return !!this.collectionQuery.trim()||this.collectionStatusFilter!=='all'||options.genres.length>0||
+      (this.mediaMode==='show'&&options.networks.length>0)||(this.collectionFilter==='queue'&&options.upcoming!=='all');
+  }
+  private async changeCollectionRecentAmount(value:number):Promise<void>{
+    const settings=this.settings;
+    if(!settings||this.collectionRecentSaving||value===this.collectionRecentAmount){return;}
+    this.collectionRecentSaving=true;
+    try{await settings.saveCollectionRecentAmount(value);this.collectionRecentAmount=value;this.requestPresentation();}
+    catch(error){this.collectionRuleStatus='最近添加数量保存失败。';}
+    finally{this.collectionRecentSaving=false;}
+  }
+  private retryCollectionRatings():void{
+    if(this.mediaMode==='movie'){
+      this.movieRatingRequest.reset();this.movieRatingKey='';this.movieCollectionRatingStatus='';this.loadMovieRatings();
+    }else{
+      this.showRatingRequest.reset();this.collectionRatingKey='';this.collectionRatingStatus='';this.loadCollectionRatings();
+    }
+  }
+  private collectionMetadataKey():string{
+    const options=this.collectionFilter==='other'?defaultCollection():this.collectionOptions;
+    return this.collectionMetadata.key(this.mediaMode,options,this.collectionFilter);
+  }
   private collectionSortKey(includeTitles:boolean=true,includeBusiness:boolean=true): string {
     const options = this.collectionFilter === 'other' ? defaultCollection() : this.collectionOptions;
-    return JSON.stringify([this.displayRevisions.collection,includeBusiness?this.libraryRevision:0,this.collectionScope,this.currentProgressScope(),
+    return JSON.stringify([this.collectionDependencies.source(this.mediaMode),includeBusiness?this.collectionDependencies.business(this.mediaMode):0,this.collectionScope,this.currentProgressScope(),
       this.mediaMode,this.collectionFilter,this.collectionStatusFilter,this.collectionQuery,options,this.presentationLanguage,
-      includeTitles && this.presentationLanguage==='zh' && (this.collectionQuery.trim() || options.sort==='title' || options.sort==='userRating') ? this.titleVersion(this.mediaMode) : 0,this.collectionNeedsMetadata() ? this.metaVersion(this.mediaMode) : 0]);
+      includeTitles && this.presentationLanguage==='zh' && (this.collectionQuery.trim() || options.sort==='title' || options.sort==='userRating') ? this.titleVersion(this.mediaMode) : 0,this.collectionMetadataKey()]);
   }
   private collectionItems(prepare: boolean = false): PersonalLibraryRow[] {
     if (this.signedIn && !this.activeCloud()) { return []; }
@@ -6091,7 +6134,9 @@ struct Index {
           if (this.presentationStatus) { Text(this.presentationStatus).fontSize(12).width('100%') }
       Row({ space: 8 }) {
         Text('收藏').fontSize(25).fontWeight(FontWeight.Bold).layoutWeight(1)
-        Button(this.collectionSearchOpen?'关闭搜索':'搜索').fontSize(12).onClick(()=>{
+        Image($r('app.media.nav_ic_search')).width(36).height(36).padding(8)
+          .fillColor(this.collectionSearchOpen?$r('app.color.showly_accent'):$r('app.color.showly_secondary'))
+          .accessibilityText(this.collectionSearchOpen?'关闭搜索':'搜索').onClick(()=>{
           this.collectionSearchOpen=!this.collectionSearchOpen;
           if(!this.collectionSearchOpen){this.collectionQuery='';this.resetCollection();}
           this.captureCollectionView();
@@ -6134,6 +6179,12 @@ struct Index {
       }
       if (this.collectionFilter !== 'other') { this.collectionRuleControls() }
       if (this.collectionRuleStatus) { Text(this.collectionRuleStatus).fontSize(12).width('100%') }
+      if (this.collectionOptions.sort==='userRating' && (this.mediaMode==='movie'?this.movieCollectionRatingStatus:this.collectionRatingStatus)) {
+        Row({space:6}) {
+          Text(this.mediaMode==='movie'?this.movieCollectionRatingStatus:this.collectionRatingStatus).fontSize(12).layoutWeight(1)
+          if((this.mediaMode==='movie'?this.movieCollectionRatingStatus:this.collectionRatingStatus).includes('失败')){Button('重试').fontSize(12).onClick(()=>{this.retryCollectionRatings();})}
+        }.width('100%')
+      }
       if (this.collectionFilter === 'hidden') { Text('仅本机隐藏，不删除历史、不写入 Trakt。').fontSize(12).width('100%') }
       if (this.presentationRevision>=0 && this.collectionFilter === 'mine' && this.collectionPage === 1 && !this.collectionQuery.trim() && this.recentCollectionRows().length) {
         Text('最近添加（已记录时间）').fontSize(17).fontWeight(FontWeight.Medium).width('100%')
@@ -6148,7 +6199,7 @@ struct Index {
         }.width('100%')
       }
       if (this.collectionSummary.key === this.collectionDisplayKey()) {
-        if (!this.collectionSummary.total && !this.cloudBusy && !this.localBusy) { Text('此分类暂无影视。').fontSize(13).width('100%') }
+        if (!this.collectionSummary.total && !this.cloudBusy && !this.localBusy) { Text(collectionEmptyText(this.collectionHasFilters(),this.collectionFilter)).fontSize(14).width('100%').textAlign(TextAlign.Center).padding(16) }
         Text('共 ' + this.collectionSummary.total + ' 部').fontSize(14)
       } else { Text('正在更新列表…').fontSize(13).width('100%') }
       Row({ space: 8 }) {
@@ -6191,9 +6242,27 @@ struct Index {
 
   @Builder
   collectionRuleControls() {
-    Button(this.collectionOptionsOpen ? '收起排序与筛选' : '排序与筛选').fontSize(12)
-      .onClick(() => { this.collectionOptionsOpen = !this.collectionOptionsOpen; this.requestPresentation(); })
-    if (this.collectionOptionsOpen) {
+    Button('排序与筛选').fontSize(12)
+      .onClick(() => { this.collectionOptionsOpen = true; this.requestPresentation(); })
+      .bindSheet($this.collectionOptionsOpen,this.collectionFilterSheet(),{height:SheetSize.LARGE,showClose:true})
+  }
+
+  @Builder
+  collectionFilterSheet(){
+    Scroll(){
+    Column({space:12}){
+      Text('排序与筛选').fontSize(20).fontWeight(FontWeight.Medium).width('100%')
+      if(this.collectionFilter==='mine'){
+        Text('最近添加数量').fontSize(13).width('100%')
+        Row({space:4}){
+          ForEach(COLLECTION_RECENT_AMOUNTS,(amount:number)=>{
+            Button(amount.toString()).layoutWeight(1).fontSize(12).enabled(!this.collectionRecentSaving)
+              .backgroundColor(this.collectionRecentAmount===amount?$r('app.color.showly_accent'):$r('app.color.showly_muted_surface'))
+              .fontColor(this.collectionRecentAmount===amount?$r('app.color.showly_on_accent'):$r('app.color.showly_text'))
+              .onClick(()=>{this.changeCollectionRecentAmount(amount);})
+          },(amount:number)=>amount.toString())
+        }.width('100%')
+      }
       Row({ space: 4 }) {
         this.collectionSortButton('添加时间','added')
         this.collectionSortButton('名称','title')
@@ -6243,9 +6312,10 @@ struct Index {
           Button('待播/上映').layoutWeight(1).fontSize(12).onClick(() => { this.editCollectionOptions('upcoming','upcoming'); })
         }.width('100%')
       }
-      if (this.collectionOptions.sort === 'userRating' && this.collectionRatingStatus) { Text(this.collectionRatingStatus).fontSize(12).width('100%') }
       Text('未知添加时间、评分和分类不会被猜测；资料未齐时筛选结果可能不完整。').fontSize(12).width('100%')
-    }
+      Button('完成').width('100%').onClick(()=>{this.collectionOptionsOpen=false;})
+    }.width('100%').padding(16)
+    }.width('100%')
   }
 
   @Builder
@@ -6293,10 +6363,13 @@ struct Index {
       } else {
         ForEach(group.rows, (row: PersonalLibraryRow) => {
           Row({ space: 8 }) {
-            this.posterImage(row.media, 54, 81)
+            this.posterImage(row.media, 80, 120)
             Column({ space: 4 }) {
               Text(this.displayLabel(row.media)).width('100%')
               Text(businessLibraryLabel(row)).fontSize(12).width('100%')
+              if(row.media.kind==='show'&&row.effectiveWatched!==undefined&&row.effectiveTotal!==undefined&&row.effectiveTotal>0){
+                Progress({value:Math.min(row.effectiveWatched,row.effectiveTotal),total:row.effectiveTotal,type:ProgressType.Linear}).width('100%').color($r('app.color.showly_accent'))
+              }
               this.showProgressActions(row.media)
             }.layoutWeight(1).onClick(() => { this.openDetail(row.media); })
             if (!this.isHidden(row.media) && row.media.kind !== 'show' && this.canEditLibrary()) {

@@ -16,10 +16,33 @@ interface IDataSource { totalCount():number; getData(i:number):unknown; register
 const assert=require('node:assert/strict');
 const {PageStateOwner,PageWorkSet,PageSortJobs}=require('./PageStateOwner');
 const {planListDiff}=require('./ListDiff');
-const {CollectionViewOwner,COLLECTION_NETWORK_GROUPS,COLLECTION_GENRES,toggleCollectionSelection}=require('./CollectionViewOwner');
+const {CollectionViewOwner,COLLECTION_NETWORK_GROUPS,COLLECTION_GENRES,toggleCollectionSelection,CollectionDependencyVersions,CollectionMetadataVersions,CollectionRatingRequest,COLLECTION_RECENT_AMOUNTS,validCollectionRecentAmount,collectionEmptyText}=require('./CollectionViewOwner');
 const {ConsumerReadFlight}=require('./ReadFlight');
 (async()=>{
  for(const size of [393,10000]){
+  const deps=new CollectionDependencyVersions(),meta=new CollectionMetadataVersions();
+  const options={sort:'title',descending:true,genres:[],networks:[],upcoming:'all'};
+  const ratingOptions={...options,sort:'rating'},ratingKey=meta.key('show',ratingOptions,'mine');
+  const titleKey=meta.key('show',options,'mine'),movieKey=meta.key('movie',ratingOptions,'mine');
+  for(let i=0;i<100;i++){
+    deps.observe(['show:'+i],false);
+    const before={genres:['drama'],network:'HBO',release:'2026-01-01',rating:i,runtime:40};
+    meta.changed('show:'+i,before,{...before,rating:i+1});
+    assert.equal(meta.key('show',options,'mine'),titleKey);
+    assert.equal(meta.key('movie',ratingOptions,'mine'),movieKey);
+  }
+  assert.equal(deps.business('show'),100);assert.equal(deps.business('movie'),0);
+  assert.notEqual(meta.key('show',ratingOptions,'mine'),ratingKey);
+  deps.observe([],true);assert.equal(deps.business('movie'),1);
+  const showRead=new CollectionRatingRequest(),movieRead=new CollectionRatingRequest();
+  const old=showRead.begin('account-A'),movieTicket=movieRead.begin('account-A');
+  assert.equal(showRead.begin('account-A'),0);
+  showRead.reset();const next=showRead.begin('account-B');
+  assert(!showRead.finish(old));assert(showRead.current(next));assert(movieRead.current(movieTicket));
+  assert(showRead.finish(next));assert(movieRead.finish(movieTicket));
+  assert.deepEqual(COLLECTION_RECENT_AMOUNTS,[0,2,4,6,8]);assert(!validCollectionRecentAmount(5));
+  assert.notEqual(collectionEmptyText(true,'mine'),collectionEmptyText(false,'mine'));
+  console.log(size+' collection dependencies: 100 cross-kind commits, field-specific metadata keys, independent stale rating tickets, recents and empty states passed');
   const showView=new CollectionViewOwner(),movieView=new CollectionViewOwner();
   for(let i=0;i<100;i++){
    assert(showView.update('queue','show '+i,'watching',false,true));
@@ -183,3 +206,10 @@ assert "this.captureCollectionView();" in page and "this.restoreCollectionView()
 assert "COLLECTION_NETWORK_GROUPS" in page and "COLLECTION_GENRES" in page
 assert "if(this.collectionSearchOpen || this.collectionQuery.length>0)" in page
 assert "this.posterImage(row.media,80,120)" in page
+
+assert "this.collectionDependencies.observe(" in page
+assert "this.collectionMetadata.changed(row.id,prior?.collection,row.collection)" in page
+assert "this.collectionMetadataKey()" in page
+assert "this.collectionFilterSheet()" in page and ".bindSheet($$this.collectionOptionsOpen" in page
+assert "this.settings.loadCollectionRecentAmount()" in page
+assert "this.showRatingRequest.finish(ticket)" in page and "this.movieRatingRequest.finish(ticket)" in page

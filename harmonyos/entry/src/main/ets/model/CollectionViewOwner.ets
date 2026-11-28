@@ -1,3 +1,5 @@
+import { CollectionMeta } from './MediaPresentation';
+import { CollectionOptions } from './CollectionRules';
 // Derived, account-scoped view state only; no authority or sync writes.
 export interface CollectionViewSnapshot { section:string; query:string; status:string; grid:boolean; searchOpen:boolean; revision:number; }
 export class CollectionViewOwner {
@@ -60,4 +62,76 @@ export function toggleCollectionSelection(current:string[],values:string[]):stri
   const remove=values.every((v:string)=>current.includes(v));
   if(remove){return current.filter((v:string)=>!values.includes(v));}
   return Array.from(new Set<string>([...current,...values]));
+}
+
+// Config.MY_SHOWS_RECENTS_OPTIONS and Settings.createInitial at e08cb90b.
+export const COLLECTION_RECENT_AMOUNTS:number[]=[0,2,4,6,8];
+export function validCollectionRecentAmount(value:number):boolean{return COLLECTION_RECENT_AMOUNTS.includes(value);}
+export class CollectionDependencyVersions {
+  private showBusiness:number=0;
+  private movieBusiness:number=0;
+  private showSource:number=0;
+  private movieSource:number=0;
+  observe(ids:string[],unknown:boolean):void{
+    let show=unknown,movie=unknown;
+    for(const id of ids){
+      if(id.startsWith('show:')){show=true;}else if(id.startsWith('movie:')){movie=true;}else{show=true;movie=true;}
+    }
+    if(show){this.showBusiness++;}if(movie){this.movieBusiness++;}
+  }
+  sourceChanged(kind:string):void{
+    if(kind!=='movie'){this.showSource++;}if(kind!=='show'){this.movieSource++;}
+  }
+  business(kind:string):number{return kind==='movie'?this.movieBusiness:this.showBusiness;}
+  source(kind:string):number{return kind==='movie'?this.movieSource:this.showSource;}
+  reset():void{this.observe([],true);this.sourceChanged('');}
+}
+class CollectionFieldVersions {
+  genres:number=0;network:number=0;release:number=0;rating:number=0;runtime:number=0;
+  change(before:CollectionMeta|undefined,after:CollectionMeta|undefined):void{
+    // Absence is distinct from a verified empty field.
+    if(JSON.stringify(before?.genres??null)!==JSON.stringify(after?.genres??null)){this.genres++;}
+    if(before?.network!==after?.network){this.network++;}
+    if(before?.release!==after?.release){this.release++;}
+    if(before?.rating!==after?.rating){this.rating++;}
+    if(before?.runtime!==after?.runtime){this.runtime++;}
+  }
+  key(options:CollectionOptions,section:string,kind:string):string{
+    return JSON.stringify([options.genres.length?this.genres:0,
+      kind==='show'&&options.networks.length?this.network:0,
+      options.sort==='newest'||(section==='queue'&&options.upcoming!=='all')?this.release:0,
+      options.sort==='rating'?this.rating:0,options.sort==='runtime'?this.runtime:0]);
+  }
+}
+export class CollectionMetadataVersions {
+  private show:CollectionFieldVersions=new CollectionFieldVersions();
+  private movie:CollectionFieldVersions=new CollectionFieldVersions();
+  changed(id:string,before:CollectionMeta|undefined,after:CollectionMeta|undefined):void{
+    if(id.startsWith('movie:')){this.movie.change(before,after);}else if(id.startsWith('show:')){this.show.change(before,after);}
+    else{this.show.change(before,after);this.movie.change(before,after);}
+  }
+  key(kind:string,options:CollectionOptions,section:string):string{
+    return (kind==='movie'?this.movie:this.show).key(options,section,kind);
+  }
+}
+// The transport is shared by progress and collection; request ownership is
+// per kind. A reset revokes the right to publish, not another consumer's I/O.
+export class CollectionRatingRequest {
+  private serial:number=0;private active:number=0;private key:string='';
+  begin(key:string):number{
+    if(this.active!==0&&this.key===key){return 0;}
+    this.key=key;this.active=++this.serial;return this.active;
+  }
+  current(token:number):boolean{return token!==0&&token===this.active;}
+  finish(token:number):boolean{
+    if(!this.current(token)){return false;}
+    this.active=0;return true;
+  }
+  reset():void{this.active=0;this.key='';}
+}
+export function collectionEmptyText(filtered:boolean,section:string):string{
+  if(filtered){return '没有符合筛选条件的影视';}
+  if(section==='queue'){return '待看清单为空';}
+  if(section==='hidden'){return '没有隐藏的影视';}
+  return '此分类暂无影视';
 }
