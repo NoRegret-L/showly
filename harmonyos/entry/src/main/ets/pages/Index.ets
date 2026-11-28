@@ -6244,7 +6244,7 @@ struct Index {
   collectionRuleControls() {
     Button('排序与筛选').fontSize(12)
       .onClick(() => { this.collectionOptionsOpen = true; this.requestPresentation(); })
-      .bindSheet($this.collectionOptionsOpen,this.collectionFilterSheet(),{height:SheetSize.LARGE,showClose:true})
+      .bindSheet($$this.collectionOptionsOpen,this.collectionFilterSheet(),{height:SheetSize.LARGE,showClose:true})
   }
 
   @Builder
