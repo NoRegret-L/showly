@@ -46,7 +46,9 @@ jobs:
           build=(hvigorw assembleHap --mode module -p module=entry@default -p product=default -p buildMode=debug --no-daemon --optimization-strategy=performance)
           parent="$RUNNER_TEMP/parent-source"
           mkdir "$parent"
-          git archive 540c56642c50a1310785785fd8b09e7ff724adab harmonyos | tar -xf - -C "$parent"
+          baseline=540c56642c50a1310785785fd8b09e7ff724adab
+          git cat-file -e "$baseline^{commit}" 2>/dev/null || git fetch --no-tags --depth=1 origin "$baseline"
+          git archive "$baseline" harmonyos | tar -xf - -C "$parent"
           echo "Closure parent=$(git rev-parse 540c56642c50a1310785785fd8b09e7ff724adab) current=$(git rev-parse HEAD)" | tee -a "$GITHUB_STEP_SUMMARY"
           (cd "$parent/harmonyos"
            ohpm install --all
