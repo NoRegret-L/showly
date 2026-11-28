@@ -90,6 +90,6 @@ assert "await store.saveReadCheckpoints(account.uuid, result.matches)" in page
 assert "await readSyncAccount(session)" in page and "await readActivity(session)" in page
 print("Discovery local-first, async summary commit and synchronization wiring passed")
 
-assert "if(!slot||slot==='show'||slot==='calendar'||slot==='library'||slot==='discover'||slot==='search'){this.onPresentationChanged();}" in page
+assert "if(!slot||slot==='show'||slot==='history'||slot==='calendar'||slot==='library'||slot==='discover'||slot==='search'){this.onPresentationChanged();}" in page
 
 assert "if(!slot||slot==='movie'||slot==='movieCalendar'||slot==='library'||slot==='discover'||slot==='search'){this.onPresentationChanged();}" in page

@@ -30,6 +30,32 @@ assert.equal(history.rows('all','missing',now,r=>r.media.title,r=>r.title).lengt
 history.update('B',[]);assert.equal(history.rows('all','',now,r=>r.media.title,r=>r.title).length,0);
 assert.equal(new Date(historyRange('thisWeek',now).start).getDay(),1);
 assert.equal(new Date(historyRange('lastMonth',now).start).getDate(),1);
+const {HISTORY_PERIODS}=require('./HistoryOwner.js');
+const localNow=new Date(2026,0,10,12).getTime();
+const local=(y,m,d,h=0)=>new Date(y,m,d,h).getTime();
+const expected={thisWeek:[local(2026,0,5),local(2026,0,12)-1],lastWeek:[local(2025,11,29),local(2026,0,5)-1],thisMonth:[local(2026,0,1),local(2026,1,1)-1],lastMonth:[local(2025,11,1),local(2026,0,1)-1]};
+assert.equal(HISTORY_PERIODS.length,8);
+for(const {key} of HISTORY_PERIODS){
+ const range=historyRange(key,localNow);
+ if(expected[key])assert.deepEqual([range.start,range.end],expected[key]);
+ else if(key!=='all')assert.deepEqual([range.start,range.end],[localNow-Number(key)*day,localNow]);
+ const limit=Math.min(range.end,localNow);
+ const fixture={...source,episodes:[ep(11,-1,true,range.start-1),ep(12,-1,true,range.start),ep(13,-1,true,limit),ep(14,-1,true,limit+1),ep(15,-1,true,0),ep(16,-1,false,limit)]};
+ const owner=new HistoryOwner();owner.update('A',[{media,source:fixture,sourceStateKey:'1',sourceCatalogKey:'1'}]);
+ assert.deepEqual(owner.rows(key,'',localNow,r=>r.media.title,r=>r.title).filter(r=>r.episode).map(r=>r.episode.id),[13,12]);
+}
+for(const size of [393,10000]){
+ const owner=new HistoryOwner();
+ const inputs=Array.from({length:size},(_,i)=>{const m={...media,id:'show:'+(i+1)};return {media:m,source:{...hs,media:m},sourceStateKey:'1',sourceCatalogKey:'1'};});
+ owner.update('A',inputs);assert.equal(owner.computations(),size);
+ owner.update('A',inputs.map(x=>({...x,source:{...x.source}})));assert.equal(owner.computations(),size);
+ const changed=inputs.map((x,i)=>i===17?{...x,source:{...x.source,episodes:[ep(1,-2,true,now)]},sourceStateKey:'2'}:x);
+ owner.update('A',changed);assert.equal(owner.computations(),size+1);
+ const rows=owner.rows('all','',now,r=>r.media.title,r=>r.title);
+ const fallback=new HistoryOwner();fallback.update('A',changed);assert.deepEqual(rows,fallback.rows('all','',now,r=>r.media.title,r=>r.title));
+ owner.update('B',[]);assert.equal(owner.rows('all','',now,r=>r.media.title,r=>r.title).length,0);
+}
+console.log('History: eight period boundaries, unknown/future exclusion, 393/10k exact incremental/full parity and account isolation passed');
 const p=defaultProgress();
 assert.equal(p.days,30);
 assert.equal(selectProgress(source,p,[],now).episode.id,4);

@@ -201,7 +201,8 @@ assert "this.episodeRowOwner.updateTitle(" in page and "source:this.episodeRowOw
 assert "LazyForEach(this.source" in component
 assert "this.progressTitleOrder.dirty(" in page and "const delta=index.update(candidates" in page
 assert "work.key = cache.stateKey(input)" in lib
-assert page.count("new PageStateOwner<")==8
+assert page.count("new PageStateOwner<")==9
+assert "historyRows:PageStateOwner<HistoryEntry,HistoryEntry[]>" in page
 assert "this.showCollectionTitleOrder.dirty(row.id)" in page and "this.movieCollectionTitleOrder.dirty(row.id)" in page
 assert "this.activateDisplayOwner(JSON.stringify([account,scope]))" in page
 assert "await store.saveReadCheckpoints(account.uuid, result.matches)" in page

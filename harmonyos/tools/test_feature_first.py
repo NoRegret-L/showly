@@ -22,7 +22,10 @@ source=(root/"pages"/"Index.ets").read_text()
 def region(start,end):
     return source.split(start,1)[1].split(end,1)[0]
 assert "seriesProgressView(item)" not in region("  detailPage(item: Media) {","  libraryRow(item: Media)")
-assert "legacyProgressView()" not in region("  progressView() {","  legacyProgressView() {")
+assert "legacyProgressView()" not in source
+history_view=region("  progressView() {","  historyEpisodeCard(")
+assert "LazyForEach(this.historyRows" in history_view and "this.historyEpisodeCard(row.episode)" in history_view
+assert "message:'选择时间范围'" in history_view
 assert "headerAction('云端'" not in source
 assert "businessLibraryLabel(row)" in region("  collectionView() {","  private async loadProgress")
 assert "this.syncPreviewView()" in region("  syncSettingsView() {","  build() {")

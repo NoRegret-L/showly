@@ -5784,14 +5784,14 @@ struct Index {
     catch(error){this.historyUi={period:this.historyUi.period,query:this.historyUi.query,loading:false,error:'筛选保存失败。',count:0};}
   }
   @Builder
-  progressView(){
+  progressView() {
     List({space:8,scroller:this.historyScroller}){
       ListItem(){
         Column({space:8}){
           this.progressHeader()
           TextInput({placeholder:'搜索剧集、分集或日期',text:this.historyUi.query}).onChange((value:string)=>{this.historyUi={period:this.historyUi.period,query:value,loading:true,error:'',count:0};this.requestPresentation();})
           Button('时间范围 · '+(HISTORY_PERIODS.find((p:HistoryPeriodOption)=>p.key===this.historyUi.period)?.label??'全部时间')).fontSize(12).height(32).backgroundColor($r('app.color.showly_muted_surface')).fontColor($r('app.color.showly_text')).onClick(()=>{
-            try{const choices:SheetInfo[]=HISTORY_PERIODS.map((p:HistoryPeriodOption):SheetInfo=>({title:p.label,action:()=>{if(this.scrollSlot()==='history'){this.selectHistoryPeriod(p.key);}}}));this.getUIContext().showActionSheet({title:'观看历史时间范围',alignment:DialogAlignment.Bottom,autoCancel:true,sheets:choices});}
+            try{const choices:SheetInfo[]=HISTORY_PERIODS.map((p:HistoryPeriodOption):SheetInfo=>({title:p.label,action:()=>{if(this.scrollSlot()==='history'){this.selectHistoryPeriod(p.key);}}}));this.getUIContext().showActionSheet({title:'观看历史时间范围',message:'选择时间范围',alignment:DialogAlignment.Bottom,autoCancel:true,sheets:choices});}
             catch(error){this.historyUi={period:this.historyUi.period,query:this.historyUi.query,loading:false,error:'无法打开时间筛选。',count:this.historyUi.count};}
           })
           Text('仅显示已知最后观看时间的分集；未知记录不补造。').fontSize(12).width('100%')
