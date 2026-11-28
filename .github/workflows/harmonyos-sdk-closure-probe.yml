@@ -17,6 +17,7 @@ jobs:
         with:
           persist-credentials: false
           sparse-checkout: harmonyos
+          fetch-depth: 2
       - name: Prepare verified streaming SDK
         run: |
           set -euo pipefail
@@ -36,13 +37,21 @@ jobs:
           echo "$dir/command-line-tools/tool/node/bin" >> "$GITHUB_PATH"
           echo "DEVECO_SDK_HOME=$dir/command-line-tools/sdk" >> "$GITHUB_ENV"
           echo "HOS_SDK_HOME=$dir/command-line-tools/sdk" >> "$GITHUB_ENV"
-      - name: Trace baseline and test independent filtered extraction
+      - name: Trace parent and current revisions; test independent filtered extraction
         run: |
           set -euo pipefail
           command -v strace || { sudo apt-get update -qq; sudo apt-get install -y strace; }
           dir="$RUNNER_TEMP/verified-sdk"
           file=ohos-sdk-linux-amd64.tar.gz
           build=(hvigorw assembleHap --mode module -p module=entry@default -p product=default -p buildMode=debug --no-daemon --optimization-strategy=performance)
+          parent="$RUNNER_TEMP/parent-source"
+          mkdir "$parent"
+          git archive HEAD^ harmonyos | tar -xf - -C "$parent"
+          echo "Closure parent=$(git rev-parse HEAD^) current=$(git rev-parse HEAD)" | tee -a "$GITHUB_STEP_SUMMARY"
+          (cd "$parent/harmonyos"
+           ohpm install --all
+           strace -ff -yy -s 4096 -e trace=%file,getdents64 -o "$RUNNER_TEMP/sdktrace-parent" "${build[@]}")
+          rm -rf "$parent"
           (cd harmonyos
            ohpm install --all
            strace -ff -yy -s 4096 -e trace=%file,getdents64 -o "$RUNNER_TEMP/sdktrace" "${build[@]}"
@@ -56,6 +65,17 @@ jobs:
            start=$(date +%s%N)
            cat "$file.aa" "$file.ab" | pigz -dc | tar --exclude-from="$RUNNER_TEMP/sdk-excludes.txt" -xf -
            echo "filtered extraction nanoseconds=$(( $(date +%s%N)-start ))" | tee -a "$GITHUB_STEP_SUMMARY")
+          # Measure local compressed candidate; main CI continues to use verified full SDK.
+          (cd "$dir"
+           start=$(date +%s%N)
+           tar -cf - command-line-tools | zstd -T0 -3 -o "$RUNNER_TEMP/closure-sdk.tar.zst"
+           sha256sum "$RUNNER_TEMP/closure-sdk.tar.zst" > "$RUNNER_TEMP/closure-sdk.sha256"
+           echo "closure cache pack nanoseconds=$(( $(date +%s%N)-start )) bytes=$(stat -c%s "$RUNNER_TEMP/closure-sdk.tar.zst")" | tee -a "$GITHUB_STEP_SUMMARY"
+           rm -rf command-line-tools
+           start=$(date +%s%N)
+           sha256sum -c "$RUNNER_TEMP/closure-sdk.sha256"
+           zstd -dc "$RUNNER_TEMP/closure-sdk.tar.zst" | tar -xf -
+           echo "closure cache restore nanoseconds=$(( $(date +%s%N)-start ))" | tee -a "$GITHUB_STEP_SUMMARY")
           (cd harmonyos
            ohpm install --all
            start=$(date +%s%N)

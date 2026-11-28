@@ -1,3 +1,4 @@
+import { SyncCoordinator, queueIdentity } from '../model/SyncCoordinator';
 import { GalleryTarget } from '../model/GalleryRules';
 import { GalleryPage } from './GalleryPage';
 import { CommentTarget } from '../model/CommentRules';
@@ -409,9 +410,13 @@ struct Index {
   @State autoConsent?: AutoConsent = undefined;
   @State queueRows: QueueEntry[] = [];
   private pageVisible: boolean = false;
-  private recoveryPending: boolean = false;
-  private mediaRecoveryPending: boolean = false;
-  private titleQuickPending: boolean = false;
+  private syncCoordinator: SyncCoordinator = new SyncCoordinator();
+  private get recoveryPending(): boolean { return this.syncCoordinator.has('episodes'); }
+  private set recoveryPending(value: boolean) { this.syncCoordinator.mark('episodes', value); }
+  private get mediaRecoveryPending(): boolean { return this.syncCoordinator.has('media'); }
+  private set mediaRecoveryPending(value: boolean) { this.syncCoordinator.mark('media', value); }
+  private get titleQuickPending(): boolean { return this.syncCoordinator.has('titles'); }
+  private set titleQuickPending(value: boolean) { this.syncCoordinator.mark('titles', value); }
   @State titleConsent?: TitleConsent = undefined;
   @State titleQuickStatus: string = '';
   @State titleConfirm: boolean = false;
@@ -533,7 +538,8 @@ struct Index {
   private cloudFresh: boolean = false;
   @State @Watch('onLibraryInputChanged') cloudLocalAllowed: boolean = false;
   @State effectiveEditable: boolean = false;
-  private observationPending: boolean = false;
+  private get observationPending(): boolean { return this.syncCoordinator.has('observation'); }
+  private set observationPending(value: boolean) { this.syncCoordinator.mark('observation', value); }
   private startupScheduled: boolean = false;
   private projectionMemo: RevisionMemo<LibraryProjection> = new RevisionMemo<LibraryProjection>();
   private showProjectionCache: ShowProjectionCache = new ShowProjectionCache();
@@ -758,10 +764,7 @@ struct Index {
     this.cancelCatalogRepair();
     this.presentationWorkVersion++;
     this.presentationEpoch++;
-    this.recoveryPending = false;
-    this.mediaRecoveryPending = false;
-    this.titleQuickPending = false;
-    this.observationPending = false;
+    // Retain pending wakeups; existing foreground write gates stay intact.
     this.projectionPending = false;
   }
 
@@ -853,6 +856,7 @@ struct Index {
   // A busy auth/DB/sync operation no longer drops the network-resume event.
   // Coalesce to a single pending event, not a periodic retry loop.
   private onObservationAuthChanged(): void {
+    this.syncCoordinator.reset();
     this.clearCollectionViews();
     this.clearProgressCandidates();
     this.resetSearchAccount();
@@ -928,6 +932,19 @@ struct Index {
     this.onRecoveryGateChanged();
   }
 
+  private requestSyncNow(): void {
+    if (!this.pageVisible || !this.signedIn || !this.clientId || this.backupBusy ||
+        !this.ready || !this.episodeReady || this.authBusy || this.setupBusy) { return; }
+    this.observationPending = true;
+    if (this.syncBound && this.syncAccount &&
+        traktAuth.isCurrent(this.clientId, this.syncAccount.generation)) {
+      if (this.autoActive()) { this.recoveryPending = true; }
+      if (this.titleQuickActive()) { this.titleQuickPending = true; }
+      this.mediaRecoveryPending = true;
+    }
+    this.onRecoveryGateChanged();
+  }
+
   private requestProjection(): void {
     if (!this.pageVisible) { return; }
     this.projectionPending = true;
@@ -938,24 +955,27 @@ struct Index {
     if (this.backupBusy || !this.pageVisible || this.syncBusy || this.localBusy || this.cloudBusy || this.saving ||
         this.authBusy || this.setupBusy) { return; }
     if (this.detailResumePending && this.selectedMedia) { this.resumeDetail(); if (this.localBusy) { return; } }
-    if (this.recoveryPending && this.autoActive() && this.episodeReady) {
+    const lane = this.syncCoordinator.next(this.autoActive() && this.episodeReady,
+      !this.saving, this.ready && this.episodeReady && this.signedIn,
+      this.ready && this.episodeReady && this.titleQuickActive());
+    if (lane === 'episodes') {
       this.recoveryPending = false;
       this.resumeQueued();
       return;
     }
-    if (this.mediaRecoveryPending && !this.saving) {
+    if (lane === 'media') {
       this.mediaRecoveryPending = false;
       this.recoverMediaPending();
       return;
     }
     if (!this.ready || !this.episodeReady || this.saving) { return; }
-    if (this.observationPending && this.signedIn) {
+    if (lane === 'observation') {
       this.observationPending = false;
       this.projectionPending = false;
       this.loadCloud(false);
       return;
     }
-    if (this.titleQuickPending && this.titleQuickActive()) {
+    if (lane === 'titles') {
       this.titleQuickPending = false;
       this.resumeTitleQuick();
       return;
@@ -2901,15 +2921,18 @@ struct Index {
         eligible.map((entry: QueueEntry) => entry.episodeId), new Date().toISOString(),
         'queue', undefined, eligible, canSend);
       stage = '保存已完成队列';
+      const completed = new Set<number>(result.completedIds);
       for (const entry of eligible) {
-        if (result.completedIds.includes(entry.episodeId)) { await store.finishQueue(expected, entry); }
+        if (completed.has(entry.episodeId)) { await store.finishQueue(expected, entry); }
       }
       this.autoStatus = result.message;
       // Only one additional fresh READ, never a second POST. If the app exits
       // or this read fails, the next foreground/network event can reconcile.
       const remaining = await store.queueEntries(expected);
+      const sentIdentities = new Set<string>();
+      for (const old of eligible) { sentIdentities.add(queueIdentity(old.episodeId, old.seq)); }
       const attempted = remaining.filter((entry: QueueEntry) => entry.blocked &&
-        eligible.some((old: QueueEntry) => old.episodeId === entry.episodeId && old.seq === entry.seq));
+        sentIdentities.has(queueIdentity(entry.episodeId, entry.seq)));
       if (attempted.length > 0 && this.pageVisible) {
         stage = '上传后补充只读核对';
         const checked = await reconcileQueue(store, session, expected, attempted);
@@ -7093,9 +7116,23 @@ struct Index {
       Text(this.signedIn ? '已连接' : '未连接').fontSize(14).width('100%')
       if (this.signedIn) {
         Text(this.autoActive() ? '快捷同步已开启；仅限已授权的新观看记录。' : '快捷同步未开启；需要上传的操作请在高级同步管理确认。').fontSize(12).width('100%')
-        Button(this.cloudBusy ? '更新中…' : '更新个人库').width('100%')
-          .enabled(!this.cloudBusy && !this.syncBusy && !this.authBusy && !this.localBusy && !this.saving)
-          .onClick(() => { this.requestObservation(); })
+        if (this.cloudBusy || this.syncBusy) {
+          Row({ space: 8 }) {
+            LoadingProgress().width(22).height(22)
+            Text(this.cloudBusy ? '正在核对云端版本' : '正在处理同步任务').fontSize(13).layoutWeight(1)
+          }.width('100%')
+        }
+        Text(this.cloud && this.cloudFresh ? '云端版本已核对' :
+          this.cloud ? '显示上次缓存，尚未确认最新版本' : '尚未核对云端版本').fontSize(12).width('100%')
+        if (this.syncBound && this.syncAccount && traktAuth.isCurrent(this.clientId, this.syncAccount.generation)) {
+          Text('分集待处理：' + this.queueRows.length + ' 条（含需只读核对）').fontSize(13).width('100%')
+        }
+        if (this.autoStatus) { Text(this.autoStatus).fontSize(12).width('100%') }
+        if (this.mediaSyncStatus) { Text(this.mediaSyncStatus).fontSize(12).width('100%') }
+        Button(this.cloudBusy || this.syncBusy ? '同步处理中…' : '立即同步').width('100%')
+          .enabled(this.ready && this.episodeReady && !this.backupBusy && !this.authBusy && !this.setupBusy)
+          .onClick(() => { this.requestSyncNow(); })
+        Text('核对云端并处理已授权的待同步操作；不会自动上传旧记录或删除观看历史。').fontSize(12).width('100%')
         if (this.libraryNotice) { Text(this.libraryNotice).fontSize(12).width('100%') }
         if (!this.cloudLocalAllowed) {
           Button('验证并绑定账户').enabled(!this.cloudBusy && !this.syncBusy && !this.authBusy && !this.localBusy)
