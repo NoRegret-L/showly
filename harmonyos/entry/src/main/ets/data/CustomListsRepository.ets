@@ -2,6 +2,16 @@ import { common } from '@kit.AbilityKit';
 import { relationalStore } from '@kit.ArkData';
 import { CustomList, ListDocument, ListCommand, ListMember, emptyListDocument, applyListCommand, replaceRemoteLists } from '../model/CustomLists';
 import { ListPreference, defaultListPreference, validListPreference, ListDelta, listDelta, validStorageDocument, mergeListBackup } from '../model/ListPersistence';
+import { TraktSession,traktAuth } from './TraktAuth';
+import { ReadCancel } from '../model/ReadFlight';
+import { readCustomLists } from './TraktCustomLists';
+import { readActivity } from './TraktLibrary';
+import { readSyncAccount } from './TraktSyncPreview';
+import { createPrivateList,appendListMembers } from './TraktListExport';
+import { missingMemberIds,membersSatisfied } from '../model/ExportEvidence';
+interface ListExportLink {remoteId:number;pending:string;}
+interface ListExportObservation {activity:string;rows:CustomList[];}
+export interface ListExportResult {created:number;added:number;blocked:number;}
 function validScope(scope:string):boolean{return scope==='device'||(scope.startsWith('account:')&&scope.length>8&&scope.trim()===scope);}
 export class CustomListsRepository{
   private db:relationalStore.RdbStore;
@@ -69,6 +79,68 @@ export class CustomListsRepository{
     const doc=await this.readBody(scope,current);if(!doc.local.concat(doc.remote).some((r:CustomList)=>r.id===id)){throw new Error('List missing');}
     this.check(scope,current);await this.db.executeSql('INSERT OR REPLACE INTO list_preference_v2(scope,list_id,payload) VALUES(?,?,?)',[scope,id,JSON.stringify(p)]);
   });}
+  private async link(scope:string,id:string):Promise<ListExportLink|undefined>{
+    const rows=await this.db.querySql('SELECT remote_id,pending FROM list_export_link WHERE scope=? AND local_id=?',[scope,id]);
+    try{if(!rows.goToFirstRow()){return undefined;}return {remoteId:rows.getLong(0),pending:rows.getString(1)};}finally{rows.close();}
+  }
+  private async observeExport(scope:string,session:TraktSession,signal:ReadCancel,current:()=>boolean):Promise<ListExportObservation>{
+    this.check(scope,current);const activity=await readActivity(session);
+    const rows=await readCustomLists(session,scope.substring(8),signal);
+    this.check(scope,current);if(await readActivity(session)!==activity){throw new Error('List observation changed');}
+    return {activity:activity,rows:rows};
+  }
+  exportAdditive(scope:string,session:TraktSession,signal:ReadCancel,current:()=>boolean):Promise<ListExportResult>{
+    return this.serial(async():Promise<ListExportResult>=>{
+      this.check(scope,current);
+      if(!scope.startsWith('account:')||(await readSyncAccount(session)).uuid!==scope.substring(8)||!traktAuth.isCurrent(session.clientId,session.generation)){throw new Error('List account mismatch');}
+      const doc=await this.readBody(scope,current),uuid=scope.substring(8);
+      const result:ListExportResult={created:0,added:0,blocked:0};
+      if(!doc.local.length){return result;}
+      let observed=await this.observeExport(scope,session,signal,current);
+      for(const local of doc.local){
+        this.check(scope,current);
+        let link=await this.link(scope,local.id);
+        if(!link){
+          // Never guess a mapping by name. A collision requires manual review.
+          if(observed.rows.some((row:CustomList)=>row.name===local.name)){result.blocked++;continue;}
+          await this.db.executeSql('INSERT INTO list_export_link(scope,local_id,remote_id,pending) VALUES(?,?,?,?)',[scope,local.id,0,'create']);
+          try{
+            const id=await createPrivateList(session,uuid,observed.activity,local.name,local.description,current);
+            this.check(scope,current);
+            await this.db.executeSql('UPDATE list_export_link SET remote_id=? WHERE scope=? AND local_id=? AND remote_id=0 AND pending=?',[id,scope,local.id,'create']);
+            link={remoteId:id,pending:'create'};
+          }catch(error){result.blocked++;break;}
+          observed=await this.observeExport(scope,session,signal,current);
+        }
+        if(!link||!Number.isSafeInteger(link.remoteId)||link.remoteId<=0){result.blocked++;continue;}
+        let remote=observed.rows.find((row:CustomList)=>row.id==='trakt:'+link?.remoteId);
+        if(!remote){result.blocked++;continue;}
+        if(link.pending==='create'){
+          if(remote.name!==local.name||remote.description!==local.description){result.blocked++;continue;}
+          await this.db.executeSql('UPDATE list_export_link SET pending=? WHERE scope=? AND local_id=?',['',scope,local.id]);
+          result.created++;link.pending='';
+        }else if(link.pending){
+          const expected=JSON.parse(link.pending) as string[];
+          if(!Array.isArray(expected)||!expected.length||!membersSatisfied(expected,remote.members.map((m:ListMember)=>m.media.id))){result.blocked++;continue;}
+          await this.db.executeSql('UPDATE list_export_link SET pending=? WHERE scope=? AND local_id=?',['',scope,local.id]);
+          link.pending='';
+        }
+        const missing=missingMemberIds(local.members.map((m:ListMember)=>m.media.id),remote.members.map((m:ListMember)=>m.media.id));
+        if(!missing.length){continue;}
+        // One durable receipt for the exact additive delta; no removal or rename.
+        this.check(scope,current);
+        await this.db.executeSql('UPDATE list_export_link SET pending=? WHERE scope=? AND local_id=?',[JSON.stringify(missing),scope,local.id]);
+        try{await appendListMembers(session,uuid,observed.activity,link.remoteId,missing,current);}catch(error){}
+        observed=await this.observeExport(scope,session,signal,current);
+        remote=observed.rows.find((row:CustomList)=>row.id==='trakt:'+link?.remoteId);
+        if(!remote||!membersSatisfied(missing,remote.members.map((m:ListMember)=>m.media.id))){result.blocked++;continue;}
+        this.check(scope,current);
+        await this.db.executeSql('UPDATE list_export_link SET pending=? WHERE scope=? AND local_id=?',['',scope,local.id]);
+        result.added+=missing.length;
+      }
+      return result;
+    });
+  }
   release():void{this.docs.clear();}
 }
 let opening:Promise<CustomListsRepository>|undefined;
@@ -80,6 +152,7 @@ export function openCustomLists(context:common.UIAbilityContext):Promise<CustomL
     await db.executeSql('CREATE TABLE IF NOT EXISTS list_member_v2(scope TEXT NOT NULL,list_id TEXT NOT NULL,media_id TEXT NOT NULL,position INTEGER NOT NULL,payload TEXT NOT NULL,PRIMARY KEY(scope,list_id,media_id))');
     await db.executeSql('CREATE INDEX IF NOT EXISTS list_member_reverse_v2 ON list_member_v2(scope,media_id,list_id)');
     await db.executeSql('CREATE TABLE IF NOT EXISTS list_preference_v2(scope TEXT NOT NULL,list_id TEXT NOT NULL,payload TEXT NOT NULL,PRIMARY KEY(scope,list_id))');
+    await db.executeSql('CREATE TABLE IF NOT EXISTS list_export_link(scope TEXT NOT NULL,local_id TEXT NOT NULL,remote_id INTEGER NOT NULL,pending TEXT NOT NULL,PRIMARY KEY(scope,local_id))');
     return new CustomListsRepository(db);
   }).catch((error:Error):CustomListsRepository=>{opening=undefined;throw error;});}
   return opening;

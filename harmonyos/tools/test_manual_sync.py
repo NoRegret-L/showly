@@ -27,7 +27,9 @@ assert all(s not in imp for s in ("resumeQueued","resumeTitleQuick","recoverMedi
 assert all(s in exp for s in ("resumeQueued(true)","resumeTitleQuick()","recoverMediaPending()"))
 assert "this.manualRunning || this.quickChanging" in page
 assert "finally" in run and "this.manualRunning=false" in run
-assert "列表与评分批量导出尚未实现" in page
+assert "非完整双向同步" in page
+assert "await lists.exportAdditive" in exp and "await ratings.exportIntents" in exp
+assert "await uploadBatch" in exp and "await syncSelectedMedia" in exp
 panel=(root/"pages/SyncStatusPanel.ets").read_text()
 assert "SYNC_PERIODS.map" in panel and "showActionSheet" in panel
 assert "SYNC_PERIODS.slice" not in panel

@@ -5,6 +5,7 @@ import { SyncPreview, SyncDifference, buildSyncPreview, readSyncAccount, invalid
 import { readEpisodeHistory, sameMinute } from './TraktPlayHistory';
 import { readActivity } from './TraktLibrary';
 import { safeSyncError } from './SyncDiagnostics';
+import { actualWatchTime } from '../model/ExportEvidence';
 
 interface BatchIds { trakt: number; }
 interface BatchEpisode { ids: BatchIds; watched_at: string; }
@@ -30,7 +31,7 @@ export async function uploadBatch(store: EpisodeStore, session: TraktSession,
   if (mode === 'manual' && (!preview || preview.account.uuid !== uuid ||
       preview.account.generation !== session.generation ||
       selectedIds.some((id: number) => !preview.rows.some((row: SyncDifference) =>
-        row.episodeId === id && row.kind === 'addition' && !row.uploadBlocked)))) {
+        row.episodeId === id && row.kind === 'addition' && !row.uploadBlocked && !!actualWatchTime(row.watchedAt))))) {
     throw new Error('Invalid reviewed selection');
   }
   if (mode === 'queue') {
@@ -45,16 +46,25 @@ export async function uploadBatch(store: EpisodeStore, session: TraktSession,
   const fresh = await buildSyncPreview(store, session);
   if (fresh.account.uuid !== uuid) { throw new Error('Account changed'); }
   const send: number[] = [];
+  const times = new Map<number,string>();
+  const reviewed = new Map<number,SyncDifference>();
+  const freshRows = new Map<number,SyncDifference>();
+  if (preview) { for (const row of preview.rows) { reviewed.set(row.episodeId,row); } }
+  for (const row of fresh.rows) { freshRows.set(row.episodeId,row); }
   let skipped = 0;
   let blocked = 0;
   for (const id of selectedIds) {
-    const row = fresh.rows.find((value: SyncDifference) => value.episodeId === id);
+    const row = freshRows.get(id);
     if (!row || !row.localWatched || (row.kind !== 'addition' && row.kind !== 'match')) {
       blocked++;
       continue;
     }
     if (row.cloudWatched) { skipped++; completedIds.push(id); continue; }
     if (row.uploadBlocked || await store.hasUploadAttempt(uuid, id)) { blocked++; continue; }
+    const prior=reviewed.get(id);
+    const at=mode==='manual' ? actualWatchTime(prior?.watchedAt) : actualWatchTime(queued.find((entry:QueueEntry)=>entry.episodeId===id)?.watchedAt ?? watchedAt);
+    if (!at || (mode==='manual' && (!prior || prior.intentSeq!==row.intentSeq || actualWatchTime(row.watchedAt)!==at))) { blocked++; continue; }
+    times.set(id,at);
     const history = await readEpisodeHistory(session, id);
     if (history.count > 0) { skipped++; completedIds.push(id); continue; }
     send.push(id);
@@ -85,8 +95,9 @@ export async function uploadBatch(store: EpisodeStore, session: TraktSession,
     const verified = await readSyncAccount(session);
     if (verified.uuid !== uuid || await store.boundAccount() !== uuid) { throw new Error('Account changed'); }
     current(session);
+    if (send.some((id:number)=>!times.get(id))) { throw new Error('Missing actual watch time'); }
     const body: BatchBody = { episodes: send.map((id: number): BatchEpisode => {
-      return { ids: { trakt: id }, watched_at: queued.find((entry: QueueEntry) => entry.episodeId === id)?.watchedAt ?? watchedAt };
+      return { ids: { trakt: id }, watched_at: times.get(id) ?? '' };
     }) };
     const request = http.createHttp();
     let accepted = false;
@@ -128,7 +139,7 @@ export async function uploadBatch(store: EpisodeStore, session: TraktSession,
           present++;
           completedIds.push(id);
           if (accepted && history.count === 1 && history.plays[0].action === 'watch' &&
-              sameMinute(history.plays[0].watched_at, queued.find((entry: QueueEntry) => entry.episodeId === id)?.watchedAt ?? watchedAt)) {
+              sameMinute(history.plays[0].watched_at, times.get(id) ?? '')) {
             await store.saveUndoReceipt(uuid, id, history.plays[0].id, history.plays[0].watched_at);
             receipts++;
           }
