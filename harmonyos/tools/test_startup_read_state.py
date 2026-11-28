@@ -39,3 +39,11 @@ assert "saveRefresh(clientId,record.refreshToken,uuid)" in auth
 assert "saveRefresh(clientId, token, uuid)" in auth
 assert "uuid?: string" in vault
 print("Startup read-state wiring: secure identity, offline projection and online write gate checked")
+
+# The UUID is established only after the actual account and activity fences.
+cloud=page.split("  private async loadCloud(",1)[1].split("\n  private ",1)[0]
+assert cloud.index("verified.uuid !== account.uuid") < cloud.index("await store.saveRemoteObservation(account.uuid, persisted)") < cloud.index("traktAuth.rememberAccount(clientId,session.generation,account.uuid)")
+assert "asset.Accessibility.DEVICE_UNLOCKED" in vault and "asset.SyncType.NEVER" in vault
+assert "const old=loadRefreshRecord(clientId)" in auth and "saveRefresh(clientId,old.refreshToken)" in auth
+assert "removeRefresh();" in auth and "this.cacheScope=''" in auth
+print("Online UUID/activity fence, secure record scope and new-login revocation assertions passed")

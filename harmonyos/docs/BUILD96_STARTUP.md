@@ -7,3 +7,5 @@ Android source: ProgressViewModel and ProgressItemsCase own independent local lo
 - Device cold start, real OAuth, actual process termination and performance measurements remain required before full acceptance.
 
 CI #151 exposed three outdated source assertions and two ArkTS object-spread errors. Correct assertions to require displayCloud only in read paths and preserve activeCloud for action validation; use explicit typed snapshots instead of spread.
+
+CI #152: 34/34 historical regressions and native HAP passed; the scheduler test expected four lock releases even though rememberAccount adds a fifth ordinary lease. Each of six lock owners (including revokeLease) is now checked independently. Probe #11 verified exact closure archive digest and full/candidate HAP entry equivalence. The isolated branch pins that exact cache; a missing or invalid cache retains full verified fallback. Cross-version sibling cache was unavailable; the full fallback comparison passed, not old-cache compatibility.

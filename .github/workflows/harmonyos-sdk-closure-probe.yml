@@ -211,14 +211,14 @@ jobs:
           mv "$RUNNER_TEMP/full.hap" "$RUNNER_TEMP/current-full.hap"
           rm "$RUNNER_TEMP/closure-sdk.tar.zst" "$RUNNER_TEMP/closure-sdk.sha256"
           date +%s%N > "$RUNNER_TEMP/cache-start"
-      - name: Restore exact Build 94 closure (branch-scoped candidate)
+      - name: Restore exact previous Build 96 closure (same branch)
         uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684
         with:
           path: |
             ${{ runner.temp }}/closure-sdk.tar.zst
             ${{ runner.temp }}/closure-sdk.sha256
             ${{ runner.temp }}/full.hap
-          key: closure-6.1.1.280-Linux-X64-e8643547783d4843b51f268c18ac33a3654dceb0-46157173522-1
+          key: closure-6.1.1.280-Linux-X64-e84f19cbe2fafd8f6f6f7598cd4977fee5e7f3df-46159692935-1
           fail-on-cache-miss: false
       - name: Test old closure; reject incompatible build and recover with full SDK
         env:

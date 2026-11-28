@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Actual wiring checks; Linux advisory lock semantics are not a device test."""
 from pathlib import Path
-import fcntl,subprocess,sys,tempfile
+import fcntl,re,subprocess,sys,tempfile
 root=Path(__file__).resolve().parents[1]/"entry/src/main"
 ets=root/"ets"
 ext=(ets/"workability/SyncWorkAbility.ets").read_text()
@@ -14,10 +14,25 @@ assert "workScheduler.startWork(workInfo(hours))" in schedule
 assert "workScheduler.stopWork(work, true)" in schedule
 assert "isPersisted: true" in schedule
 auth=(ets/"data/TraktAuth.ets").read_text()
-assert auth.count("const lease = tryVaultLock();")==4
-assert "const revokeLease = tryVaultLock();" in auth
-assert auth.count("releaseVaultLock(lease)")==4
-assert "releaseVaultLock(revokeLease)" in auth
+# Check each production owner rather than assuming the number of call sites.
+owners = {
+    "rememberAccount": "lease",
+    "setBackgroundRead": "lease",
+    "begin": "revokeLease",
+    "receive": "lease",
+    "restore": "lease",
+    "disconnect": "lease",
+}
+for method, lease in owners.items():
+    start = re.search(r"(?m)^  (?:async )?" + method + r"\(", auth)
+    assert start, method
+    body = re.split(r"(?m)^  (?:private )?(?:async )?\w+\(", auth[start.end():], maxsplit=1)[0]
+    acquire = re.search(r"const " + lease + r"\s*=\s*tryVaultLock\(\);", body)
+    release = re.search(r"finally\s*\{[\s\S]*?releaseVaultLock\(" + lease + r"\)", body)
+    assert acquire and release and acquire.start() < release.start(), method
+    assert re.search(r"if\s*\(!" + lease + r"\)", body), method
+assert len(re.findall(r"=\s*tryVaultLock\(\);", auth)) == len(owners)
+assert len(re.findall(r"releaseVaultLock\((?:lease|revokeLease)\)", auth)) == len(owners)
 vault=(ets/"data/TokenVault.ets").read_text()
 assert "file.tryLock(true)" in vault and "file.unlock()" in vault
 with tempfile.TemporaryDirectory() as tmp:
