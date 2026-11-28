@@ -1278,7 +1278,12 @@ struct Index {
           this.movieSortKey('',pending.utc,false,false),this.movieAllMemo]
       ];
       for(let i=0;i<movieCases.length;i++){
-        const [order,before,after,basis,memo]=movieCases[i],query=i===0?this.movieProgressQuery:'';
+        const order=movieCases[i][0];
+        const before=movieCases[i][1];
+        const after=movieCases[i][2];
+        const basis=movieCases[i][3];
+        const memo=movieCases[i][4];
+        const query=i===0?this.movieProgressQuery:'';
         if(order.hasDirty()){order.clear();needsFull=true;continue;}
         const result=order.applyChanges(before,after,basis,pending.now,order.validUntil(),movieChanges,
           (value:MovieProgressSource)=>movieSortEligible(value,pending.utc,query),

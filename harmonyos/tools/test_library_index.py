@@ -89,3 +89,7 @@ assert "order.applyChanges(before,after,basis" in page
 assert "[this.movieTitleOrder,pending.movieQueryScope" in page and "[this.movieAllTitleOrder,pending.movieAllScope" in page
 assert "this.collectionTitleOrder.applyChanges(" in page
 print("Production incremental member and sort wiring assertions passed")
+
+# ArkTS rejects destructuring declarations even when host TypeScript accepts them.
+assert "const [order,before,after,basis,memo]" not in page
+assert "const order=movieCases[i][0];" in page
