@@ -1,3 +1,4 @@
+import { CollectionViewOwner, CollectionNetworkGroup, CollectionGenreOption, COLLECTION_NETWORK_GROUPS, COLLECTION_GENRES, toggleCollectionSelection } from '../model/CollectionViewOwner';
 import { StableDisplayOrder, StableOrderChange } from '../model/StableDisplayOrder';
 import { PageStateOwner, PageWork, PageWorkSet, PageSortJobs, PageSummary } from '../model/PageStateOwner';
 import { ProgressTitleOrder } from '../model/ProgressTitleOrder';
@@ -403,6 +404,20 @@ struct Index {
   @State collectionScope: string = '';
   @State @Watch('onCollectionViewChanged') collectionOptions: CollectionOptions = defaultCollection();
   @State collectionOptionsOpen: boolean = false;
+  @State collectionSearchOpen: boolean = false;
+  private showCollectionView:CollectionViewOwner=new CollectionViewOwner();
+  private movieCollectionView:CollectionViewOwner=new CollectionViewOwner();
+  private collectionViewOwner():CollectionViewOwner{return this.mediaMode==='movie'?this.movieCollectionView:this.showCollectionView;}
+  private captureCollectionView():void{this.collectionViewOwner().update(this.collectionFilter,this.collectionQuery,this.collectionStatusFilter,this.collectionGrid,this.collectionSearchOpen);}
+  private restoreCollectionView():void{
+    const view=this.collectionViewOwner().snapshot();
+    this.collectionOptionsOpen=false;this.collectionFilter=view.section;this.collectionQuery=view.query;
+    this.collectionStatusFilter=view.status;this.collectionGrid=view.grid;this.collectionSearchOpen=view.searchOpen;
+    this.collectionOptionKey='';this.reloadCollectionOptions();
+  }
+  private clearCollectionViews():void{
+    this.showCollectionView.clear();this.movieCollectionView.clear();this.restoreCollectionView();
+  }
   @State collectionGenreDraft: string = '';
   @State collectionNetworkDraft: string = '';
   @State collectionEditBusy: boolean = false;
@@ -638,6 +653,7 @@ struct Index {
   // A busy auth/DB/sync operation no longer drops the network-resume event.
   // Coalesce to a single pending event, not a periodic retry loop.
   private onObservationAuthChanged(): void {
+    this.clearCollectionViews();
     this.clearProgressCandidates();
     this.resetSearchAccount();
     this.viewport.clear();
@@ -1614,7 +1630,7 @@ struct Index {
   private onMovieViewChanged(): void { if (this.pageVisible && !this.selectedMedia && this.tab==='progress' && this.mediaMode==='movie' && this.progressMode==='next') { this.onPresentationChanged(); } }
   private onCalendarViewChanged(): void { if (this.pageVisible && !this.selectedMedia && this.tab==='progress' && this.mediaMode==='show' && this.progressMode==='calendar') { this.onPresentationChanged(); } }
   private onMovieCalendarViewChanged(): void { if (this.pageVisible && !this.selectedMedia && this.tab==='progress' && this.mediaMode==='movie' && this.progressMode==='calendar') { this.onPresentationChanged(); } }
-  private onCollectionViewChanged(): void { if (this.pageVisible && !this.selectedMedia && this.tab==='library') { this.onPresentationChanged(); } }
+  private onCollectionViewChanged(): void { if (!this.modeBusy) { this.captureCollectionView(); } if (this.pageVisible && !this.selectedMedia && this.tab==='library') { this.onPresentationChanged(); } }
   private onDetailViewChanged(): void { if (this.pageVisible && this.selectedMedia) { this.onPresentationChanged(); } }
   private onDiscoverViewChanged(): void { if (this.pageVisible && !this.selectedMedia && this.tab==='discover') { this.onPresentationChanged(); } }
   private onSearchViewChanged(): void { if (this.searchActive()) { this.onPresentationChanged(); } }
@@ -3216,6 +3232,7 @@ struct Index {
   }
 
   private clearCloud(): void {
+    this.clearCollectionViews();
     this.movieTitleOrder.clear();this.movieAllTitleOrder.clear();this.showCollectionTitleOrder.clear();this.movieCollectionTitleOrder.clear();
     this.clearProgressCandidates();
     this.resetSearchAccount();
@@ -5559,7 +5576,7 @@ struct Index {
         LazyForEach(this.movieRowsSource, (row: PersonalLibraryRow) => {
           ListItem() {
             Row({ space: 8 }) {
-              this.posterImage(row.media, 54, 81)
+              this.posterImage(row.media, 80, 120)
               Column({ space: 4 }) {
                 Text(this.displayTitle(row.media)).width('100%').onClick(() => { this.openDetail(row.media); })
                 this.showProgressActions(row.media)
@@ -5814,6 +5831,12 @@ struct Index {
     this.collectionGenreDraft = this.collectionOptions.genres.join(',');
     this.collectionNetworkDraft = this.collectionOptions.networks.join(',');
   }
+  private async toggleCollectionGenre(slug:string):Promise<void>{
+    await this.editCollectionOptions('genre',toggleCollectionSelection(this.collectionOptions.genres,[slug]).join(','));
+  }
+  private async toggleCollectionNetwork(group:CollectionNetworkGroup):Promise<void>{
+    await this.editCollectionOptions('network',toggleCollectionSelection(this.collectionOptions.networks,group.channels).join(','));
+  }
   private async editCollectionOptions(key: string,value: string): Promise<void> {
     const settings = this.settings; const kind = this.mediaMode; const section = this.collectionFilter;
     if (!settings || this.collectionEditBusy || !['mine','queue','hidden'].includes(section)) { return; }
@@ -6030,6 +6053,7 @@ struct Index {
   private chooseCollection(filter: string): void {
     if (this.collectionFilter !== filter) {
       this.collectionOptionsOpen = false;
+      this.collectionSearchOpen = false;
       this.resetCollection();
       this.collectionFilter = filter;
       this.collectionQuery = '';
@@ -6053,10 +6077,10 @@ struct Index {
 
   @Builder
   collectionFilterButton(label: string, value: string) {
-    Button(label).layoutWeight(1).fontSize(13)
-      .backgroundColor(this.collectionFilter === value ? $r('app.color.showly_accent') : $r('app.color.showly_muted_surface'))
-      .fontColor(this.collectionFilter === value ? $r('app.color.showly_on_accent') : $r('app.color.showly_text'))
-      .onClick(() => { this.chooseCollection(value); })
+    Column({space:3}) {
+      Text(label).fontSize(13).fontColor(this.collectionFilter===value?$r('app.color.showly_accent'):$r('app.color.showly_secondary'))
+      Divider().strokeWidth(2).color(this.collectionFilter===value?$r('app.color.showly_accent'):$r('app.color.showly_muted_surface'))
+    }.layoutWeight(1).height(36).justifyContent(FlexAlign.Center).onClick(()=>{this.chooseCollection(value);})
   }
 
   @Builder
@@ -6067,6 +6091,11 @@ struct Index {
           if (this.presentationStatus) { Text(this.presentationStatus).fontSize(12).width('100%') }
       Row({ space: 8 }) {
         Text('收藏').fontSize(25).fontWeight(FontWeight.Bold).layoutWeight(1)
+        Button(this.collectionSearchOpen?'关闭搜索':'搜索').fontSize(12).onClick(()=>{
+          this.collectionSearchOpen=!this.collectionSearchOpen;
+          if(!this.collectionSearchOpen){this.collectionQuery='';this.resetCollection();}
+          this.captureCollectionView();
+        })
         Button('列表').fontSize(12).onClick(() => { this.chooseCollection('lists'); })
       }.width('100%')
       this.librarySyncNotice()
@@ -6096,20 +6125,27 @@ struct Index {
           this.collectionStatusButton('待核实', 'unclassified')
         }.width('100%')
       }
+      if(this.collectionSearchOpen || this.collectionQuery.length>0){
       TextInput({ placeholder: this.mediaMode === 'show' ? '搜索收藏剧集' : '搜索收藏电影', text: this.collectionQuery })
         .onChange((value: string) => {
           this.collectionQuery = value;
           this.resetCollection();
         }).onSubmit(() => { if (this.collectionGrid) { this.loadCollectionPosters(); } })
+      }
       if (this.collectionFilter !== 'other') { this.collectionRuleControls() }
       if (this.collectionRuleStatus) { Text(this.collectionRuleStatus).fontSize(12).width('100%') }
       if (this.collectionFilter === 'hidden') { Text('仅本机隐藏，不删除历史、不写入 Trakt。').fontSize(12).width('100%') }
       if (this.presentationRevision>=0 && this.collectionFilter === 'mine' && this.collectionPage === 1 && !this.collectionQuery.trim() && this.recentCollectionRows().length) {
         Text('最近添加（已记录时间）').fontSize(17).fontWeight(FontWeight.Medium).width('100%')
-        ForEach(this.recentCollectionRows(), (row: PersonalLibraryRow) => {
-          Text(this.displayTitle(row.media)).fontSize(13).width('100%').onClick(() => { this.openDetail(row.media); })
-            .onVisibleAreaChange([0], (visible: boolean, ratio: number) => { this.viewportChanged(row.media,0,[],visible && ratio > 0,'library','','recent:' + row.media.id); })
-        }, (row: PersonalLibraryRow) => 'recent:' + row.media.id + ':' + this.displayTitle(row.media))
+        Flex({wrap:FlexWrap.Wrap,justifyContent:FlexAlign.SpaceBetween}){
+          ForEach(this.recentCollectionRows(), (row: PersonalLibraryRow) => {
+            Row({space:8}){
+              this.posterImage(row.media,80,120)
+              Text(this.displayTitle(row.media)).fontSize(13).maxLines(3).layoutWeight(1)
+            }.width('48%').padding({bottom:8}).onClick(()=>{this.openDetail(row.media);})
+              .onVisibleAreaChange([0], (visible: boolean, ratio: number) => { this.viewportChanged(row.media,0,[],visible && ratio > 0,'library','','recent:' + row.media.id); })
+          }, (row: PersonalLibraryRow) => 'recent:' + row.media.id + ':' + this.displayTitle(row.media)+':'+this.artwork(row.media))
+        }.width('100%')
       }
       if (this.collectionSummary.key === this.collectionDisplayKey()) {
         if (!this.collectionSummary.total && !this.cloudBusy && !this.localBusy) { Text('此分类暂无影视。').fontSize(13).width('100%') }
@@ -6119,14 +6155,11 @@ struct Index {
         Button(this.collectionGrid ? '切换文字列表' : '切换海报网格').layoutWeight(1)
           .onClick(() => {
             this.collectionGrid = !this.collectionGrid;
+            this.captureCollectionView();
             this.scheduleLazyRows();
             if (this.collectionGrid) { this.loadCollectionPosters(); }
           })
-        if (this.collectionGrid) {
-          Button(this.collectionBusy ? '加载中…' : '加载本页海报').layoutWeight(1)
-            .enabled(!this.collectionBusy && !this.setupBusy && !!this.clientId)
-            .onClick(() => { this.loadCollectionPosters(); })
-        }
+        if (this.collectionGrid && this.collectionBusy) { Text('加载中…').fontSize(12) }
       }.width('100%')
       if (this.collectionGrid && this.collectionStatus) { Text(this.collectionStatus).fontSize(12) }
       }
@@ -6176,12 +6209,29 @@ struct Index {
         Button(this.collectionOptions.descending ? '降序' : '升序').layoutWeight(1).fontSize(12)
           .onClick(() => { this.editCollectionOptions('direction',''); })
       }.width('100%')
-      Text('类型（英文分类 slug，逗号分隔，回车保存；留空清除）').fontSize(12).width('100%')
+      Text('类型').fontSize(13).width('100%')
+      Flex({wrap:FlexWrap.Wrap}){
+        ForEach(COLLECTION_GENRES,(genre:CollectionGenreOption)=>{
+          Button(genre.label).fontSize(12).margin(2).enabled(!this.collectionEditBusy)
+            .backgroundColor(this.collectionOptions.genres.includes(genre.slug)?$r('app.color.showly_accent'):$r('app.color.showly_muted_surface'))
+            .fontColor(this.collectionOptions.genres.includes(genre.slug)?$r('app.color.showly_on_accent'):$r('app.color.showly_text'))
+            .onClick(()=>{this.toggleCollectionGenre(genre.slug);})
+        },(genre:CollectionGenreOption)=>genre.slug)
+      }.width('100%')
+      Text('自定义类型（英文 slug，回车保存）').fontSize(12).width('100%')
       TextInput({ text: this.collectionGenreDraft, placeholder: '如 drama,comedy' })
         .onChange((value: string) => { this.collectionGenreDraft = value; })
         .onSubmit(() => { this.editCollectionOptions('genre',this.collectionGenreDraft); })
       if (this.mediaMode === 'show') {
-        Text('播出平台（Trakt 平台原名，逗号分隔，回车保存）').fontSize(12).width('100%')
+        Text('电视网').fontSize(13).width('100%')
+        Flex({wrap:FlexWrap.Wrap}){
+          ForEach(COLLECTION_NETWORK_GROUPS,(group:CollectionNetworkGroup)=>{
+            Button(group.name).fontSize(12).margin(2).enabled(!this.collectionEditBusy)
+              .backgroundColor(group.channels.every((channel:string)=>this.collectionOptions.networks.includes(channel))?$r('app.color.showly_accent'):$r('app.color.showly_muted_surface'))
+              .fontColor($r('app.color.showly_text')).onClick(()=>{this.toggleCollectionNetwork(group);})
+          },(group:CollectionNetworkGroup)=>group.name)
+        }.width('100%')
+        Text('自定义频道（Trakt 原名，回车保存）').fontSize(12).width('100%')
         TextInput({ text: this.collectionNetworkDraft, placeholder: '如 Netflix,HBO' })
           .onChange((value: string) => { this.collectionNetworkDraft = value; })
           .onSubmit(() => { this.editCollectionOptions('network',this.collectionNetworkDraft); })
@@ -6249,7 +6299,6 @@ struct Index {
               Text(businessLibraryLabel(row)).fontSize(12).width('100%')
               this.showProgressActions(row.media)
             }.layoutWeight(1).onClick(() => { this.openDetail(row.media); })
-            Button('详情').fontSize(12).onClick(() => { this.openDetail(row.media); })
             if (!this.isHidden(row.media) && row.media.kind !== 'show' && this.canEditLibrary()) {
               Button(row.watched ? '撤销已看' : '标记已看').fontSize(12)
                 .enabled(this.ready && !this.saving && !this.cloudBusy && !this.syncBusy)
@@ -6448,12 +6497,11 @@ struct Index {
     if (this.modeBusy || this.selectedMedia || (mode !== 'show' && mode !== 'movie') || mode === this.mediaMode) { return; }
     this.modeBusy = true;
     try {
+      this.captureCollectionView();
       this.mediaMode = normalizeMode(mode);
+      this.restoreCollectionView();
       this.restoreDiscoverOptions();
       this.progressMode = 'next';
-      this.collectionFilter = 'mine';
-      this.collectionQuery = '';
-      this.collectionStatusFilter = 'all';
       this.nextPage = 1;
       this.movieProgressPage = 1;
       this.showCalendarMode = 'future';

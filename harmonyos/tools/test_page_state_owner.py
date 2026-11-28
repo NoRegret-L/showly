@@ -11,14 +11,28 @@ with tempfile.TemporaryDirectory() as tmp:
 interface DataChangeListener { onDataReloaded():void; onDataAdd(i:number):void; onDataDelete(i:number):void; onDataMove(i:number,j:number):void; onDataChange(i:number):void; }
 interface IDataSource { totalCount():number; getData(i:number):unknown; registerDataChangeListener(l:DataChangeListener):void; unregisterDataChangeListener(l:DataChangeListener):void; }
 """)
-    subprocess.run(["tsc","--strict","--target","ES2020","--module","commonjs","arkui.d.ts","PageStateOwner.ts"],cwd=work,check=True)
+    subprocess.run(["tsc","--strict","--target","ES2020","--module","commonjs","arkui.d.ts","PageStateOwner.ts","CollectionViewOwner.ts"],cwd=work,check=True)
     (work/"test.cjs").write_text("""
 const assert=require('node:assert/strict');
 const {PageStateOwner,PageWorkSet,PageSortJobs}=require('./PageStateOwner');
 const {planListDiff}=require('./ListDiff');
+const {CollectionViewOwner,COLLECTION_NETWORK_GROUPS,COLLECTION_GENRES,toggleCollectionSelection}=require('./CollectionViewOwner');
 const {ConsumerReadFlight}=require('./ReadFlight');
 (async()=>{
  for(const size of [393,10000]){
+  const showView=new CollectionViewOwner(),movieView=new CollectionViewOwner();
+  for(let i=0;i<100;i++){
+   assert(showView.update('queue','show '+i,'watching',false,true));
+   assert(!showView.update('queue','show '+i,'watching',false,true));
+   assert.equal(movieView.snapshot().revision,0);
+   const snap=showView.snapshot();snap.query='mutated';assert.equal(showView.snapshot().query,'show '+i);
+  }
+  assert.equal(showView.snapshot().revision,100);showView.clear();assert.equal(showView.snapshot().query,'');
+  const hbo=COLLECTION_NETWORK_GROUPS.find(x=>x.name==='HBO');assert(hbo.channels.includes('Max'));
+  assert.deepEqual(toggleCollectionSelection(['custom'],hbo.channels),['custom',...hbo.channels]);
+  assert.deepEqual(toggleCollectionSelection(['custom',...hbo.channels],hbo.channels),['custom']);
+  assert.equal(COLLECTION_GENRES.length,16);
+  console.log(size+' collection view: 100 independent state transitions, snapshot copies, exact network group selection passed');
   const pages=new PageWorkSet(),owners=new Map();
   for(const page of ['show','movie','calendar','movieCalendar','libraryShow','libraryMovie','discover','search']){
    const owner=new PageStateOwner(row=>[row.id]);owners.set(page,owner);pages.register(page,owner.work);
@@ -164,3 +178,8 @@ assert "pages.register('libraryShow',this.showCollectionRowsSource.work)" in pag
 assert "pages.register('libraryMovie',this.movieCollectionRowsSource.work)" in page
 assert "LazyForEach(this.showCollectionRowsSource" in page and "LazyForEach(this.movieCollectionRowsSource" in page
 assert "this.releaseCollectionOwner(this.mediaMode==='movie'?'show':'movie')" in page
+
+assert "this.captureCollectionView();" in page and "this.restoreCollectionView();" in page
+assert "COLLECTION_NETWORK_GROUPS" in page and "COLLECTION_GENRES" in page
+assert "if(this.collectionSearchOpen || this.collectionQuery.length>0)" in page
+assert "this.posterImage(row.media,80,120)" in page
