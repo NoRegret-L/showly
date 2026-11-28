@@ -38,7 +38,7 @@ export function archiveImportRows(items:ArchiveItem[],ledgers:ArchiveLedger[],st
   const blocked=new Set<string>(),local=new Set<string>(state.hidden.map((r:HiddenEntry)=>r.media.id));
   for(const row of ledgers){if(row.remove&&!local.has(row.id)){blocked.add(row.id);}}
   const result:HiddenEntry[]=[];
-  for(const [id,rows] of archiveIndex(items)){if(!blocked.has(id)){let newest=rows[0].entry;for(const r of rows){if(r.entry.at>newest.at){newest=r.entry;}}result.push(newest);}}
+  archiveIndex(items).forEach((rows:ArchiveItem[],id:string):void=>{if(!blocked.has(id)){let newest=rows[0].entry;for(const r of rows){if(r.entry.at>newest.at){newest=r.entry;}}result.push(newest);}});
   return result;
 }
 
