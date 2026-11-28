@@ -48,8 +48,9 @@ function ensureCurrent(session: TraktSession): void {
   }
 }
 
-export async function readSyncAccount(session: TraktSession): Promise<SyncAccount> {
-  ensureCurrent(session);
+export async function readSyncAccount(session: TraktSession, readPermit?: () => boolean): Promise<SyncAccount> {
+  const check = (): void => { if (readPermit) { if (!readPermit()) { throw new Error('Account session changed'); } } else { ensureCurrent(session); } };
+  check();
   const request = http.createHttp();
   try {
     const response = await request.request('https://api.trakt.tv/users/settings', {
@@ -58,7 +59,7 @@ export async function readSyncAccount(session: TraktSession): Promise<SyncAccoun
         'trakt-api-key': session.clientId, 'Authorization': 'Bearer ' + session.token },
       expectDataType: http.HttpDataType.STRING
     });
-    ensureCurrent(session);
+    check();
     if (response.responseCode !== 200 || typeof response.result !== 'string') {
       throw new Error('Account verification HTTP ' + response.responseCode);
     }

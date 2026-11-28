@@ -63,8 +63,8 @@ interface Page {
 export type ShowProgress = RemoteShowObservation;
 export type CloudLibrary = RemoteLibraryObservation;
 
-function ensureCurrent(session: TraktSession): void {
-  if (!traktAuth.isCurrent(session.clientId, session.generation)) {
+function ensureCurrent(session: TraktSession, readPermit?: () => boolean): void {
+  if (readPermit ? !readPermit() : !traktAuth.isCurrent(session.clientId, session.generation)) {
     throw new Error('Trakt session changed or expired');
   }
 }
@@ -72,8 +72,8 @@ function ensureCurrent(session: TraktSession): void {
 export async function readActivity(session: TraktSession): Promise<string> {
   return (await readActivityVersions(session)).all;
 }
-export async function readActivityVersions(session: TraktSession): Promise<ObservationVersions> {
-  ensureCurrent(session);
+export async function readActivityVersions(session: TraktSession, readPermit?: () => boolean): Promise<ObservationVersions> {
+  ensureCurrent(session,readPermit);
   const req = http.createHttp();
   try {
     const res = await req.request('https://api.trakt.tv/sync/last_activities', {
@@ -82,7 +82,7 @@ export async function readActivityVersions(session: TraktSession): Promise<Obser
         'trakt-api-key': session.clientId, 'Authorization': 'Bearer ' + session.token },
       expectDataType: http.HttpDataType.STRING
     });
-    ensureCurrent(session);
+    ensureCurrent(session,readPermit);
     if (res.responseCode !== 200 || typeof res.result !== 'string') {
       throw new Error('Trakt activity HTTP ' + res.responseCode);
     }
@@ -103,8 +103,8 @@ export async function readActivityVersions(session: TraktSession): Promise<Obser
   }
 }
 
-async function readPage(session: TraktSession, path: string, page: number): Promise<Page> {
-  ensureCurrent(session);
+async function readPage(session: TraktSession, path: string, page: number, readPermit?: () => boolean): Promise<Page> {
+  ensureCurrent(session,readPermit);
   const req = http.createHttp();
   try {
     const res = await req.request('https://api.trakt.tv/' + path +
@@ -114,7 +114,7 @@ async function readPage(session: TraktSession, path: string, page: number): Prom
         'trakt-api-key': session.clientId, 'Authorization': 'Bearer ' + session.token },
       expectDataType: http.HttpDataType.STRING
     });
-    ensureCurrent(session);
+    ensureCurrent(session,readPermit);
     if (res.responseCode !== 200 || typeof res.result !== 'string') {
       throw new Error('Trakt library HTTP ' + res.responseCode);
     }
@@ -138,13 +138,13 @@ async function readPage(session: TraktSession, path: string, page: number): Prom
   }
 }
 
-async function readAll(session: TraktSession, path: string, allowed?: () => boolean): Promise<SyncItem[]> {
+async function readAll(session: TraktSession, path: string, allowed?: () => boolean, readPermit?: () => boolean): Promise<SyncItem[]> {
   if (allowed && !allowed()) { throw new Error('Read group stopped'); }
-  const first = await readPage(session, path, 1);
+  const first = await readPage(session, path, 1,readPermit);
   const result: SyncItem[] = [...first.items];
   for (let page = 2; page <= first.pages; page++) {
     if (allowed && !allowed()) { throw new Error('Read group stopped'); }
-    const next = await readPage(session, path, page);
+    const next = await readPage(session, path, page,readPermit);
     if (next.pages !== first.pages || next.total !== first.total || next.items.length === 0) {
       throw new Error('Library changed while reading; retry');
     }
@@ -262,10 +262,10 @@ export async function readPartRatings(session:TraktSession,kind:string,activity:
   });
   ensureCurrent(session);return result;
 }
-async function readObservationCollections(session: TraktSession, mask: number = 15): Promise<SyncItem[][]> {
+async function readObservationCollections(session: TraktSession, mask: number = 15, readPermit?: () => boolean): Promise<SyncItem[][]> {
   let failure: Error | undefined;
   const read = async (path: string): Promise<SyncItem[]> => {
-    try { return await readAll(session,path,() => !failure); }
+    try { return await readAll(session,path,() => !failure && (!readPermit || readPermit()),readPermit); }
     catch (error) { if (!failure) { failure = error as Error; } return []; }
   };
   // The four existing independent domains overlap their I/O; each still
@@ -277,7 +277,7 @@ async function readObservationCollections(session: TraktSession, mask: number = 
     (mask & 8) !== 0 ? read('sync/watchlist/shows') : Promise.resolve<SyncItem[]>([])
   ]);
   if (failure) { throw failure; }
-  ensureCurrent(session);
+  ensureCurrent(session,readPermit);
   return groups;
 }
 export async function readCloudLibrary(session: TraktSession): Promise<CloudLibrary> {
@@ -324,14 +324,14 @@ function observationFromGroups(session: TraktSession, groups: SyncItem[][], afte
 
 // Incremental READ observation only. Caller must supply an account-verified
 // prior snapshot; both activity fences and complete collection validation remain.
-export async function readCloudLibraryIncremental(session: TraktSession, prior?: CloudLibrary): Promise<CloudLibrary> {
-  const before = await readActivityVersions(session);
+export async function readCloudLibraryIncremental(session: TraktSession, prior?: CloudLibrary, readPermit?: () => boolean): Promise<CloudLibrary> {
+  const before = await readActivityVersions(session,readPermit);
   let mask = prior && prior.queueDates !== undefined && prior.movieDetails !== undefined ?
     observationCollectionMask(prior.versions,before,movieSourcesValid(prior)) : 15;
   if (!prior || prior.generation !== session.generation) { mask = 15; }
-  const groups = await readObservationCollections(session,mask);
-  const after = await readActivityVersions(session);
-  ensureCurrent(session);
+  const groups = await readObservationCollections(session,mask,readPermit);
+  const after = await readActivityVersions(session,readPermit);
+  ensureCurrent(session,readPermit);
   if (before.all !== after.all || before.movies !== after.movies || before.shows !== after.shows ||
       before.watchedShows !== after.watchedShows || before.queuedShows !== after.queuedShows ||
       before.watchedMovies !== after.watchedMovies || before.queuedMovies !== after.queuedMovies) {

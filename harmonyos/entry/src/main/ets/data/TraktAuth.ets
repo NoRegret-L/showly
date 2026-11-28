@@ -3,7 +3,7 @@ import { cryptoFramework } from '@kit.CryptoArchitectureKit';
 import { util } from '@kit.ArkTS';
 import { http } from '@kit.NetworkKit';
 import { TRAKT_REDIRECT_URI } from '../config/TraktConfig';
-import { loadRefresh, saveRefresh, removeRefresh, tryVaultLock, releaseVaultLock } from './TokenVault';
+import { loadRefresh, saveRefresh, removeRefresh, tryVaultLock, releaseVaultLock, clearBackgroundGrant, BackgroundGrant, newBackgroundGrantId, readBackgroundGrant, writeBackgroundGrant } from './TokenVault';
 
 interface PendingLogin {
   state: string;
@@ -92,6 +92,25 @@ class TraktAuth {
     return this.session(clientId)?.generation === generation;
   }
 
+  // The foreground must verify the UUID before calling this. No refresh
+  // token is duplicated and no grant is created on automatic renewal.
+  setBackgroundRead(clientId: string, uuid: string, enabled: boolean, renew: boolean = false): boolean {
+    const lease = tryVaultLock();
+    if (!lease) { return false; }
+    try {
+      if (!enabled) { clearBackgroundGrant(); return true; }
+      const session = this.session(clientId);
+      if (!session || !uuid) { return false; }
+      const old = readBackgroundGrant();
+      if (renew && (!old || old.uuid !== uuid || old.clientId !== clientId)) { return false; }
+      const id = old && old.uuid === uuid && old.clientId === clientId ? old.id : newBackgroundGrantId();
+      const grant: BackgroundGrant = {uuid:uuid,clientId:clientId,token:session.token,expiresAt:this.expiresAt,id:id};
+      writeBackgroundGrant(grant);
+      return true;
+    } catch (error) { return false; }
+    finally { releaseVaultLock(lease); }
+  }
+
   private status(message: string): void {
     AppStorage.setOrCreate<string>('traktAuthStatus', message);
     AppStorage.setOrCreate<boolean>('traktAuthBusy', this.busy);
@@ -102,6 +121,12 @@ class TraktAuth {
     if (this.busy || clientId.length === 0) {
       return;
     }
+    // A new login cannot inherit a previous account's background consent.
+    const revokeLease = tryVaultLock();
+    if (!revokeLease) { this.status('后台核对正在进行，请稍后授权。'); return; }
+    try { clearBackgroundGrant(); }
+    catch (error) { this.status('无法撤销旧后台授权，未开始登录。'); return; }
+    finally { releaseVaultLock(revokeLease); }
     const generation: number = ++this.generation;
     this.clientId = clientId;
     this.busy = true;
@@ -278,6 +303,7 @@ class TraktAuth {
         if (response.responseCode === 400 && typeof response.result === 'string') {
           const failure = JSON.parse(response.result) as OAuthFailure;
           if (failure.error === 'invalid_grant') {
+            clearBackgroundGrant();
             removeRefresh();
             this.accessToken = '';
             this.expiresAt = 0;
@@ -331,6 +357,7 @@ class TraktAuth {
     const lease = tryVaultLock();
     if (!lease) { this.status('授权正在处理，请稍后断开。'); return false; }
     try {
+      clearBackgroundGrant();
       removeRefresh();
     } catch (error) {
       this.status('无法删除安全存储中的授权，请解锁设备后重试。');
