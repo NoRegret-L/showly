@@ -1,0 +1,67 @@
+name: HarmonyOS Hvigor cold performance pair
+on:
+  push:
+    branches: [harmonyos-bootstrap]
+    paths: ['.github/workflows/harmonyos-hvigor-performance-probe.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  pair:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        order: [default-first, performance-first]
+    env:
+      GH_TOKEN: ${{ github.token }}
+      ORDER: ${{ matrix.order }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+          sparse-checkout: harmonyos
+      - name: Prepare verified streaming SDK
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/verified-sdk"
+          mkdir "$dir"
+          cd "$dir"
+          file=ohos-sdk-linux-amd64.tar.gz
+          gh release download 6.1.1.280 --repo ErBWs/ohos-sdk --pattern "$file.a?" --pattern "$file.sha256"
+          digest="$(awk 'NR==1 {print $1}' "$file.sha256")"
+          [[ "$digest" =~ ^[a-fA-F0-9]{64}$ ]]
+          actual="$(cat "$file.aa" "$file.ab" | sha256sum | cut -d' ' -f1)"
+          test "$actual" = "$digest"
+          cat "$file.aa" "$file.ab" | pigz -dc | tar -xf -
+          echo "$dir/command-line-tools/bin" >> "$GITHUB_PATH"
+          echo "$dir/command-line-tools/tool/node/bin" >> "$GITHUB_PATH"
+          echo "DEVECO_SDK_HOME=$dir/command-line-tools/sdk" >> "$GITHUB_ENV"
+          echo "HOS_SDK_HOME=$dir/command-line-tools/sdk" >> "$GITHUB_ENV"
+      - name: Compare independent cold builds
+        run: |
+          set -euo pipefail
+          if [[ "$ORDER" == default-first ]]; then modes=(default performance); else modes=(performance default); fi
+          for mode in "${modes[@]}"; do
+            git clean -fdx -- harmonyos
+            (cd harmonyos
+             ohpm install --all
+             flags=()
+             if [[ "$mode" == performance ]]; then flags+=(--optimization-strategy=performance); fi
+             start=$(date +%s%N)
+             /usr/bin/time -v hvigorw assembleHap --mode module -p module=entry@default -p product=default -p buildMode=debug --no-daemon "${flags[@]}"
+             echo "$mode native cold nanoseconds=$(( $(date +%s%N)-start ))" | tee -a "$GITHUB_STEP_SUMMARY"
+             hap="$(find entry/build -type f -name '*.hap' -print -quit)"
+             test -s "$hap"; cp "$hap" "$RUNNER_TEMP/$mode.hap")
+          done
+          python3 - "$RUNNER_TEMP/default.hap" "$RUNNER_TEMP/performance.hap" <<'PY'
+          import sys,zipfile,hashlib
+          def manifest(path):
+              with zipfile.ZipFile(path) as z:
+                  assert z.testzip() is None
+                  return {n:hashlib.sha256(z.read(n)).hexdigest() for n in z.namelist() if not n.endswith('/')}
+          a,b=map(manifest,sys.argv[1:])
+          assert a==b, sorted(k for k in a.keys()|b.keys() if a.get(k)!=b.get(k))
+          print('Default/performance native HAP entries equivalent')
+          PY

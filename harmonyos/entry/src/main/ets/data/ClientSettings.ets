@@ -1,3 +1,4 @@
+import { WatchOptions,validWatchOptions } from '../model/AvailabilityRules';
 import { validCollectionRecentAmount, CollectionSpoilers, defaultCollectionSpoilers } from '../model/CollectionViewOwner';
 import { preferences } from '@kit.ArkData';
 import { DiscoverOptions, defaultDiscover, validDiscoverOptions } from '../model/DiscoverRules';
@@ -18,6 +19,8 @@ export class ClientSettings {
     const value = this.storage.getSync('client_id', '');
     return typeof value === 'string' ? value : '';
   }
+  loadWatchOptions():WatchOptions{try{const raw=this.storage.getSync('watch_options','');const value=JSON.parse(typeof raw==='string'?raw:'') as WatchOptions;if(validWatchOptions(value)){return value;}}catch(error){}return {enabled:false,region:'us'};}
+  async saveWatchOptions(value:WatchOptions):Promise<void>{if(!validWatchOptions(value)){throw new Error('Invalid watch options');}await this.storage.put('watch_options',JSON.stringify(value));await this.storage.flush();}
   loadLanguage(): string { return this.storage.getSync('presentation_language', 'zh') === 'original' ? 'original' : 'zh'; }
   async saveLanguage(language: string): Promise<void> {
     if (language !== 'zh' && language !== 'original') { throw new Error('Invalid language'); }

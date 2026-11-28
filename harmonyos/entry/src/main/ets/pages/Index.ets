@@ -1,3 +1,7 @@
+import { WatchOptions } from '../model/AvailabilityRules';
+import { WatchSettings } from './WatchSettings';
+import { StreamingSection } from './StreamingSection';
+import { MovieSeriesSection } from './MovieSeriesSection';
 import { RatingEditor } from './RatingEditor';
 import { RatingTarget,RatingState,RatingRecord } from '../model/RatingRules';
 import { openRatings } from '../data/RatingsRepository';
@@ -562,6 +566,8 @@ struct Index {
   @State advancedSync: boolean = false;
   @State libraryNotice: string = '';
   private settings?: ClientSettings;
+  @State watchOptions:WatchOptions={enabled:false,region:'us'};
+  @State watchCredentialVersion:number=0;
   @StorageLink('traktAuthStatus') authStatus: string = '尚未登录 Trakt';
   @StorageLink('traktAuthBusy') @Watch('onRecoveryGateChanged') authBusy: boolean = false;
   @StorageLink('traktSignedIn') @Watch('onObservationAuthChanged') signedIn: boolean = false;
@@ -671,6 +677,7 @@ struct Index {
       this.collectionRecentAmount=this.settings.loadCollectionRecentAmount();
       this.restoreDiscoverOptions();
       this.presentationLanguage = this.settings.loadLanguage();
+      this.watchOptions=this.settings.loadWatchOptions();
       this.progressPrefs = this.settings.loadProgress();
       this.progressWatchMode=this.settings.loadProgressWatchMode();this.progressEpisodeHidden=this.settings.loadProgressEpisodeHidden();
       this.progressRatingHidden=this.settings.loadProgressRatingHidden();this.progressTapReveal=this.settings.loadProgressTapReveal();
@@ -7012,6 +7019,8 @@ struct Index {
         spoilers:this.detailUi.spoilers,ratingRevealed:this.detailUi.ratingRevealed,descriptionRevealed:this.detailUi.descriptionRevealed,
         onTranslate:()=>{this.translateDetail(item);},onToggle:(field:string)=>{this.toggleDetailSpoiler(item,field);},onReveal:(field:string)=>{this.revealDetail(field);}})
       ForEach([JSON.stringify([this.currentSearchAccount(),item.id,this.detailRevision])],(_key:string)=>{
+        if(this.watchOptions.enabled){ForEach([this.watchOptions.region+':'+this.watchCredentialVersion],(_regionKey:string)=>{StreamingSection({item:item,client:this.clientId,region:this.watchOptions.region,version:this.watchCredentialVersion})},(k:string)=>k)}
+        if(item.kind==='movie'){MovieSeriesSection({item:item,client:this.clientId,language:this.presentationLanguage,repository:this.presentation,member:(movie:Media)=>{const r=this.detailLibraryRow(movie);return r?.watched?'已观看':r?.queued?'待看':'未收藏';},onOpen:(movie:Media)=>{this.openRelatedDetail(movie);}})}
         DetailPeopleSection({item:item,client:this.clientId,scope:this.currentSearchAccount(),repository:this.presentation,cacheDir:this.context().cacheDir,language:this.presentationLanguage,members:()=>{const ids=new Set<string>();for(const row of this.personalLibrary()){if(isPersonalMember(row)){ids.add(row.media.id);}}return ids;},onOpen:(work:Media)=>{this.openRelatedDetail(work);}})
         DetailRelatedSection({item:item,client:this.clientId,scope:this.currentSearchAccount(),cacheDir:this.context().filesDir,repository:this.presentation,
           hiddenKey:this.hiddenVersion('show'),onOpen:(related:Media)=>{this.openRelatedDetail(related);}})
@@ -7270,6 +7279,7 @@ struct Index {
               this.themeButton('深色', 'dark')
             }.width('100%')
             Text(this.themeStatus).fontSize(12)
+            WatchSettings({options:this.watchOptions,onChange:(value:WatchOptions)=>{this.watchOptions=value;},onCredential:(version:number)=>{this.watchCredentialVersion=version;}})
             this.backupView()
             this.updateView()
             Text('非官方应用，使用 Trakt，但未获 Trakt 认可或认证。')
