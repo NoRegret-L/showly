@@ -7,3 +7,5 @@ Baseline Build 97 6c36c35. Reuse Android export runners and Trakt API types/rout
 - SDK Probe #13 all three jobs passed, candidate digest a5c35345fabd99562f0ed2fe1020525f712a52c9ff10d7d3ad3860b85f29581a; 18.17s remote ready. Branch cache may be inaccessible; keep fallback. No empirical hyperparameters.
 
 CI #155: 34/34 historical regression and native HAP build passed. The fixed six-DDL assertion was replaced with exact schema identity plus mapping rollback/reopen tests. Explicit reviewed rating choices supersede only unsent intents, and a matching current value clears a stale unsent intent transactionally. Foreground manual queue and title lanes now inherit the manual cancellation signal; advanced batch selection requires recorded watch time.
+
+Probe #14 independently restored its exact same-branch archive in 19.850 seconds, verified its digest and full HAP entry equivalence at 18ba896. Pin that candidate to test the corrected source 311eba1 (application sources changed since proof; native build and full fallback remain required). No release/tag rewrite.
