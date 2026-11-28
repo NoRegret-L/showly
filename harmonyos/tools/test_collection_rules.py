@@ -88,8 +88,10 @@ console.log('Collection member, hidden isolation, real transition dates, filters
 page=(root/"pages"/"Index.ets").read_text()
 settings=(root/"data"/"ClientSettings.ets").read_text()
 library=(root/"data"/"TraktLibrary.ets").read_text()
-assert "LazyForEach(this.collectionRowsSource" in page
-assert "this.collectionRowsSource.replace([], [], [])" in page
+assert "LazyForEach(this.showCollectionRowsSource" in page and "LazyForEach(this.movieCollectionRowsSource" in page
+assert page.count("this.clearCollectionOwners();") >= 2
+assert "owner.memo.clear();owner.allMemo.clear();owner.replace([],[],[]);" in page
+assert "this.releaseCollectionOwner('show');this.releaseCollectionOwner('movie');" in page
 assert "this.collectionScope === this.currentProgressScope()" in page
 assert "collectionMembers(this.personalLibrary()" in page
 progress = page.split("  private async prepareProgressCandidates(", 1)[1].split("  private progressData(", 1)[0]
