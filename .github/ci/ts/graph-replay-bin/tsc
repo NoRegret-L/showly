@@ -1,0 +1,29 @@
+#!/usr/bin/env python3
+"""Replay only independently verified exact compiler inputs; all tests still run."""
+import hashlib,json,os,pathlib,re,shutil,subprocess,sys
+sys.path.insert(0,str(pathlib.Path(__file__).resolve().parents[1]))
+from graph_identity import identity
+args=sys.argv[1:]
+real=os.environ["SHOWLY_REAL_TSC"]
+root=pathlib.Path(os.environ["SHOWLY_GRAPH_REPLAY"])
+prefix=["--strict","--target","ES2020","--module","commonjs"]
+roots=args[len(prefix):]
+cwd=pathlib.Path.cwd()
+def main():
+    if args[:len(prefix)]!=prefix or not roots or not all(re.fullmatch(r"[A-Za-z0-9_.-]+\.ts",r) for r in roots) or (cwd/"tsconfig.json").exists() or any(p.is_dir() for p in cwd.iterdir()) or any(cwd.glob("*.js")):
+        print("GRAPH_REPLAY_FALLBACK",flush=True)
+        return subprocess.call([real,*args])
+    sources={p.name:p.read_bytes() for p in cwd.glob("*.ts")}
+    dest=root/identity(sources,roots)
+    if not (dest/"manifest.json").is_file():
+        print("GRAPH_REPLAY_FALLBACK",flush=True)
+        return subprocess.call([real,*args])
+    manifest=json.loads((dest/"manifest.json").read_text())
+    if not manifest: raise RuntimeError("Empty verified output")
+    for name,digest in manifest.items():
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+\.js",name) or hashlib.sha256((dest/name).read_bytes()).hexdigest()!=digest:
+            raise RuntimeError("Replay integrity failure")
+    for name in manifest: shutil.copyfile(dest/name,cwd/name)
+    print("GRAPH_REPLAY_HIT",flush=True)
+    return 0
+sys.exit(main())

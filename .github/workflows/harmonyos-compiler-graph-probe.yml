@@ -6,6 +6,9 @@ on:
       - '.github/workflows/harmonyos-compiler-graph-probe.yml'
       - '.github/ci/ts/graph-bin/**'
       - '.github/ci/ts/compare_graph.py'
+      - '.github/ci/ts/graph-replay-bin/**'
+      - '.github/ci/ts/graph_identity.py'
+      - '.github/ci/ts/compare_test_runs.py'
       - 'harmonyos/entry/src/main/ets/config/BuildInfo.ets'
   workflow_dispatch:
 permissions:
@@ -27,10 +30,19 @@ jobs:
           export SHOWLY_GRAPH_CAPTURE="$RUNNER_TEMP/ts-graph"
           mkdir -p "$SHOWLY_GRAPH_CAPTURE"
           export PATH="$GITHUB_WORKSPACE/.github/ci/ts/graph-bin:$GITHUB_WORKSPACE/.github/ci/ts/node_modules/.bin:$PATH"
-          python3 harmonyos/tools/run_regressions.py
+          python3 harmonyos/tools/run_regressions.py | tee "$RUNNER_TEMP/independent.log"
       - name: Measure compatible union graphs and verify emitted bytes
         run: |
           set -euo pipefail
           export SHOWLY_REAL_TSC="$GITHUB_WORKSPACE/.github/ci/ts/node_modules/.bin/tsc"
           export SHOWLY_GRAPH_CAPTURE="$RUNNER_TEMP/ts-graph"
+          export SHOWLY_GRAPH_REPLAY="$RUNNER_TEMP/ts-replay"
           python3 .github/ci/ts/compare_graph.py | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Execute the full historical suite using verified shared compiler outputs
+        run: |
+          set -euo pipefail
+          export SHOWLY_REAL_TSC="$GITHUB_WORKSPACE/.github/ci/ts/node_modules/.bin/tsc"
+          export SHOWLY_GRAPH_REPLAY="$RUNNER_TEMP/ts-replay"
+          export PATH="$GITHUB_WORKSPACE/.github/ci/ts/graph-replay-bin:$GITHUB_WORKSPACE/.github/ci/ts/node_modules/.bin:$PATH"
+          python3 harmonyos/tools/run_regressions.py | tee "$RUNNER_TEMP/replay.log"
+          python3 .github/ci/ts/compare_test_runs.py "$RUNNER_TEMP/independent.log" "$RUNNER_TEMP/replay.log" | tee -a "$GITHUB_STEP_SUMMARY"

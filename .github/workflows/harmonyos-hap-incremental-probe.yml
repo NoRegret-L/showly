@@ -1,0 +1,73 @@
+name: HarmonyOS sparse checkout and same-source HAP incremental probe
+on:
+  push:
+    branches: [harmonyos-bootstrap]
+    paths: ['.github/workflows/harmonyos-hap-incremental-probe.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      matrix:
+        checkout: [full, sparse]
+    steps:
+      - name: Full source checkout
+        if: matrix.checkout == 'full'
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Native-only source checkout
+        if: matrix.checkout == 'sparse'
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+          sparse-checkout: harmonyos
+      - name: Verify native release sources
+        run: |
+          set -euo pipefail
+          python3 harmonyos/tools/preflight_detail.py
+          du -sh harmonyos
+      - name: Pinned SDK setup
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: ErBWs/setup-ohos
+          ref: 4dbb63025116eb6165ceac58a4bf47cbdc5ac721
+          path: .ci-sdk-setup
+          persist-credentials: false
+      - name: Prepare verified SDK
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          bash .ci-sdk-setup/setup.sh -v '6.1.1.280'
+      - name: Compare clean and same-source warm build
+        working-directory: harmonyos
+        run: |
+          set -euo pipefail
+          export DEVECO_SDK_HOME="$HOS_SDK_HOME"
+          ohpm install --all
+          start=$(date +%s)
+          hvigorw assembleHap --mode module -p module=entry@default -p product=default -p buildMode=debug --no-daemon
+          echo "cold_hap_seconds=$(( $(date +%s)-start ))" | tee -a "$GITHUB_STEP_SUMMARY"
+          hap="$(find entry/build -name '*.hap' -type f -print -quit)"
+          test -s "$hap"
+          cp "$hap" "$RUNNER_TEMP/cold.hap"
+          start=$(date +%s)
+          hvigorw assembleHap --mode module -p module=entry@default -p product=default -p buildMode=debug --no-daemon
+          echo "warm_hap_seconds=$(( $(date +%s)-start ))" | tee -a "$GITHUB_STEP_SUMMARY"
+          test -s "$hap"
+          python3 - "$RUNNER_TEMP/cold.hap" "$hap" <<'PY'
+          import hashlib,sys,zipfile
+          def entries(path):
+              with zipfile.ZipFile(path) as z:
+                  assert z.testzip() is None
+                  return {n:hashlib.sha256(z.read(n)).hexdigest() for n in z.namelist() if not n.endswith('/')}
+          a,b=map(entries,sys.argv[1:])
+          assert a==b, f"HAP payload differences: {sorted(k for k in set(a)|set(b) if a.get(k)!=b.get(k))}"
+          print(f"same-source HAP payload equality: {len(a)} entries")
+          PY
+          echo "Only same-workspace/same-source reuse; no persistent or cross-commit cache is authorized." >> "$GITHUB_STEP_SUMMARY"
